@@ -46,7 +46,7 @@ def resolve_config_path(_project_root: Path | None, name: str) -> Path:
 
 
 def load_json(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
 def resolve_form_id(project_root: Path | None = None, model: str | None = None, form_id: str | None = None) -> str:
@@ -229,19 +229,28 @@ def set_active_account(project_root: Path | None, account_name: str) -> None:
 def add_or_update_account(
     project_root: Path | None,
     account: str,
-    password: str,
-    captcha: str,
-    client_id: str,
+    password: str = "",
+    captcha: str = "",
+    client_id: str = "autoupdate-bridge",
     base: str | None = None,
 ) -> dict[str, Any]:
+    data = load_accounts_file(project_root)
+    existing = None
+    accounts = []
+    for item in data.get("accounts", []):
+        item_name = item.get("name") or item.get("account")
+        item_account = item.get("account")
+        if account in {item_name, item_account}:
+            existing = item
+            continue
+        accounts.append(item)
     entry = {
+        **(existing or {}),
         "name": account,
-        "account": account,
+        "account": (existing or {}).get("account") or account,
         "bridge": True,
         "updated_at": datetime.now().isoformat(),
     }
-    data = load_accounts_file(project_root)
-    accounts = [item for item in data.get("accounts", []) if (item.get("name") or item.get("account")) != account]
     accounts.append(entry)
     data["accounts"] = accounts
     data["active"] = account
@@ -265,7 +274,7 @@ def load_accounts_file(project_root: Path | None = None) -> dict[str, Any]:
     path = accounts_path(project_root)
     if not path.exists():
         return {"active": "", "accounts": []}
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
 def save_accounts_file(project_root: Path | None, data: dict[str, Any]) -> None:

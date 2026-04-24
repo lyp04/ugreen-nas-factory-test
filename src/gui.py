@@ -1421,69 +1421,37 @@ class FactoryTestGUI:
         dialog.grab_set()
         dialog.resizable(False, False)
 
-        account_var = tk.StringVar()
-        password_var = tk.StringVar()
-        captcha_var = tk.StringVar()
-        client_var = tk.StringVar()
-        captcha_path = self.project_root / "state" / "captcha_login.jpg"
+        account_var = tk.StringVar(value=self.form_account_var.get().strip() or "自动录表系统")
 
         frame = ttk.Frame(dialog, padding=12)
         frame.grid(row=0, column=0, sticky=tk.NSEW)
         frame.columnconfigure(1, weight=1)
 
-        ttk.Label(frame, text="账号").grid(row=0, column=0, sticky=tk.W, pady=4)
+        ttk.Label(frame, text="账号名").grid(row=0, column=0, sticky=tk.W, pady=4)
         ttk.Entry(frame, textvariable=account_var, width=32).grid(row=0, column=1, sticky=tk.EW, pady=4)
-        ttk.Label(frame, text="密码").grid(row=1, column=0, sticky=tk.W, pady=4)
-        ttk.Entry(frame, textvariable=password_var, show="*", width=32).grid(row=1, column=1, sticky=tk.EW, pady=4)
-        ttk.Label(frame, text="验证码").grid(row=2, column=0, sticky=tk.W, pady=4)
-        ttk.Entry(frame, textvariable=captcha_var, width=18).grid(row=2, column=1, sticky=tk.W, pady=4)
-        status_var = tk.StringVar(value="点击刷新验证码后，会打开验证码图片。")
-        ttk.Label(frame, textvariable=status_var).grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(4, 8))
-
-        def refresh_captcha() -> None:
-            try:
-                info = form_entry.get_login_captcha()
-                client_var.set(info["client"])
-                form_entry.save_captcha_image(info["captcha"], captcha_path)
-                try:
-                    os.startfile(captcha_path)
-                except Exception:
-                    pass
-                status_var.set(f"验证码已刷新：{captcha_path}")
-            except Exception as exc:
-                messagebox.showerror("验证码失败", str(exc), parent=dialog)
+        ttk.Label(
+            frame,
+            text="账号凭据由自动录表系统管理，这里只保存 factory-test 的显示/选择名称。",
+        ).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(4, 8))
 
         def save_account() -> None:
             account = account_var.get().strip()
-            password = password_var.get()
-            captcha = captcha_var.get().strip()
-            client_id = client_var.get().strip()
-            if not account or not password or not captcha or not client_id:
-                messagebox.showwarning("缺少信息", "请填写账号、密码、验证码，并先刷新验证码。", parent=dialog)
+            if not account:
+                messagebox.showwarning("缺少账号名", "请填写一个录表账号名。", parent=dialog)
                 return
             try:
-                entry = form_entry.add_or_update_account(
-                    self.project_root,
-                    account=account,
-                    password=password,
-                    captcha=captcha,
-                    client_id=client_id,
-                )
+                entry = form_entry.add_or_update_account(self.project_root, account=account)
                 self._refresh_form_accounts()
                 self.form_account_var.set(str(entry.get("name") or account))
                 messagebox.showinfo("账号已保存", f"当前录表账号：{self.form_account_var.get()}", parent=dialog)
                 dialog.destroy()
             except Exception as exc:
-                messagebox.showerror("登录失败", str(exc), parent=dialog)
-                refresh_captcha()
+                messagebox.showerror("保存失败", str(exc), parent=dialog)
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=4, column=0, columnspan=2, sticky=tk.EW)
-        ttk.Button(buttons, text="刷新验证码", command=refresh_captcha).pack(side=tk.LEFT, padx=(0, 6))
+        buttons.grid(row=2, column=0, columnspan=2, sticky=tk.EW)
         ttk.Button(buttons, text="保存并切换", command=save_account).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(buttons, text="取消", command=dialog.destroy).pack(side=tk.LEFT)
-        refresh_captcha()
-
     def _validate_form_settings(self) -> bool:
         if not self.form_entry_enabled:
             self.auto_form_entry_var.set(False)

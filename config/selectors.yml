@@ -1,0 +1,229 @@
+# All DOM selectors for UGOS Pro Web UI.
+# Priority when filling: stable attributes > stable text > semantic class names.
+
+# -----------------------------------------------------------------------------
+# First-time setup wizard
+# -----------------------------------------------------------------------------
+setup_wizard:
+  device_name_input: 'input[type="text"]'
+  agree_checkboxes: 'input.ivu-checkbox-input'
+  page1_next_button: 'button.next-step-btn'
+  admin_username_input: 'input[type="text"]'
+  admin_password_inputs: 'input[type="password"]'
+  page2_next_button: 'button.next-step-btn'
+  skip_phone_link: '.jump-btn'
+  skip_phone_confirm_button: '.ivu-modal-footer .ivu-btn-primary'
+  update_mode_radios: 'input.ivu-radio-input'
+  start_system_init_button: 'button.complete-btn, button.ivu-btn-primary:has-text("开始系统初始化"), button.ivu-btn-primary:has-text("开始初始化")'
+  desktop_ready_body: 'body.lang-zh-CN'
+
+# -----------------------------------------------------------------------------
+# Best-effort desktop overlays after setup
+# -----------------------------------------------------------------------------
+post_setup:
+  top_right_notice_close: 'a.ivu-notice-close'
+  welcome_start_tutorial_button: 'button.ivu-btn-primary:has-text("开始教学")'
+  tutorial_skip_button: 'button.cancel-btn:has-text("跳过")'
+  goto_storage_button: 'button.ivu-btn-primary:has-text("前往")'
+  desktop_marker_app_actions: '.action.ug-win-close'
+
+# -----------------------------------------------------------------------------
+# Login flow
+# -----------------------------------------------------------------------------
+login:
+  username_input: 'input[type="text"]'
+  password_input: 'input[type="password"]'
+  submit_button: 'button.ivu-btn-primary'
+  post_login_marker: 'body.lang-zh-CN'
+
+# -----------------------------------------------------------------------------
+# Desktop app launchers and iframe anchors
+# -----------------------------------------------------------------------------
+desktop_launchers:
+  apps:
+    ctlmgr: 'div[moduleid="com.ugreen.ctlmgr"] .click-region, .click-region[title="控制面板"]'
+    storagemgr: 'div[moduleid="com.ugreen.storagemgr"] .click-region, .click-region[title="存储管理"]'
+    taskmgr: 'div[moduleid="com.ugreen.taskmgr"] .click-region, .click-region[title="任务管理器"]'
+    filemgr: 'div[moduleid="com.ugreen.filemgr"] .click-region, .click-region[title="文件管理"]'
+  frames:
+    ctlmgr: 'iframe[name="ctlmgr"]'
+    storagemgr: 'iframe[name="storagemgr"]'
+    taskmgr: 'iframe[name="taskmgr"]'
+    filemgr: 'iframe[name="filemgr0"], iframe[name*="filemgr"], iframe[src*="/filemgr/"]'
+
+# -----------------------------------------------------------------------------
+# In-app navigation once the desktop has launched the iframe app
+# -----------------------------------------------------------------------------
+capture_nav:
+  ctlmgr_update_menu: 'text=更新与还原'
+  ctlmgr_network_menu: 'text=网络设置'
+  ctlmgr_network_connections_tab: '.ivu-tabs-tab:has-text("网络连接")'
+  ctlmgr_hardware_menu: 'text=硬件与电源'
+  ctlmgr_hardware_general_tab: '.ivu-tabs-tab:has-text("常规")'
+  storagemgr_storage_menu: '.menu-item-name:text-is("存储管理")'
+  storagemgr_pool_tab: 'text=存储池与空间'
+  taskmgr_overview_tab: '.arco-tabs-tab:has-text("总览")'
+  taskmgr_disk_tab: '.arco-tabs-tab:has-text("硬盘")'
+
+provision_nav:
+  ctlmgr_file_service_menu: 'text=文件服务'
+  ctlmgr_smb_tab: '.ivu-tabs-tab:has-text("SMB")'
+  storagemgr_storage_menu: '.menu-item-name:text-is("存储管理")'
+  storagemgr_pool_tab: 'text=存储池与空间'
+  filemgr_shared_folder_tree: 'div.tree-item.root[title="共享文件夹"]'
+
+# -----------------------------------------------------------------------------
+# Provisioning selectors used before transfer screenshots
+# -----------------------------------------------------------------------------
+provision:
+  smb_enable_checkbox: 'label.ivu-checkbox-wrapper:has-text("启用SMB服务") input.ivu-checkbox-input'
+  smb_apply_button: '.page-footer .ivu-btn-primary'
+  storagemgr_empty_create_button: 'button:has-text("立即创建")'
+  storagemgr_header_create_button: '.created-storage .ivu-btn-dropdown-model'
+  storagemgr_header_create_pool_item: '.ivu-dropdown-item-box:visible:has-text("存储池")'
+  storagemgr_next_button: 'button:visible:has-text("下一步")'
+  storagemgr_create_button: 'button:visible:has-text("创建")'
+  storagemgr_delete_all_button: 'button:visible:has-text("删除所有数据")'
+  modal_password_input: 'section[data-transfer="true"] input[type="password"]'
+  modal_confirm_button: 'section[data-transfer="true"] .modal-footer button:has-text("确定")'
+  filemgr_empty_create_button: 'button.create-folder'
+  filemgr_quick_add_button: '.quick-operation-box .operate-drop-btn'
+  filemgr_quick_add_share_item: '.arco-dropdown-option:visible:has-text("新建共享文件夹")'
+  filemgr_share_modal: '.arco-modal .folder-share-create'
+  filemgr_share_name_input: '.folder-share-create input[placeholder="文件夹名称"], .folder-share-create #name input[type="text"]'
+  filemgr_share_storage_select: '.folder-share-create .storage-select .arco-select-view-single'
+  filemgr_share_storage_option: '.arco-trigger-popup .arco-select-option'
+  filemgr_share_create_button: '.arco-modal-footer button:has-text("创建")'
+  filemgr_acl_modal: '.arco-modal .set-acl'
+  filemgr_acl_confirm_button: '.set-acl .footer button:has-text("确定")'
+  filemgr_intro_modal: '.arco-modal-container .guide-modal-body'
+  filemgr_intro_start_button: '.arco-modal-container button.play-start'
+  filemgr_self_folder_section: 'section.open-self-folder'
+  filemgr_self_folder_ignore: 'section.open-self-folder .ignore'
+
+# -----------------------------------------------------------------------------
+# Cleanup selectors used before the next factory reset / reflash
+# -----------------------------------------------------------------------------
+cleanup:
+  pool_container: '[id^="poolCompool"]'
+  pool_menu_button: '.more-tools .ivu-dropdown-rel'
+  pool_delete_item: '.ivu-dropdown-item-box:visible:has-text("删除")'
+  delete_confirm_button: '.ivu-modal-footer .ivu-btn-primary:has-text("确认删除")'
+  modal_password_input: 'section[data-transfer="true"] input[type="password"]'
+  modal_confirm_button: 'section[data-transfer="true"] .modal-footer button:has-text("确定")'
+
+# -----------------------------------------------------------------------------
+# Restore factory settings after capture
+# -----------------------------------------------------------------------------
+factory_reset:
+  restore_tab: '.ivu-tabs-tab:has-text("系统还原和重置")'
+  restore_button: 'button.reduction-restart-red-button'
+  first_modal_root: 'section[data-transfer="true"] .ivu-modal:has(.ivu-checkbox-input)'
+  first_modal_acknowledge_checkbox: 'section[data-transfer="true"] .ivu-modal:has(.ivu-checkbox-input) .ivu-checkbox-input'
+  first_modal_confirm_button: 'section[data-transfer="true"] .ivu-modal:has(.ivu-checkbox-input) .ivu-modal-footer .ivu-btn-primary'
+  password_modal_root: 'section[data-transfer="true"] .ivu-modal:has(input[type="password"])'
+  password_input: 'section[data-transfer="true"] input[type="password"]'
+  password_submit_button: 'section[data-transfer="true"] .ivu-modal-footer .ivu-btn-primary'
+
+# -----------------------------------------------------------------------------
+# Target pages to screenshot
+# -----------------------------------------------------------------------------
+capture_pages:
+  system_update:
+    app: ctlmgr
+    nav_path: ["ctlmgr_update_menu"]
+    landmark: '.system-status-new:has-text("已经是最新版本")'
+    key_values:
+      latest_status: '.system-status-new:has-text("已经是最新版本")'
+      ugos_version: '.system-version:has-text("当前版本")'
+
+  network_interface:
+    app: ctlmgr
+    nav_path: ["ctlmgr_network_menu", "ctlmgr_network_connections_tab"]
+    landmark: '.connect-item:has(.title:has-text("LAN1"))'
+
+  storage_pool:
+    app: storagemgr
+    nav_path: ["storagemgr_storage_menu", "storagemgr_pool_tab"]
+    landmark: '#poolCompool1'
+    # Match pools by disk fingerprint (not slot index). UGOS assigns
+    # #poolCompool1/2 by creation order, which flips when the NAS is
+    # factory-reset and re-provisioned in a different sequence.
+    key_values:
+      hdd_pool_raid: '.storage-itemInfo:has-text("硬盘1、2、3、4")'
+      ssd_pool_raid: '.storage-itemInfo:has-text("M.2硬盘1、2")'
+
+  hdd_write:
+    app: taskmgr
+    nav_path: ["taskmgr_disk_tab"]
+    landmark: '.arco-tabs-tab-active:has-text("硬盘")'
+    transfer:
+      share: hdd
+      direction: upload
+
+  hdd_read:
+    app: taskmgr
+    nav_path: ["taskmgr_disk_tab"]
+    landmark: '.arco-tabs-tab-active:has-text("硬盘")'
+    transfer:
+      share: hdd
+      direction: download
+
+  ssd_write:
+    app: taskmgr
+    nav_path: ["taskmgr_disk_tab"]
+    landmark: '.arco-tabs-tab-active:has-text("硬盘")'
+    transfer:
+      share: ssd
+      direction: upload
+
+  ssd_read:
+    app: taskmgr
+    nav_path: ["taskmgr_disk_tab"]
+    landmark: '.arco-tabs-tab-active:has-text("硬盘")'
+    transfer:
+      share: ssd
+      direction: download
+
+  resource_monitor:
+    app: taskmgr
+    nav_path: ["taskmgr_overview_tab"]
+    landmark: '.details-content:has(.title:has-text("CPU温度"))'
+    key_values:
+      cpu_temp: '.details-content:has(.title:has-text("CPU温度")) .sub-title'
+      device_fan_rpm: '.details-content:has(.title:has-text("设备风扇")) .sub-title'
+
+  fan_control:
+    app: ctlmgr
+    nav_path: ["ctlmgr_hardware_menu", "ctlmgr_hardware_general_tab"]
+    landmark: '.hardware-list-item:has(.hardware-list-name:has-text("冷却风扇"))'
+    key_values:
+      fan_row: '.hardware-list-item:has(.hardware-list-name:has-text("冷却风扇"))'
+      settings_button: '.hardware-list-item:has(.hardware-list-name:has-text("冷却风扇")) button:has-text("设置")'
+      modal_root: '.fan-modal'
+      modal_title: '.ivu-modal-header-inner:has-text("冷却风扇设置")'
+      confirm_button: '.ivu-modal-footer .ivu-btn-primary:has-text("确定")'
+
+  fan_normal:
+    app: ctlmgr
+    nav_path: []
+    landmark: '.details-content:has(.title:has-text("设备风扇"))'
+    wait_after_mode_ms: 12000
+    key_values:
+      mode_selector: '.fan-modal .fan-modal-label:has-text("普通")'
+
+  fan_silent:
+    app: ctlmgr
+    nav_path: []
+    landmark: '.details-content:has(.title:has-text("设备风扇"))'
+    wait_after_mode_ms: 12000
+    key_values:
+      mode_selector: '.fan-modal .fan-modal-label:has-text("静音")'
+
+  fan_full_speed:
+    app: ctlmgr
+    nav_path: []
+    landmark: '.details-content:has(.title:has-text("设备风扇"))'
+    wait_after_mode_ms: 12000
+    key_values:
+      mode_selector: '.fan-modal .fan-modal-label:has-text("全速")'

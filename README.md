@@ -1,6 +1,6 @@
 # UGREEN NAS Factory Test
 
-UGREEN NAS 出厂测试工具。这个仓库只保留 NAS 初始化、系统更新、建池建共享、截图、传输测速、清理和恢复出厂相关流程；录表/内部系统/API 提交逻辑已拆出，不作为本仓库的一部分。
+UGREEN NAS 出厂测试工具。这个仓库保留 NAS 初始化、系统更新、建池建共享、截图、传输测速、清理和恢复出厂相关流程；自动录表通过桥接接口交给独立的 `ugreen-nas-autoupdate` 项目处理。
 
 ## 快速使用
 
@@ -31,6 +31,14 @@ powershell -ExecutionPolicy Bypass -File .\build-exe.ps1
 ## 本地运行资产
 
 仓库不跟踪运行产物、日志、截图、虚拟环境、PyInstaller 产物和大体积传输测试包。
+
+自动录表桥接默认查找：
+
+```text
+${USERPROFILE}\ugreen-nas-autoupdate
+```
+
+如果放在其他位置，请设置 `UGREEN_AUTOUPDATE_ROOT`。
 
 传输测速用文件默认在项目根目录查找：
 

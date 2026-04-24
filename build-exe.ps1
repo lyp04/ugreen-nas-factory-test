@@ -38,6 +38,7 @@ Write-Host "== 构建 EXE ==" -ForegroundColor Cyan
     --collect-all zeroconf `
     --hidden-import "src.cli" `
     --hidden-import "src.gui" `
+    --hidden-import "src.form_entry" `
     --hidden-import "src.flows.setup_wizard" `
     --hidden-import "src.flows.login" `
     --hidden-import "src.flows.capture" `
@@ -48,7 +49,7 @@ Write-Host "== 构建 EXE ==" -ForegroundColor Cyan
     --hidden-import "src.discovery.mdns_scanner" `
     --hidden-import "src.discovery.port_scanner" `
     --hidden-import "src.discovery.ugreen_broadcast" `
-    .\src\gui_no_form.py
+    .\src\gui.py
 
 if (-not $?) { Write-Error "PyInstaller 构建失败" }
 

@@ -13,8 +13,9 @@ from pathlib import Path
 import click
 from playwright.sync_api import sync_playwright
 
-FORM_ENTRY_ENABLED = False
-form_entry = None
+from . import form_entry
+
+FORM_ENTRY_ENABLED = True
 from .discovery import ugreen_broadcast
 from .discovery.discover import _looks_like_ugos, find_nas, find_nas_candidates, wait_until_ready
 from .flows import capture as capture_flow

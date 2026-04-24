@@ -9,4 +9,4 @@ if (-not (Test-Path ".venv\Scripts\python.exe")) {
     Write-Error "未找到 .venv，请先运行 .\install.ps1"
 }
 
-& .\.venv\Scripts\python.exe -m src.gui_no_form
+& .\.venv\Scripts\python.exe -m src.gui

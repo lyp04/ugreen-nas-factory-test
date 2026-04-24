@@ -16,13 +16,13 @@ from tkinter import messagebox, scrolledtext, ttk
 
 from loguru import logger
 
-FORM_ENTRY_ENABLED = False
+FORM_ENTRY_ENABLED = True
 
 if __package__ in {None, ""}:
     package_root = Path(__file__).resolve().parent.parent
     if str(package_root) not in sys.path:
         sys.path.insert(0, str(package_root))
-    form_entry = None
+    from src import form_entry
     from src.cli import (
         UNFLASHED_MESSAGE,
         UNFLASHED_TITLE,
@@ -47,7 +47,7 @@ if __package__ in {None, ""}:
         sn_tail,
     )
 else:
-    form_entry = None
+    from . import form_entry
     from .cli import (
         UNFLASHED_MESSAGE,
         UNFLASHED_TITLE,

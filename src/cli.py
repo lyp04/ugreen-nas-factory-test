@@ -492,6 +492,34 @@ def run_test(
                     report["captured"] = saved
                     report["captured_values"] = captured_values
 
+                    if auto_form_entry:
+                        _raise_if_cancelled(cancel_requested_cb)
+                        progress.set_stage("自动录表", status="running", nas_ip=ip)
+                        selected_grade = str(form_grade or report.get("form_grade") or "A").strip().upper()
+                        if resolve_form_grade_cb is not None:
+                            selected_grade = str(
+                                resolve_form_grade_cb(
+                                    {
+                                        "sn": sn,
+                                        "model": form_model,
+                                        "grade": selected_grade,
+                                    }
+                                )
+                                or selected_grade
+                            ).strip().upper()
+                        if selected_grade not in {"A", "B"}:
+                            selected_grade = "A"
+                        report["form_grade"] = selected_grade
+                        result = form_entry.submit_report(
+                            report,
+                            PROJECT_ROOT,
+                            model=form_model,
+                            grade=selected_grade,
+                            account_name=form_account_name,
+                        )
+                        report["form_result"] = result
+                        progress.complete_step("自动录表完成", nas_ip=ip, form_status=result.get("status"))
+
                     if cleanup_before_finish or factory_reset_before_finish:
                         browser_session, page = _ensure_browser_session(
                             pw=pw,

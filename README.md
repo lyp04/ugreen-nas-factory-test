@@ -62,3 +62,7 @@ python -m pip install -r requirements-dev.txt
 python -m pytest tests
 python -m src.cli --help
 ```
+
+## 生成说明
+
+由 Codex 生成。

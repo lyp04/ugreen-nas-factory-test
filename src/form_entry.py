@@ -100,6 +100,7 @@ def build_report_form_data(
     selected_grade = str(grade or form.get("default_grade") or "A").upper()
     retread_results = form.get("retread_results") or {}
     retread_result = retread_results.get(selected_grade) or retread_results.get(form.get("default_grade") or "A") or {}
+    active_relations = set(retread_result.get("relations") or [])
 
     captured = report.get("captured_values") or {}
     inputs = {}
@@ -113,6 +114,8 @@ def build_report_form_data(
     for item in form.get("upload_fields", []):
         field = item["field"]
         page_key = str(item.get("page_key") or "")
+        if item.get("random_source_dir") and field not in active_relations:
+            continue
         path = captured_paths.get(page_key) if page_key else None
         uploads[field] = {**item, "path": path}
 

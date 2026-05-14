@@ -88,6 +88,59 @@ def test_single_available_disk_uses_basic_when_confirmed() -> None:
     assert provision._pool_raid_candidates("RAID 0", selected_disk_count=1)[0] == "Basic"
 
 
+def test_m2_missing_prompt_aborts_without_retrying_pool_creation() -> None:
+    disks = [f"M.2\u786c\u76d8{index}" for index in range(1, 3)]
+    prompts: list[dict] = []
+
+    try:
+        provision._abort_m2_missing(
+            {"key": "ssd", "pool_name": "\u5b58\u50a8\u6c602"},
+            disks,
+            "RAID 0",
+            lambda prompt: prompts.append(prompt) or False,
+            "2800",
+        )
+    except provision.ProvisionAborted as exc:
+        assert "M.2" in str(exc)
+    else:
+        raise AssertionError("ProvisionAborted was not raised")
+
+    assert prompts
+    assert prompts[0]["m2_missing"] is True
+    assert prompts[0]["can_continue"] is False
+    assert prompts[0]["message"] == provision.M2_MISSING_MESSAGE
+
+
+def test_existing_pools_are_cleaned_before_provisioning(monkeypatch) -> None:
+    calls: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(
+        provision,
+        "_existing_pool_summaries",
+        lambda page, selectors: ["RAID 0 硬盘1、2 1.7TB"],
+    )
+    monkeypatch.setattr(
+        provision.cleanup_flow,
+        "run",
+        lambda page, selectors, admin: calls.append(("cleanup", admin)) or ["pool1"],
+    )
+
+    provision._cleanup_existing_pools_before_provisioning("page", {"selectors": True}, {"password": "pw"})
+
+    assert calls == [("cleanup", {"password": "pw"})]
+
+
+def test_no_existing_pools_skip_pre_provision_cleanup(monkeypatch) -> None:
+    monkeypatch.setattr(provision, "_existing_pool_summaries", lambda page, selectors: [])
+
+    def fail_cleanup(*_args, **_kwargs):
+        raise AssertionError("cleanup should not run")
+
+    monkeypatch.setattr(provision.cleanup_flow, "run", fail_cleanup)
+
+    provision._cleanup_existing_pools_before_provisioning("page", {}, {})
+
+
 def test_disk_shortage_can_abort_provisioning() -> None:
     disks = [f"M.2\u786c\u76d8{index}" for index in range(1, 3)]
 

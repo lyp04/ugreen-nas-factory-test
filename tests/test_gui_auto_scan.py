@@ -16,13 +16,13 @@ def _gui_for_output(tmp_path):
     return gui
 
 
-def test_existing_image_directory_blocks_auto_scan_by_sn(tmp_path) -> None:
+def test_existing_image_directory_does_not_block_auto_scan_by_sn(tmp_path) -> None:
     gui = _gui_for_output(tmp_path)
     image_dir = tmp_path / "HB670EE07251E54E" / "图片"
     image_dir.mkdir(parents=True)
     (image_dir / "HB670EE07251E54E_system_update_20260430_120004.png").write_bytes(b"png")
 
-    assert gui._has_completed_output_for_sn("E54E")
+    assert not gui._has_completed_output_for_sn("E54E")
 
 
 def test_success_report_blocks_auto_scan_by_sn_not_reused_ip(tmp_path) -> None:
@@ -44,6 +44,38 @@ def test_success_report_blocks_auto_scan_by_sn_not_reused_ip(tmp_path) -> None:
     assert gui._has_completed_output_for_sn("E54E")
     assert not gui._has_known_ip("192.168.0.214")
     assert not gui._has_known_ip("192.168.0.215")
+
+
+def test_auto_form_success_report_requires_successful_upload(tmp_path) -> None:
+    gui = _gui_for_output(tmp_path)
+    sn_root = tmp_path / "HB670EE07251E54E"
+    sn_root.mkdir()
+    (sn_root / "test_report.json").write_text(
+        json.dumps(
+            {
+                "status": "success",
+                "sn": "HB670EE07251E54E",
+                "auto_form_entry": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert not gui._has_completed_output_for_sn("E54E")
+
+    (sn_root / "test_report.json").write_text(
+        json.dumps(
+            {
+                "status": "success",
+                "sn": "HB670EE07251E54E",
+                "auto_form_entry": True,
+                "form_result": {"status": "already_submitted"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert gui._has_completed_output_for_sn("E54E")
 
 
 def test_failed_report_does_not_block_auto_scan(tmp_path) -> None:

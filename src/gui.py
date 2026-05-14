@@ -4,6 +4,7 @@ import os
 import ipaddress
 import json
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -116,12 +117,166 @@ class DeviceTask:
         return format_elapsed(self.elapsed_seconds)
 
 
+@dataclass(slots=True)
+class TimingSlice:
+    label: str
+    seconds: int
+
+
+LOG_TIME_RE = re.compile(r"^(\d{2}):(\d{2}):(\d{2})\s+\|")
+TIMING_COLORS = (
+    "#4e79a7",
+    "#f28e2b",
+    "#e15759",
+    "#76b7b2",
+    "#59a14f",
+    "#edc948",
+    "#b07aa1",
+    "#ff9da7",
+    "#9c755f",
+    "#bab0ab",
+)
+TIMING_MIN_VISIBLE_SECONDS = 20
+
+
 def format_elapsed(seconds: int) -> str:
     hours, remainder = divmod(max(0, seconds), 3600)
     minutes, secs = divmod(remainder, 60)
     if hours:
         return f"{hours:d}:{minutes:02d}:{secs:02d}"
     return f"{minutes:02d}:{secs:02d}"
+
+
+def build_timing_slices(logs: list[str]) -> list[TimingSlice]:
+    entries: list[tuple[int, str]] = []
+    day_offset = 0
+    previous_second: int | None = None
+    for raw in logs:
+        for line in str(raw or "").splitlines():
+            match = LOG_TIME_RE.match(line)
+            if not match:
+                continue
+            second = int(match.group(1)) * 3600 + int(match.group(2)) * 60 + int(match.group(3))
+            if previous_second is not None and second + day_offset < previous_second:
+                day_offset += 24 * 3600
+            absolute_second = second + day_offset
+            previous_second = absolute_second
+            entries.append((absolute_second, _log_message_text(line)))
+
+    if len(entries) < 2:
+        return []
+
+    durations: dict[str, int] = {}
+    current = "准备"
+    update_index = 0
+    active_update = False
+    for index, (second, message) in enumerate(entries[:-1]):
+        current, update_index, active_update = _timing_phase_after_message(
+            message,
+            current,
+            update_index,
+            active_update,
+        )
+        duration = max(0, entries[index + 1][0] - second)
+        if duration:
+            durations[current] = durations.get(current, 0) + duration
+
+    return [TimingSlice(label, seconds) for label, seconds in durations.items() if seconds > 0]
+
+
+def _compact_timing_slices(
+    slices: list[TimingSlice],
+    limit: int = 7,
+    min_visible_seconds: int = TIMING_MIN_VISIBLE_SECONDS,
+) -> list[TimingSlice]:
+    visible = [item for item in slices if item.seconds >= min_visible_seconds]
+    other_seconds = sum(item.seconds for item in slices if item.seconds < min_visible_seconds)
+    if len(visible) > limit:
+        ranked = sorted(visible, key=lambda item: item.seconds, reverse=True)
+        visible = ranked[: limit - 1]
+        other_seconds += sum(item.seconds for item in ranked[limit - 1 :])
+    if other_seconds > 0:
+        visible.append(TimingSlice("其他", other_seconds))
+    return visible
+
+
+def _log_message_text(line: str) -> str:
+    parts = line.split("|", 2)
+    return parts[2].strip() if len(parts) == 3 else line.strip()
+
+
+def _timing_phase_after_message(
+    message: str,
+    current: str,
+    update_index: int,
+    active_update: bool,
+) -> tuple[str, int, bool]:
+    if "Setup wizard ->" in message or "[Page " in message or "Setup page reports" in message:
+        return "首次设置", update_index, False
+    if "Setup wizard complete" in message or "Setup mode fallback" in message:
+        return "准备更新", update_index, False
+    if "Logging in at" in message and not active_update:
+        return "登录", update_index, False
+    if "Login succeeded" in message and not active_update:
+        return "准备更新", update_index, False
+
+    if "System update:" in message or "System update is ready" in message:
+        starts_update = any(
+            marker in message
+            for marker in (
+                "existing update/reboot screen detected",
+                "clicked; waiting for desktop to return",
+                "continuing update via",
+                "update notice is visible; continuing update",
+                "installation page is visible",
+            )
+        )
+        if starts_update and not active_update:
+            update_index += 1
+            active_update = True
+        if active_update:
+            current = f"更新{update_index}"
+        elif "download/update is still in progress" in message or "download started" in message:
+            current = "下载更新"
+        else:
+            current = "检查更新"
+
+        if any(
+            marker in message
+            for marker in (
+                "verifying latest status after update/reboot",
+                "update page now reports latest version",
+                "already latest",
+                "System update flow finished",
+            )
+        ):
+            active_update = False
+            current = "检查更新" if "latest version" not in message else "准备建池"
+        return current, update_index, active_update
+
+    if message.startswith("Provisioning:"):
+        return "建池共享", update_index, False
+    if any(
+        marker in message
+        for marker in (
+            "Capturing ",
+            "Captured ",
+            "Skipping existing ",
+            "hdd_write:",
+            "hdd_read:",
+            "ssd_write:",
+            "ssd_read:",
+            "transfer speed attempt",
+        )
+    ):
+        return "截图传输", update_index, False
+    if message.startswith("自动录表") or message.lower().startswith("form entry"):
+        return "自动录表", update_index, False
+    if "cleanup" in message.lower() or "factory reset" in message.lower() or "恢复出厂" in message:
+        return "收尾清理", update_index, False
+    if "次测试失败" in message or "retry" in message.lower():
+        return "重试等待", update_index, False
+    return current, update_index, active_update
 
 
 def sort_ip_strings(ips) -> list[str]:
@@ -146,6 +301,7 @@ UI_TEXT = {
         "select_device_log_sentence": "选择左侧设备查看右侧日志。",
         "no_logs": "该设备当前还没有日志。",
         "test_params": "测试参数",
+        "timing_analysis": "耗时分析",
         "sn_label": "SN/后4位:",
         "nas_ip_label": "NAS IP:",
         "or_label": "or",
@@ -189,6 +345,7 @@ UI_TEXT = {
         "select_device_log_sentence": "Select a device on the left to view logs.",
         "no_logs": "This device has no logs yet.",
         "test_params": "Test Parameters",
+        "timing_analysis": "Timing",
         "sn_label": "SN / Last 4:",
         "nas_ip_label": "NAS IP:",
         "or_label": "or",
@@ -232,6 +389,7 @@ UI_TEXT = {
         "select_device_log_sentence": "Selecciona un equipo a la izquierda para ver la bitácora.",
         "no_logs": "Este dispositivo aún no tiene registros.",
         "test_params": "Parámetros de prueba",
+        "timing_analysis": "Tiempos",
         "sn_label": "SN / últimos 4:",
         "nas_ip_label": "IP del NAS:",
         "or_label": "o",
@@ -360,6 +518,7 @@ class FactoryTestGUI:
         self.form_account_combo: ttk.Combobox | None = None
         self.device_tree: ttk.Treeview | None = None
         self.log_view: scrolledtext.ScrolledText | None = None
+        self.timing_canvas: tk.Canvas | None = None
         self.auto_scan_worker: threading.Thread | None = None
         self.auto_scan_after_id: str | None = None
 
@@ -404,8 +563,13 @@ class FactoryTestGUI:
         main.columnconfigure(0, weight=1)
         main.rowconfigure(1, weight=1)
 
-        controls = self._register_text("test_params", ttk.LabelFrame(main, text=self._t("test_params"), padding=12))
-        controls.grid(row=0, column=0, sticky=tk.EW)
+        top = ttk.Frame(main)
+        top.grid(row=0, column=0, sticky=tk.EW)
+        top.columnconfigure(0, weight=1)
+        top.columnconfigure(1, weight=0)
+
+        controls = self._register_text("test_params", ttk.LabelFrame(top, text=self._t("test_params"), padding=12))
+        controls.grid(row=0, column=0, sticky=tk.NSEW, padx=(0, 12))
         controls.columnconfigure(1, weight=1)
 
         input_frame = ttk.Frame(controls)
@@ -488,14 +652,6 @@ class FactoryTestGUI:
         self._register_text(
             "delete_account", ttk.Button(form_frame, text=self._t("delete_account"), command=self._on_delete_account)
         ).pack(side=tk.LEFT, padx=(0, 12))
-        self.auto_seed_previous_step_check = ttk.Checkbutton(
-            form_frame,
-            text=self._t("auto_seed_previous"),
-            variable=self.auto_seed_previous_step_var,
-        )
-        self._register_text("auto_seed_previous", self.auto_seed_previous_step_check)
-        self.auto_seed_previous_step_check.pack(side=tk.LEFT)
-
         button_row = 3
         if not self.form_entry_enabled:
             self.auto_form_entry_var.set(False)
@@ -510,6 +666,14 @@ class FactoryTestGUI:
         self.start_btn = ttk.Button(btn_frame, text=self._t("add_to_queue"), command=self._on_start_test)
         self._register_text("add_to_queue", self.start_btn)
         self.start_btn.pack(side=tk.LEFT, padx=(0, 6))
+        if self.form_entry_enabled:
+            self.auto_seed_previous_step_check = ttk.Checkbutton(
+                btn_frame,
+                text=self._t("auto_seed_previous"),
+                variable=self.auto_seed_previous_step_var,
+            )
+            self._register_text("auto_seed_previous", self.auto_seed_previous_step_check)
+            self.auto_seed_previous_step_check.pack(side=tk.LEFT, padx=(6, 12))
         self._register_text(
             "open_screenshot_dir", ttk.Button(btn_frame, text=self._t("open_screenshot_dir"), command=self._open_output)
         ).pack(side=tk.LEFT, padx=(0, 6))
@@ -522,6 +686,17 @@ class FactoryTestGUI:
         self.cancel_btn = ttk.Button(btn_frame, text=self._t("cancel_task"), command=self._on_cancel_task)
         self._register_text("cancel_task", self.cancel_btn)
         self.cancel_btn.pack(side=tk.LEFT)
+
+        timing_frame = self._register_text(
+            "timing_analysis",
+            ttk.LabelFrame(top, text=self._t("timing_analysis"), padding=8),
+        )
+        timing_frame.grid(row=0, column=1, sticky=tk.NSEW)
+        timing_frame.columnconfigure(0, weight=1)
+        timing_frame.rowconfigure(0, weight=1)
+        self.timing_canvas = tk.Canvas(timing_frame, width=320, height=152, highlightthickness=0)
+        self.timing_canvas.grid(row=0, column=0, sticky=tk.NSEW)
+        self._clear_timing_chart()
 
         content = ttk.Panedwindow(main, orient=tk.HORIZONTAL)
         content.grid(row=1, column=0, sticky=tk.NSEW, pady=(12, 0))
@@ -678,6 +853,7 @@ class FactoryTestGUI:
         task.logs.append(message)
         if task.task_id == self.selected_task_id:
             self._append_log(message)
+            self._refresh_timing_chart(task)
 
     def _handle_confirm_previous_step(self, event: dict) -> None:
         reply = event.get("reply")
@@ -725,6 +901,16 @@ class FactoryTestGUI:
         visible_display = visible or "\u65e0"
         missing = "\u3001".join(str(disk) for disk in event.get("missing_disks") or [])
         fallback = str(event.get("fallback_raid") or "")
+        if bool(event.get("m2_missing")):
+            messagebox.showerror(
+                str(event.get("title") or "M.2未插入"),
+                str(event.get("message") or "请确认是否插入固态硬盘"),
+            )
+            if isinstance(reply, dict):
+                reply["answer"] = False
+            if done is not None:
+                done.set()
+            return
         if not bool(event.get("can_continue", True)):
             messagebox.showerror(
                 "\u786c\u76d8\u672a\u8bc6\u522b",
@@ -841,7 +1027,7 @@ class FactoryTestGUI:
         for sn_root in output_root.iterdir():
             if not sn_root.is_dir() or not same_sn_identity(sn_root.name, normalized):
                 continue
-            if self._sn_output_has_images(sn_root) or self._sn_output_has_success_report(sn_root, normalized):
+            if self._sn_output_has_success_report(sn_root, normalized):
                 return True
         return False
 
@@ -856,7 +1042,13 @@ class FactoryTestGUI:
         if not report or str(report.get("status") or "").lower() != "success":
             return False
         report_sn = normalize_sn(str(report.get("sn") or ""))
-        return bool(report_sn and same_sn_identity(report_sn, sn))
+        if not (report_sn and same_sn_identity(report_sn, sn)):
+            return False
+        if bool(report.get("auto_form_entry")):
+            form_result = report.get("form_result") if isinstance(report.get("form_result"), dict) else {}
+            form_status = str(form_result.get("status") or "").lower()
+            return form_status in {"success", "already_submitted"}
+        return True
 
     def _read_report(self, report_path: Path) -> dict | None:
         try:
@@ -927,6 +1119,7 @@ class FactoryTestGUI:
         task.logs.append(line)
         if task.task_id == self.selected_task_id:
             self._append_log(line)
+            self._refresh_timing_chart(task)
 
     def _set_log_contents(self, text: str) -> None:
         if self.log_view is None:
@@ -944,6 +1137,82 @@ class FactoryTestGUI:
         self.log_view.insert(tk.END, msg)
         self.log_view.see(tk.END)
         self.log_view.configure(state=tk.DISABLED)
+
+    def _clear_timing_chart(self) -> None:
+        if self.timing_canvas is None:
+            return
+        self.timing_canvas.delete("all")
+        self.timing_canvas.create_text(
+            160,
+            76,
+            text="选择设备后显示耗时",
+            fill="#777777",
+            font=("Microsoft YaHei UI", 9),
+        )
+
+    def _refresh_timing_chart(self, task: DeviceTask) -> None:
+        if self.timing_canvas is None:
+            return
+        slices = build_timing_slices(task.logs)
+        canvas = self.timing_canvas
+        canvas.delete("all")
+        width = max(canvas.winfo_width(), int(canvas.cget("width") or 380))
+        height = max(canvas.winfo_height(), int(canvas.cget("height") or 152))
+        if not slices:
+            canvas.create_text(
+                width // 2,
+                height // 2,
+                text="等待更多日志生成耗时图",
+                fill="#777777",
+                font=("Microsoft YaHei UI", 9),
+            )
+            return
+
+        total = sum(item.seconds for item in slices)
+        display_slices = _compact_timing_slices(slices)
+        pie_size = min(112, height - 24)
+        pie_left = 12
+        pie_top = max(10, (height - pie_size) // 2)
+        start_angle = 90.0
+        for index, item in enumerate(display_slices):
+            extent = -360.0 * (item.seconds / total)
+            canvas.create_arc(
+                pie_left,
+                pie_top,
+                pie_left + pie_size,
+                pie_top + pie_size,
+                start=start_angle,
+                extent=extent,
+                fill=TIMING_COLORS[index % len(TIMING_COLORS)],
+                outline="white",
+            )
+            start_angle += extent
+        canvas.create_oval(pie_left, pie_top, pie_left + pie_size, pie_top + pie_size, outline="#eeeeee")
+        canvas.create_text(
+            pie_left + pie_size // 2,
+            pie_top + pie_size // 2,
+            text=format_elapsed(total),
+            fill="#333333",
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+
+        legend_x = pie_left + pie_size + 16
+        legend_y = 14
+        line_height = 18
+        for index, item in enumerate(display_slices[:7]):
+            y = legend_y + index * line_height
+            percent = item.seconds / total * 100
+            color = TIMING_COLORS[index % len(TIMING_COLORS)]
+            canvas.create_rectangle(legend_x, y + 3, legend_x + 10, y + 13, fill=color, outline=color)
+            text = f"{item.label} {format_elapsed(item.seconds)} {percent:.0f}%"
+            canvas.create_text(
+                legend_x + 16,
+                y + 8,
+                text=text,
+                anchor=tk.W,
+                fill="#333333",
+                font=("Microsoft YaHei UI", 8),
+            )
 
     def _output_root(self):
         output_dir = self.config.get("output_dir", "./screenshot")
@@ -1911,6 +2180,7 @@ class FactoryTestGUI:
             self.selected_task_id = None
             self.log_title_var.set(self._t("select_device_log"))
             self._set_log_contents(self._t("select_device_log_sentence"))
+            self._clear_timing_chart()
 
         self._refresh_summary()
         self._refresh_action_states()
@@ -1924,14 +2194,17 @@ class FactoryTestGUI:
         self._refresh_action_states()
         if self.selected_task_id is None:
             self._set_log_contents(self._t("select_device_log_sentence"))
+            self._clear_timing_chart()
             return
 
         task = self.devices.get(self.selected_task_id)
         if task is None:
             self._set_log_contents(self._t("select_device_log_sentence"))
+            self._clear_timing_chart()
             return
 
         self._set_log_contents("".join(task.logs) if task.logs else self._t("no_logs"))
+        self._refresh_timing_chart(task)
 
     def _refresh_log_title(self) -> None:
         if self.selected_task_id is None:

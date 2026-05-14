@@ -195,6 +195,7 @@ def run(
                         "capture_page_completed",
                         page_key=page_key,
                         screenshot=str(existing),
+                        values=(capture_values or {}).get(page_key) or {},
                         skipped=True,
                     )
                     if is_transfer_page and transfer_slot_held and not _next_page_is_transfer(page_keys, page_specs, index):
@@ -259,7 +260,13 @@ def run(
                         capture_values,
                     )
                 saved[page_key] = str(path)
-                _emit_capture_event(progress_cb, "capture_page_completed", page_key=page_key, screenshot=str(path))
+                _emit_capture_event(
+                    progress_cb,
+                    "capture_page_completed",
+                    page_key=page_key,
+                    screenshot=str(path),
+                    values=(capture_values or {}).get(page_key) or {},
+                )
                 if is_transfer_page and not _next_page_is_transfer(page_keys, page_specs, index):
                     if transfer_slot_context is not None:
                         release_page_key, release_share, release_direction = transfer_slot_context

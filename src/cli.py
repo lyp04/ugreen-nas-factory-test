@@ -81,6 +81,7 @@ POOL_CREATION_FAILURE_STAGE = "建池失败"
 UNFLASHED_TITLE = login_flow.UNFLASHED_TITLE
 UNFLASHED_MESSAGE = login_flow.UNFLASHED_MESSAGE
 MODEL_KEYS = {"2800", "4800", "4800Plus"}
+FORM_SUCCESS_STATUSES = {"success", "already_submitted"}
 
 
 class TaskCancelled(RuntimeError):
@@ -116,6 +117,64 @@ def _update_report_model(report: dict, sn: str, requested_model: str | None = No
     if requested_model:
         report["requested_form_model"] = requested_model
     return model
+
+
+def _read_report_file(report_path: Path) -> dict:
+    try:
+        data = json.loads(report_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _merge_resume_report(report: dict, previous: dict) -> None:
+    if not previous:
+        return
+    captured = previous.get("captured")
+    if isinstance(captured, dict):
+        report["captured"] = dict(captured)
+    captured_values = previous.get("captured_values")
+    if isinstance(captured_values, dict):
+        report["captured_values"] = {
+            str(page_key): dict(values)
+            for page_key, values in captured_values.items()
+            if isinstance(values, dict)
+        }
+    form_result = previous.get("form_result")
+    if isinstance(form_result, dict):
+        report["form_result"] = dict(form_result)
+    if previous.get("provisioned"):
+        report["provisioned"] = True
+    previous_status = str(previous.get("status") or "").strip()
+    if previous_status and previous_status != "success":
+        report["resumed_from_status"] = previous_status
+        if previous.get("current_stage"):
+            report["resumed_from_stage"] = previous.get("current_stage")
+
+
+def _form_result_is_success(report: dict) -> bool:
+    form_result = report.get("form_result")
+    if not isinstance(form_result, dict):
+        return False
+    return str(form_result.get("status") or "").lower() in FORM_SUCCESS_STATUSES
+
+
+def _has_resume_artifacts(report: dict) -> bool:
+    return bool(report.get("provisioned") or report.get("captured") or report.get("captured_values"))
+
+
+def _write_report_checkpoint(dirs: dict[str, Path], report: dict, stage: str | None = None) -> None:
+    if stage:
+        report["current_stage"] = stage
+    report["checkpoint_at"] = datetime.now().isoformat()
+    _write_json_atomic(dirs["base"] / "test_report.json", report)
+
+
+def _write_json_atomic(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    tmp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp_path.replace(path)
 
 
 def is_pool_creation_timeout_error(exc_or_message: object) -> bool:
@@ -267,6 +326,7 @@ def run_test(
     config, selectors = load_configs(PROJECT_ROOT)
     output_root = (PROJECT_ROOT / config["output_dir"]).resolve()
     dirs = session_dirs(output_root, sn)
+    previous_report = _read_report_file(dirs["base"] / "test_report.json")
     if setup_file_log:
         setup_logger(dirs["sn_root"], sn=sn)
 
@@ -290,7 +350,9 @@ def run_test(
         "model_source": _resolve_model_for_sn(sn, requested_form_model)[1],
         "form_grade": form_grade,
         "form_account_name": form_account_name,
+        "status": "running",
     }
+    _merge_resume_report(report, previous_report)
     if requested_form_model:
         report["requested_form_model"] = requested_form_model
     final_success_stage = "测试完成"
@@ -304,9 +366,13 @@ def run_test(
     device_lock_acquired = False
     reserved_ips: set[str] = set()
 
+    def checkpoint(stage: str | None = None) -> None:
+        _write_report_checkpoint(dirs, report, stage)
+
     with logger.contextualize(task_id=task_id or sn, device_sn=sn):
         _raise_if_cancelled(cancel_requested_cb)
         progress.set_stage("等待设备上线", status="running", nas_ip=nas_ip)
+        checkpoint("等待设备上线")
         try:
             ip, reserved_ips, discovered_sn = _resolve_ip_for_task(
                 sn,
@@ -338,6 +404,7 @@ def run_test(
             progress.set_stage("等待设备上线", status="running", nas_ip=ip)
             _wait_until_ready_cancelable(ip, port, config["network"]["service_ready_timeout"], cancel_requested_cb)
             progress.complete_step("设备已连接", nas_ip=ip)
+            checkpoint("设备已连接")
 
             _raise_if_cancelled(cancel_requested_cb)
 
@@ -420,6 +487,7 @@ def run_test(
                     form_model = _update_report_model(report, sn, requested_form_model)
                     logger.info(f"SN {sn} model resolved as {form_model} ({report.get('model_source')})")
                     progress.complete_step("初始化完成", nas_ip=ip, resolved_mode=resolved_mode)
+                    checkpoint("初始化完成")
 
                     progress.set_stage("检查系统更新", status="running", nas_ip=ip)
                     _raise_if_cancelled(cancel_requested_cb)
@@ -437,6 +505,7 @@ def run_test(
                             admin=config["admin"],
                             selectors=selectors,
                         )
+                    checkpoint("系统更新检查完成")
 
                     _raise_if_cancelled(cancel_requested_cb)
                     try:
@@ -470,13 +539,38 @@ def run_test(
                         config["admin"],
                         confirm_disk_shortage_cb=confirm_disk_shortage_cb,
                         model=form_model,
+                        reset_existing_pools=not _has_resume_artifacts(report),
                     )
+                    report["provisioned"] = True
                     progress.complete_step("共享目录已就绪", nas_ip=ip)
+                    checkpoint("共享目录已就绪")
 
                     _raise_if_cancelled(cancel_requested_cb)
-                    captured_values: dict[str, dict[str, str]] = {}
+                    captured_values: dict[str, dict[str, str]] = {
+                        str(page_key): dict(values)
+                        for page_key, values in (report.get("captured_values") or {}).items()
+                        if isinstance(values, dict)
+                    }
+                    report["captured_values"] = captured_values
+                    report["captured"] = dict(report.get("captured") or {})
                     transfer_config = dict(config.get("transfer") or {})
                     transfer_config["model"] = form_model or "2800"
+
+                    def capture_progress(event: dict) -> None:
+                        _handle_capture_progress(progress, event, cancel_requested_cb)
+                        if event.get("type") != "capture_page_completed":
+                            return
+                        page_key = str(event.get("page_key") or "")
+                        screenshot = str(event.get("screenshot") or "")
+                        if not page_key or not screenshot:
+                            return
+                        report.setdefault("captured", {})[page_key] = screenshot
+                        values = event.get("values")
+                        if isinstance(values, dict) and values:
+                            captured_values[page_key] = {str(key): str(value) for key, value in values.items()}
+                            report["captured_values"] = captured_values
+                        checkpoint(f"截图完成：{_page_label(page_key)}")
+
                     saved = capture_flow.run(
                         page,
                         nas_url,
@@ -486,39 +580,51 @@ def run_test(
                         dirs["screenshots"],
                         config["admin"],
                         transfer_config,
-                        progress_cb=lambda event: _handle_capture_progress(progress, event, cancel_requested_cb),
+                        progress_cb=capture_progress,
                         capture_values=captured_values,
                     )
                     report["captured"] = saved
                     report["captured_values"] = captured_values
+                    checkpoint("截图完成")
 
                     if auto_form_entry:
                         _raise_if_cancelled(cancel_requested_cb)
                         progress.set_stage("自动录表", status="running", nas_ip=ip)
-                        selected_grade = str(form_grade or report.get("form_grade") or "A").strip().upper()
-                        if resolve_form_grade_cb is not None:
-                            selected_grade = str(
-                                resolve_form_grade_cb(
-                                    {
-                                        "sn": sn,
-                                        "model": form_model,
-                                        "grade": selected_grade,
-                                    }
-                                )
-                                or selected_grade
-                            ).strip().upper()
-                        if selected_grade not in {"A", "B"}:
-                            selected_grade = "A"
-                        report["form_grade"] = selected_grade
-                        result = form_entry.submit_report(
-                            report,
-                            PROJECT_ROOT,
-                            model=form_model,
-                            grade=selected_grade,
-                            account_name=form_account_name,
-                        )
-                        report["form_result"] = result
+                        if _form_result_is_success(report):
+                            result = report["form_result"]
+                            logger.info(
+                                f"Auto form entry already completed in checkpoint: {result.get('status')}"
+                            )
+                        else:
+                            selected_grade = str(form_grade or report.get("form_grade") or "A").strip().upper()
+                            if resolve_form_grade_cb is not None:
+                                selected_grade = str(
+                                    resolve_form_grade_cb(
+                                        {
+                                            "sn": sn,
+                                            "model": form_model,
+                                            "grade": selected_grade,
+                                        }
+                                    )
+                                    or selected_grade
+                                ).strip().upper()
+                            if selected_grade not in {"A", "B"}:
+                                selected_grade = "A"
+                            report["form_grade"] = selected_grade
+                            result = form_entry.submit_report(
+                                report,
+                                PROJECT_ROOT,
+                                model=form_model,
+                                grade=selected_grade,
+                                account_name=form_account_name,
+                            )
+                            report["form_result"] = result
+                        if not _form_result_is_success(report):
+                            raise RuntimeError(
+                                f"自动录表未成功: {report.get('form_result')}"
+                            )
                         progress.complete_step("自动录表完成", nas_ip=ip, form_status=result.get("status"))
+                        checkpoint("自动录表完成")
 
                     if cleanup_before_finish or factory_reset_before_finish:
                         browser_session, page = _ensure_browser_session(
@@ -537,6 +643,7 @@ def run_test(
                         deleted = cleanup_flow.run(page, selectors, config["admin"])
                         report["deleted_pools"] = deleted
                         progress.complete_step("清理完成", nas_ip=ip)
+                        checkpoint("清理完成")
 
                         if factory_reset_before_finish:
                             progress.set_stage("恢复出厂设置", status="running", nas_ip=ip)
@@ -546,6 +653,7 @@ def run_test(
                             progress.complete_step("恢复出厂设置已触发", nas_ip=ip)
 
                     report["status"] = "success"
+                    report["current_stage"] = final_success_stage
                     progress.finish("success", final_success_stage, nas_ip=ip)
                 except TaskCancelled as exc:
                     logger.info(f"Test cancelled: {exc}")
@@ -568,33 +676,24 @@ def run_test(
                     raise
                 finally:
                     report["finished_at"] = datetime.now().isoformat()
-                    (dirs["base"] / "test_report.json").write_text(
-                        json.dumps(report, indent=2, ensure_ascii=False),
-                        encoding="utf-8",
-                    )
+                    _write_json_atomic(dirs["base"] / "test_report.json", report)
                     close_managed_context(browser_session)
                     _emit_browser_event(progress_cb, "browser_closed")
         except TaskCancelled as exc:
-            if "status" not in report:
+            if report.get("status") == "running":
                 report["status"] = "cancelled"
                 report["error"] = str(exc)
                 progress.finish("cancelled", "用户中断", nas_ip=ip or nas_ip, error=str(exc))
                 report["finished_at"] = datetime.now().isoformat()
-                (dirs["base"] / "test_report.json").write_text(
-                    json.dumps(report, indent=2, ensure_ascii=False),
-                    encoding="utf-8",
-                )
+                _write_json_atomic(dirs["base"] / "test_report.json", report)
             raise
         except Exception as exc:
-            if "status" not in report:
+            if report.get("status") == "running":
                 report["status"] = "failed"
                 report["error"] = str(exc)
                 progress.finish("failed", failure_stage_for_error(exc), nas_ip=ip or nas_ip, error=str(exc))
                 report["finished_at"] = datetime.now().isoformat()
-                (dirs["base"] / "test_report.json").write_text(
-                    json.dumps(report, indent=2, ensure_ascii=False),
-                    encoding="utf-8",
-                )
+                _write_json_atomic(dirs["base"] / "test_report.json", report)
             raise
         finally:
             if device_lock_acquired and device_lock is not None:
@@ -1063,6 +1162,7 @@ def _upgrade_task_sn(
     report.setdefault("input_sn", current_sn)
     report["sn"] = full_sn
     dirs = relocate_session_dirs(output_root, dirs, full_sn)
+    _merge_resume_report(report, _read_report_file(dirs["base"] / "test_report.json"))
     if setup_file_log:
         setup_logger(dirs["sn_root"], sn=full_sn)
     progress.update_sn(full_sn)

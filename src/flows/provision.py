@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 from playwright.sync_api import expect
 
+from . import cleanup as cleanup_flow
 from ..utils.app_guides import dismiss_arco_app_guides, dismiss_storage_guide_modal
 from ..utils.desktop import click_desktop_launcher, dismiss_desktop_overlays
 from ..utils.logger import logger
@@ -27,6 +28,8 @@ SHARE_NAME_CONFLICT_TEXT = "\u5b58\u5728\u540c\u540d\u6587\u4ef6\u5939"
 MODAL_CANCEL_TEXT = "\u53d6\u6d88"
 POOL_CREATE_WARNING_TEXT = "\u4e0d\u6ee1\u8db3\u521b\u5efa\u8981\u6c42"
 POOL_CREATE_WARNING_ACK_TEXT = "\u6211\u77e5\u9053\u4e86"
+M2_MISSING_TITLE = "M.2\u672a\u63d2\u5165"
+M2_MISSING_MESSAGE = "\u8bf7\u786e\u8ba4\u662f\u5426\u63d2\u5165\u56fa\u6001\u786c\u76d8"
 POOL_CREATE_WARNING_MODAL_SELECTOR = f'section.ivu-modal-default:has-text("{POOL_CREATE_WARNING_TEXT}")'
 POOL_CREATE_WARNING_ACK_SELECTOR = (
     f'section.ivu-modal-default:has-text("{POOL_CREATE_WARNING_TEXT}") '
@@ -59,6 +62,7 @@ def run(
     admin: dict,
     confirm_disk_shortage_cb: Callable[[dict], bool] | None = None,
     model: str | None = None,
+    reset_existing_pools: bool = True,
 ) -> None:
     dismiss_desktop_overlays(page, selectors, max_rounds=2, completion_wait_ms=0)
     desktop = selectors.get("desktop_launchers", {})
@@ -67,6 +71,8 @@ def run(
     pools = config.get("provision", {}).get("pools", [])
 
     _ensure_smb_enabled(page, desktop, nav, provision_selectors)
+    if reset_existing_pools:
+        _cleanup_existing_pools_before_provisioning(page, selectors, admin)
 
     for pool in pools:
         _ensure_pool(page, desktop, nav, provision_selectors, pool, admin, confirm_disk_shortage_cb, model)
@@ -94,6 +100,27 @@ def _ensure_smb_enabled(page: "Page", desktop: dict, nav: dict, provision: dict)
     expect(checkbox).to_be_checked(timeout=FRAME_WAIT_MS)
     page.wait_for_timeout(SHORT_UI_WAIT_MS)
     logger.info("  SMB service enabled")
+
+
+def _cleanup_existing_pools_before_provisioning(page: "Page", selectors: dict, admin: dict) -> None:
+    existing = _existing_pool_summaries(page, selectors)
+    if not existing:
+        return
+    logger.info(
+        "Provisioning: existing storage pools detected before creation; "
+        f"cleaning first: {'; '.join(existing)}"
+    )
+    deleted = cleanup_flow.run(page, selectors, admin)
+    if deleted:
+        logger.info("Provisioning: existing storage pools cleaned; starting fresh pool creation")
+
+
+def _existing_pool_summaries(page: "Page", selectors: dict) -> list[str]:
+    desktop = selectors.get("desktop_launchers", {})
+    nav = selectors.get("provision_nav", {})
+    frame = _open_app(page, desktop, "storagemgr")
+    _navigate(page, frame, nav, ["storagemgr_storage_menu", "storagemgr_pool_tab"])
+    return _list_pool_summary_texts(frame)
 
 
 def _ensure_pool(
@@ -675,7 +702,7 @@ def _select_pool_disks_and_raid(
 
     expected_disks = _expected_pool_disks(pool, disks, model)
     _advance_pool_creation_to_disk_selection(frame, provision, expected_disks)
-    _wait_for_any_pool_disk(frame, provision, expected_disks)
+    _wait_for_any_pool_disk(frame, provision, pool, expected_disks, raid, confirm_disk_shortage_cb, model)
     visible_disks = _visible_pool_disk_tokens(frame)
     selected_disks = _resolve_available_pool_disks(frame, expected_disks)
     _confirm_disk_shortage_if_needed(
@@ -818,7 +845,15 @@ def _advance_pool_creation_to_disk_selection(frame: "Frame", provision: dict, co
     frame.page.wait_for_timeout(SHORT_UI_WAIT_MS)
 
 
-def _wait_for_any_pool_disk(frame: "Frame", provision: dict, configured_disks: list[str]) -> None:
+def _wait_for_any_pool_disk(
+    frame: "Frame",
+    provision: dict,
+    pool: dict,
+    configured_disks: list[str],
+    raid: str,
+    confirm_disk_shortage_cb: Callable[[dict], bool] | None,
+    model: str | None,
+) -> None:
     deadline = time.monotonic() + (POOL_READY_TIMEOUT_MS / 1000)
     last_create_attempt = time.monotonic()
     saw_requirements_warning = False
@@ -835,6 +870,8 @@ def _wait_for_any_pool_disk(frame: "Frame", provision: dict, configured_disks: l
 
         if _dismiss_pool_creation_warning(frame):
             saw_requirements_warning = True
+            if _is_m2_pool(pool, configured_disks):
+                _abort_m2_missing(pool, configured_disks, raid, confirm_disk_shortage_cb, model)
             logger.info(
                 "Provisioning: storage manager reports no unused healthy disks yet; "
                 "waiting and retrying pool creation"
@@ -857,6 +894,39 @@ def _wait_for_any_pool_disk(frame: "Frame", provision: dict, configured_disks: l
     if saw_requirements_warning:
         raise ProvisionError("Storage manager did not expose any unused healthy disks for pool creation before timeout")
     raise ProvisionError("Storage-pool creation dialog did not render any configured disk options in time")
+
+
+def _is_m2_pool(pool: dict, configured_disks: list[str]) -> bool:
+    pool_key = str(pool.get("key") or "").lower()
+    return pool_key == "ssd" or any(str(disk).startswith("M.2") for disk in configured_disks)
+
+
+def _abort_m2_missing(
+    pool: dict,
+    expected_disks: list[str],
+    raid: str,
+    confirm_disk_shortage_cb: Callable[[dict], bool] | None,
+    model: str | None,
+) -> None:
+    payload = {
+        "pool_key": pool.get("key"),
+        "pool_name": str(pool.get("pool_name") or ""),
+        "raid": raid,
+        "model": model or "",
+        "expected_disks": expected_disks,
+        "available_disks": [],
+        "visible_disks": [],
+        "missing_disks": expected_disks,
+        "fallback_raid": "",
+        "can_continue": False,
+        "m2_missing": True,
+        "title": M2_MISSING_TITLE,
+        "message": M2_MISSING_MESSAGE,
+    }
+    logger.info(f"Provisioning: {M2_MISSING_TITLE}; expected={expected_disks}")
+    if confirm_disk_shortage_cb is not None:
+        confirm_disk_shortage_cb(payload)
+    raise ProvisionAborted(f"{M2_MISSING_TITLE}: {M2_MISSING_MESSAGE}")
 
 
 def _any_pool_disk_visible(frame: "Frame", configured_disks: list[str]) -> bool:

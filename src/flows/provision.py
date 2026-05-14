@@ -1403,6 +1403,10 @@ def _open_app(page: "Page", desktop_selectors: dict, app: str) -> "Frame":
 
 def _frame_selector_candidates(frame_selector: str, app: str) -> list[str]:
     selectors = [frame_selector]
+    if app == "storagemgr":
+        for fallback in ('iframe[name^="storagemgr"]', 'iframe[name*="storagemgr"]', 'iframe[src*="/storagemgr/"]'):
+            if fallback not in selectors:
+                selectors.append(fallback)
     if app == "filemgr":
         for fallback in ('iframe[name^="filemgr"]', 'iframe[name*="filemgr"]', 'iframe[src*="/filemgr/"]'):
             if fallback not in selectors:
@@ -1493,8 +1497,14 @@ def _open_app_library(page: "Page") -> None:
 def _wait_for_frame(page: "Page", iframe_locator, app: str) -> "Frame":
     deadline = time.monotonic() + (FRAME_WAIT_MS / 1000)
     while time.monotonic() < deadline:
-        handle = iframe_locator.element_handle()
-        frame = handle.content_frame() if handle is not None else None
+        frame = page.frame(name=app)
+        if frame is not None:
+            return frame
+        try:
+            handle = iframe_locator.element_handle(timeout=500)
+            frame = handle.content_frame() if handle is not None else None
+        except Exception:
+            frame = None
         if frame is not None:
             return frame
         page.wait_for_timeout(200)

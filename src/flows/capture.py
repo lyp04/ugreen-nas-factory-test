@@ -1535,6 +1535,7 @@ def _transfer_speed_threshold_mb_s(page_key: str, transfer_cfg: dict) -> float:
     models = thresholds.get("models") or {}
     model_thresholds = _lookup_mapping_key(models, model)
     if isinstance(model_thresholds, dict):
+        model_default = _float_or_none(_lookup_mapping_key(model_thresholds, "default"))
         value = _float_or_none(_lookup_mapping_key(model_thresholds, page_key))
         if value is not None:
             return value
@@ -1545,6 +1546,8 @@ def _transfer_speed_threshold_mb_s(page_key: str, transfer_cfg: dict) -> float:
             value = _float_or_none(_lookup_mapping_key(model_thresholds, key))
             if value is not None:
                 return value
+        if model_default is not None:
+            return model_default
 
     value = _float_or_none(_lookup_mapping_key(thresholds, page_key))
     return value if value is not None else default

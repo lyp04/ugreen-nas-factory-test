@@ -16,9 +16,14 @@ if TYPE_CHECKING:
 UPDATE_WAIT_S = 1800
 UPDATE_START_WAIT_S = 180
 CONFIRM_PROMPT_WAIT_S = 60
-MIN_POST_CONFIRM_WAIT_MS = 30_000
+MIN_POST_CONFIRM_WAIT_MS = 8_000
 UPDATE_IDLE_REFRESH_S = 180
 UPDATE_REFRESH_SETTLE_MS = 3_000
+CHECK_UPDATE_SETTLE_MS = 3_000
+UPDATE_INSTALL_HTTP_PROBE_S = 15
+UPDATE_READY_HTTP_PROBE_SAMPLES = 2
+UPDATE_DESKTOP_NAV_INTERVAL_S = 30
+UPDATE_HTTP_PROBE_TIMEOUT_MS = 3_000
 UPDATE_NOTICE_SELECTOR = '.ivu-notice:has-text("立即更新"), .ivu-notice:has-text("已经下载并准备好")'
 UPDATE_NOTICE_LINK_SELECTOR = '.ivu-notice:has-text("立即更新") .notice-link'
 LOGIN_PASSWORD_SELECTOR = 'input[type="password"]'
@@ -224,7 +229,7 @@ def _click_check_update_if_available(frame) -> bool:
             if button.is_enabled(timeout=500):
                 logger.info(f"System update: clicking {text}")
                 button.click(force=True)
-                frame.page.wait_for_timeout(5_000)
+                frame.page.wait_for_timeout(CHECK_UPDATE_SETTLE_MS)
                 return True
         except Exception:
             continue
@@ -665,6 +670,9 @@ def _wait_for_updated_desktop(page: "Page", nas_url: str, admin: dict, selectors
     deadline = time.monotonic() + UPDATE_WAIT_S
     last_retry_log = 0.0
     last_progress_log = time.monotonic()
+    next_install_http_probe_at = time.monotonic() + UPDATE_INSTALL_HTTP_PROBE_S
+    install_ready_probe_count = 0
+    next_desktop_nav_at = 0.0
 
     def note_progress(message: str) -> None:
         nonlocal last_progress_log
@@ -672,10 +680,11 @@ def _wait_for_updated_desktop(page: "Page", nas_url: str, admin: dict, selectors
         last_progress_log = time.monotonic()
 
     def refresh_if_idle(reason: str) -> bool:
-        nonlocal stable_desktop_seen_at, last_progress_log
+        nonlocal stable_desktop_seen_at, last_progress_log, install_ready_probe_count
         if time.monotonic() - last_progress_log < UPDATE_IDLE_REFRESH_S:
             return False
         stable_desktop_seen_at = None
+        install_ready_probe_count = 0
         _refresh_update_page(page, nas_url, reason)
         last_progress_log = time.monotonic()
         return True
@@ -683,17 +692,34 @@ def _wait_for_updated_desktop(page: "Page", nas_url: str, admin: dict, selectors
     while time.monotonic() < deadline:
         try:
             if _update_installing_visible(page):
+                now = time.monotonic()
                 if not saw_installing_page:
                     note_progress("System update: installation page is visible; waiting for completion")
                     saw_installing_page = True
                 stable_desktop_seen_at = None
+                if now >= next_install_http_probe_at:
+                    if _nas_home_looks_ready(page, nas_url):
+                        install_ready_probe_count += 1
+                        if install_ready_probe_count >= UPDATE_READY_HTTP_PROBE_SAMPLES:
+                            note_progress("System update: NAS web service responded; refreshing once to verify desktop")
+                            if _goto_nas_home(page, nas_url):
+                                next_desktop_nav_at = time.monotonic() + UPDATE_DESKTOP_NAV_INTERVAL_S
+                                install_ready_probe_count = 0
+                                continue
+                    else:
+                        install_ready_probe_count = 0
+                    next_install_http_probe_at = now + UPDATE_INSTALL_HTTP_PROBE_S
                 if refresh_if_idle("installation page idle"):
                     continue
-                time.sleep(10)
+                time.sleep(5)
                 continue
 
-            page.goto(nas_url, wait_until="domcontentloaded", timeout=10_000)
-            page.wait_for_timeout(2_000)
+            now = time.monotonic()
+            if now >= next_desktop_nav_at:
+                _goto_nas_home(page, nas_url)
+                next_desktop_nav_at = time.monotonic() + UPDATE_DESKTOP_NAV_INTERVAL_S
+                continue
+
             if _update_installing_visible(page):
                 if not saw_installing_page:
                     note_progress("System update: installation page is visible; waiting for completion")
@@ -737,6 +763,33 @@ def _wait_for_updated_desktop(page: "Page", nas_url: str, admin: dict, selectors
         time.sleep(5)
 
     raise SystemUpdateError(f"Desktop did not return within {UPDATE_WAIT_S}s after system update")
+
+
+def _goto_nas_home(page: "Page", nas_url: str) -> bool:
+    try:
+        page.goto(nas_url, wait_until="domcontentloaded", timeout=10_000)
+        page.wait_for_timeout(2_000)
+        return True
+    except Exception:
+        return False
+
+
+def _nas_home_looks_ready(page: "Page", nas_url: str) -> bool:
+    try:
+        response = page.request.get(nas_url, timeout=UPDATE_HTTP_PROBE_TIMEOUT_MS)
+    except Exception:
+        return False
+    try:
+        status = int(getattr(response, "status", 0) or 0)
+        if status < 200 or status >= 400:
+            return False
+    except Exception:
+        pass
+    try:
+        text = response.text()
+    except Exception:
+        text = ""
+    return not any(marker in text for marker in UPDATE_INSTALLING_MARKERS)
 
 
 def _login_page_visible(page: "Page") -> bool:

@@ -134,7 +134,8 @@ def sort_ip_strings(ips) -> list[str]:
     return sorted(dict.fromkeys(str(ip).strip() for ip in ips if ip and str(ip).strip()), key=key)
 
 
-LANGUAGE_OPTIONS = ("中文", "English")
+LANGUAGE_CODES_BY_LABEL = {"中文": "zh", "English": "en", "Español (México)": "es-MX"}
+LANGUAGE_OPTIONS = tuple(LANGUAGE_CODES_BY_LABEL)
 
 UI_TEXT = {
     "zh": {
@@ -147,12 +148,8 @@ UI_TEXT = {
         "test_params": "测试参数",
         "sn_label": "SN/后4位:",
         "nas_ip_label": "NAS IP:",
-        "auto_discovery": "自动发现",
-        "manual_input": "手动输入",
-        "auto_scan": "自动扫描全网入队",
-        "mode_label": "模式:",
-        "setup_mode": "首次设置（注册 + 截图）",
-        "login_mode": "已注册（登录 + 截图）",
+        "or_label": "or",
+        "auto_scan": "自动入队",
         "finish_actions": "结束前操作:",
         "cleanup_pools": "清理存储池",
         "factory_reset": "恢复出厂设置",
@@ -166,7 +163,6 @@ UI_TEXT = {
         "delete_account": "删除账号",
         "auto_seed_previous": "缺第一步时自动补录",
         "add_to_queue": "添加到队列",
-        "smoke_check": "冒烟检查",
         "open_screenshot_dir": "打开截图目录",
         "remove_finished": "移除已完成",
         "show_browser": "显示浏览器",
@@ -180,6 +176,7 @@ UI_TEXT = {
         "sound": "提示音",
         "language_zh": "中文",
         "language_en": "English",
+        "language_es_mx": "Español (México)",
         "auto_form_off": "自动录表未开启，本次不会提交表单。",
         "queue_summary": "连接设备：{total} 台，活跃 {active} 台",
         "status_summary": "运行中 {running} | On Hold {on_hold} | 重试 {retrying} | 排队 {queued} | 完成 {success} | 失败 {failed}",
@@ -194,12 +191,8 @@ UI_TEXT = {
         "test_params": "Test Parameters",
         "sn_label": "SN / Last 4:",
         "nas_ip_label": "NAS IP:",
-        "auto_discovery": "Auto discover",
-        "manual_input": "Manual IP",
-        "auto_scan": "Auto-scan LAN into queue",
-        "mode_label": "Mode:",
-        "setup_mode": "First setup (register + capture)",
-        "login_mode": "Registered (login + capture)",
+        "or_label": "or",
+        "auto_scan": "Auto queue",
         "finish_actions": "Finish actions:",
         "cleanup_pools": "Clean storage pools",
         "factory_reset": "Factory reset",
@@ -213,7 +206,6 @@ UI_TEXT = {
         "delete_account": "Delete account",
         "auto_seed_previous": "Auto-fill step 1 if missing",
         "add_to_queue": "Add to queue",
-        "smoke_check": "Smoke check",
         "open_screenshot_dir": "Open screenshot folder",
         "remove_finished": "Remove completed",
         "show_browser": "Show browser",
@@ -227,9 +219,53 @@ UI_TEXT = {
         "sound": "Sound",
         "language_zh": "中文",
         "language_en": "English",
+        "language_es_mx": "Español (México)",
         "auto_form_off": "Auto form entry is off; this run will not submit the form.",
         "queue_summary": "Connected devices: {total}, active {active}",
         "status_summary": "Running {running} | On Hold {on_hold} | Retrying {retrying} | Queued {queued} | Done {success} | Failed {failed}",
+    },
+    "es-MX": {
+        "app_title": "Prueba de fábrica UGREEN NAS",
+        "ready": "Listo",
+        "queue_summary_empty": "Dispositivos conectados: 0",
+        "select_device_log": "Selecciona un equipo a la izquierda para ver la bitácora",
+        "select_device_log_sentence": "Selecciona un equipo a la izquierda para ver la bitácora.",
+        "no_logs": "Este dispositivo aún no tiene registros.",
+        "test_params": "Parámetros de prueba",
+        "sn_label": "SN / últimos 4:",
+        "nas_ip_label": "IP del NAS:",
+        "or_label": "o",
+        "auto_scan": "Agregar automáticamente",
+        "finish_actions": "Acciones finales:",
+        "cleanup_pools": "Limpiar pools de almacenamiento",
+        "factory_reset": "Restablecer de fábrica",
+        "auto_form_entry": "Captura automática",
+        "form_settings": "Configuración de captura:",
+        "model_auto": "Modelo detectado por SN",
+        "grade": "Grado",
+        "account": "Cuenta",
+        "switch_account": "Cambiar cuenta",
+        "add_account": "Añadir cuenta",
+        "delete_account": "Eliminar cuenta",
+        "auto_seed_previous": "Rellenar paso 1 si falta",
+        "add_to_queue": "Añadir a la cola",
+        "open_screenshot_dir": "Abrir carpeta de capturas",
+        "remove_finished": "Quitar completados",
+        "show_browser": "Mostrar navegador",
+        "cancel_task": "Cancelar tarea",
+        "connected_devices": "Dispositivos conectados",
+        "log": "Bitácora",
+        "tree_status": "Estado",
+        "tree_elapsed": "Tiempo",
+        "tree_progress": "Progreso",
+        "tree_step": "Paso actual",
+        "sound": "Sonido",
+        "language_zh": "中文",
+        "language_en": "English",
+        "language_es_mx": "Español (México)",
+        "auto_form_off": "La captura automática está desactivada; esta ejecución no enviará el formulario.",
+        "queue_summary": "Dispositivos conectados: {total}, activos {active}",
+        "status_summary": "En curso {running} | En espera {on_hold} | Reintentando {retrying} | En cola {queued} | Completadas {success} | Fallidas {failed}",
     },
 }
 
@@ -257,6 +293,17 @@ class FactoryTestGUI:
         "success": "Done",
         "failed": "Failed",
     }
+    STATUS_TEXT_ES_MX = {
+        "queued": "En cola",
+        "running": "En curso",
+        "transfer": "Transfiriendo",
+        "on_hold": "En espera",
+        "cancelling": "Cancelando",
+        "cancelled": "Cancelada",
+        "retrying": "Reintentando",
+        "success": "Completada",
+        "failed": "Fallida",
+    }
 
     ACTIVE_STATES = {"queued", "running", "transfer", "on_hold", "retrying", "cancelling"}
     AUTO_SCAN_INTERVAL_MS = 15_000
@@ -282,9 +329,8 @@ class FactoryTestGUI:
         self.selected_task_id: str | None = None
 
         self.sn_var = tk.StringVar()
-        self.ip_mode_var = tk.StringVar(value="auto")
         self.manual_ip_var = tk.StringVar()
-        self.auto_scan_var = tk.BooleanVar(value=False)
+        self.auto_scan_var = tk.BooleanVar(value=True)
         self.flow_mode_var = tk.StringVar(value="setup")
         self.cleanup_before_finish_var = tk.BooleanVar(value=True)
         self.factory_reset_before_finish_var = tk.BooleanVar(value=True)
@@ -301,7 +347,6 @@ class FactoryTestGUI:
 
         self.sn_entry: ttk.Entry | None = None
         self.start_btn: ttk.Button | None = None
-        self.smoke_btn: ttk.Button | None = None
         self.show_browser_btn: ttk.Button | None = None
         self.cancel_btn: ttk.Button | None = None
         self.auto_scan_check: ttk.Checkbutton | None = None
@@ -323,12 +368,13 @@ class FactoryTestGUI:
             self._refresh_form_accounts()
         self._attach_logger_sink()
         self._refresh_action_states()
+        self.root.after(0, self._on_auto_scan_toggle)
         self.root.after(100, self._drain_ui_queue)
         self.root.after(1000, self._refresh_elapsed_times)
 
     def _language_code(self) -> str:
         try:
-            return "en" if self.language_var.get() == "English" else "zh"
+            return LANGUAGE_CODES_BY_LABEL.get(self.language_var.get(), "zh")
         except Exception:
             return "zh"
 
@@ -341,7 +387,11 @@ class FactoryTestGUI:
         return widget
 
     def _status_text(self, status_code: str) -> str:
-        source = self.STATUS_TEXT_EN if self._language_code() == "en" else self.STATUS_TEXT
+        source = {
+            "zh": self.STATUS_TEXT,
+            "en": self.STATUS_TEXT_EN,
+            "es-MX": self.STATUS_TEXT_ES_MX,
+        }.get(self._language_code(), self.STATUS_TEXT)
         return source.get(status_code, status_code)
 
     def _timestamped(self, key: str, **kwargs) -> str:
@@ -358,66 +408,36 @@ class FactoryTestGUI:
         controls.grid(row=0, column=0, sticky=tk.EW)
         controls.columnconfigure(1, weight=1)
 
-        self._register_text("sn_label", ttk.Label(controls, text=self._t("sn_label"))).grid(
-            row=0, column=0, sticky=tk.W, pady=4
-        )
-        self.sn_entry = ttk.Entry(controls, textvariable=self.sn_var, width=40)
-        self.sn_entry.grid(row=0, column=1, sticky=tk.EW, pady=4)
-        self.sn_entry.bind("<Return>", self._on_sn_enter)
-        self.sn_entry.focus()
-
-        self._register_text("nas_ip_label", ttk.Label(controls, text=self._t("nas_ip_label"))).grid(
-            row=1, column=0, sticky=tk.W, pady=4
-        )
-        ip_frame = ttk.Frame(controls)
-        ip_frame.grid(row=1, column=1, sticky=tk.EW, pady=4)
-        self._register_text(
-            "auto_discovery",
-            ttk.Radiobutton(ip_frame, text=self._t("auto_discovery"), variable=self.ip_mode_var, value="auto"),
-        ).pack(side=tk.LEFT, padx=(0, 8))
-        self._register_text(
-            "manual_input",
-            ttk.Radiobutton(ip_frame, text=self._t("manual_input"), variable=self.ip_mode_var, value="manual"),
-        ).pack(side=tk.LEFT)
-        ttk.Entry(ip_frame, textvariable=self.manual_ip_var, width=20).pack(side=tk.LEFT, padx=(8, 0))
+        input_frame = ttk.Frame(controls)
+        input_frame.grid(row=0, column=0, columnspan=2, sticky=tk.EW, pady=4)
         self.auto_scan_check = ttk.Checkbutton(
-            ip_frame,
+            input_frame,
             text=self._t("auto_scan"),
             variable=self.auto_scan_var,
             command=self._on_auto_scan_toggle,
         )
         self._register_text("auto_scan", self.auto_scan_check)
-        self.auto_scan_check.pack(side=tk.LEFT, padx=(12, 0))
-
-        self._register_text("mode_label", ttk.Label(controls, text=self._t("mode_label"))).grid(
-            row=2, column=0, sticky=tk.W, pady=4
+        self.auto_scan_check.grid(row=0, column=0, sticky=tk.W, padx=(0, 14))
+        self._register_text("sn_label", ttk.Label(input_frame, text=self._t("sn_label"))).grid(
+            row=0, column=1, sticky=tk.W, padx=(0, 4)
         )
-        mode_frame = ttk.Frame(controls)
-        mode_frame.grid(row=2, column=1, sticky=tk.EW, pady=4)
-        self._register_text(
-            "setup_mode",
-            ttk.Radiobutton(
-                mode_frame,
-                text=self._t("setup_mode"),
-                variable=self.flow_mode_var,
-                value="setup",
-            ),
-        ).pack(side=tk.LEFT, padx=(0, 12))
-        self._register_text(
-            "login_mode",
-            ttk.Radiobutton(
-                mode_frame,
-                text=self._t("login_mode"),
-                variable=self.flow_mode_var,
-                value="login",
-            ),
-        ).pack(side=tk.LEFT)
+        self.sn_entry = ttk.Entry(input_frame, textvariable=self.sn_var, width=22)
+        self.sn_entry.grid(row=0, column=2, sticky=tk.W)
+        self.sn_entry.bind("<Return>", self._on_sn_enter)
+        self.sn_entry.focus()
+        self._register_text("or_label", ttk.Label(input_frame, text=self._t("or_label"))).grid(
+            row=0, column=3, sticky=tk.W, padx=10
+        )
+        self._register_text("nas_ip_label", ttk.Label(input_frame, text=self._t("nas_ip_label"))).grid(
+            row=0, column=4, sticky=tk.W, padx=(0, 4)
+        )
+        ttk.Entry(input_frame, textvariable=self.manual_ip_var, width=16).grid(row=0, column=5, sticky=tk.W)
 
         self._register_text("finish_actions", ttk.Label(controls, text=self._t("finish_actions"))).grid(
-            row=3, column=0, sticky=tk.NW, pady=4
+            row=1, column=0, sticky=tk.NW, pady=4
         )
         option_frame = ttk.Frame(controls)
-        option_frame.grid(row=3, column=1, sticky=tk.EW, pady=4)
+        option_frame.grid(row=1, column=1, sticky=tk.EW, pady=4)
         self.cleanup_check = ttk.Checkbutton(
             option_frame,
             text=self._t("cleanup_pools"),
@@ -443,9 +463,9 @@ class FactoryTestGUI:
         self.auto_form_entry_check.pack(side=tk.LEFT)
 
         form_config_label = self._register_text("form_settings", ttk.Label(controls, text=self._t("form_settings")))
-        form_config_label.grid(row=4, column=0, sticky=tk.W, pady=4)
+        form_config_label.grid(row=2, column=0, sticky=tk.W, pady=4)
         form_frame = ttk.Frame(controls)
-        form_frame.grid(row=4, column=1, sticky=tk.EW, pady=4)
+        form_frame.grid(row=2, column=1, sticky=tk.EW, pady=4)
         self._register_text("model_auto", ttk.Label(form_frame, text=self._t("model_auto"))).pack(
             side=tk.LEFT, padx=(0, 12)
         )
@@ -476,23 +496,20 @@ class FactoryTestGUI:
         self._register_text("auto_seed_previous", self.auto_seed_previous_step_check)
         self.auto_seed_previous_step_check.pack(side=tk.LEFT)
 
-        button_row = 5
+        button_row = 3
         if not self.form_entry_enabled:
             self.auto_form_entry_var.set(False)
             if self.auto_form_entry_check is not None:
                 self.auto_form_entry_check.pack_forget()
             form_config_label.grid_remove()
             form_frame.grid_remove()
-            button_row = 4
+            button_row = 2
 
         btn_frame = ttk.Frame(controls)
         btn_frame.grid(row=button_row, column=0, columnspan=2, sticky=tk.EW, pady=(8, 0))
         self.start_btn = ttk.Button(btn_frame, text=self._t("add_to_queue"), command=self._on_start_test)
         self._register_text("add_to_queue", self.start_btn)
         self.start_btn.pack(side=tk.LEFT, padx=(0, 6))
-        self.smoke_btn = ttk.Button(btn_frame, text=self._t("smoke_check"), command=self._on_smoke)
-        self._register_text("smoke_check", self.smoke_btn)
-        self.smoke_btn.pack(side=tk.LEFT, padx=(0, 6))
         self._register_text(
             "open_screenshot_dir", ttk.Button(btn_frame, text=self._t("open_screenshot_dir"), command=self._open_output)
         ).pack(side=tk.LEFT, padx=(0, 6))
@@ -557,7 +574,7 @@ class FactoryTestGUI:
             status_bar,
             textvariable=self.language_var,
             values=LANGUAGE_OPTIONS,
-            width=10,
+            width=12,
             state="readonly",
         )
         self.language_combo.pack(side=tk.RIGHT)
@@ -942,12 +959,8 @@ class FactoryTestGUI:
             subprocess.Popen(["xdg-open", str(output_dir)])
 
     def _nas_ip(self) -> str:
-        if self.ip_mode_var.get() == "manual":
-            ip = self.manual_ip_var.get().strip()
-            if not ip:
-                raise ValueError("手动模式下请输入 NAS IP")
-            return ip
-        return "auto"
+        ip = self.manual_ip_var.get().strip()
+        return ip or "auto"
 
     def _on_factory_reset_toggle(self) -> None:
         if self.factory_reset_before_finish_var.get():
@@ -1480,21 +1493,18 @@ class FactoryTestGUI:
         if not self._validate_form_settings():
             return
         sn = normalize_sn(self.sn_var.get().strip())
-        if not sn:
-            messagebox.showwarning("缺少 SN", "请先扫码或输入序列号")
+        nas_ip = self._nas_ip()
+        if not sn and nas_ip == "auto":
+            messagebox.showwarning("缺少 SN 或 IP", "请先扫码/输入序列号，或填写 NAS IP")
             return
+        if not sn:
+            sn = self._auto_scan_sn(nas_ip, "", "")
         if len(sn_tail(sn)) < 4:
             messagebox.showwarning("SN 过短", "请输入完整 SN 或最后 4 位 SN")
             return
 
         if self._has_active_sn(sn):
             messagebox.showwarning("设备已存在", f"SN {sn} 已在队列中运行，请勿重复添加")
-            return
-
-        try:
-            nas_ip = self._nas_ip()
-        except ValueError as exc:
-            messagebox.showwarning("输入错误", str(exc))
             return
 
         if self.factory_reset_before_finish_var.get():
@@ -1852,7 +1862,7 @@ class FactoryTestGUI:
             messagebox.showwarning("任务进行中", "当前已有冒烟检查在运行")
             return
 
-        if self.ip_mode_var.get() != "manual" or not self.manual_ip_var.get().strip():
+        if not self.manual_ip_var.get().strip():
             messagebox.showwarning("需要 IP", "冒烟检查需要手动填写 NAS IP")
             return
 
@@ -1964,10 +1974,6 @@ class FactoryTestGUI:
         )
 
     def _refresh_action_states(self) -> None:
-        smoke_busy = self._active_task_count() > 0 or bool(self.smoke_worker and self.smoke_worker.is_alive())
-        if self.smoke_btn is not None:
-            self.smoke_btn.configure(state=tk.DISABLED if smoke_busy else tk.NORMAL)
-
         selected = self._selected_task()
         show_enabled = selected is not None and selected.browser_pid is not None
         if self.show_browser_btn is not None:

@@ -249,21 +249,26 @@ def test_transfer_speed_thresholds_are_model_configurable() -> None:
         "speed_thresholds_mb_s": {
             "default": 200,
             "models": {
+                "2800": {
+                    "default": 100,
+                },
+                "4800": {
+                    "default": 100,
+                },
                 "4800Plus": {
-                    "hdd_write": 100,
-                    "hdd_read": 100,
-                    "ssd_write": 300,
-                    "ssd_read": 300,
+                    "default": 200,
                 }
             },
         }
     }
 
-    assert capture._transfer_speed_threshold_mb_s("ssd_write", {**cfg, "model": "4800Plus"}) == 300
-    assert capture._transfer_speed_threshold_mb_s("hdd_read", {**cfg, "model": "4800Plus"}) == 100
-    assert capture._transfer_speed_threshold_mb_s("hdd_write", {**cfg, "model": "4800Plus"}) == 100
-    assert capture._transfer_speed_threshold_mb_s("ssd_write", {**cfg, "model": "2800"}) == 200
-    assert capture._transfer_speed_threshold_mb_s("hdd_write", {**cfg, "model": "4800"}) == 200
+    assert capture._transfer_speed_threshold_mb_s("hdd_read", {**cfg, "model": "2800"}) == 100
+    assert capture._transfer_speed_threshold_mb_s("hdd_write", {**cfg, "model": "2800"}) == 100
+    assert capture._transfer_speed_threshold_mb_s("ssd_write", {**cfg, "model": "2800"}) == 100
+    assert capture._transfer_speed_threshold_mb_s("hdd_read", {**cfg, "model": "4800"}) == 100
+    assert capture._transfer_speed_threshold_mb_s("ssd_read", {**cfg, "model": "4800"}) == 100
+    assert capture._transfer_speed_threshold_mb_s("hdd_read", {**cfg, "model": "4800Plus"}) == 200
+    assert capture._transfer_speed_threshold_mb_s("ssd_write", {**cfg, "model": "4800Plus"}) == 200
 
 
 def test_transfer_upload_seed_defaults_to_inferred_model_size() -> None:

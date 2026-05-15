@@ -49,23 +49,54 @@ def run(page: "Page", nas_url: str, admin: dict, selectors: dict) -> None:
     submit.click()
 
     marker = _require(lg.get("post_login_marker"), "login.post_login_marker")
-    _wait_for_login_result(page, marker)
+    _wait_for_login_result(page, _post_login_success_selectors(selectors, marker))
     logger.info("Login succeeded")
 
 
-def _wait_for_login_result(page: "Page", marker: str) -> None:
+def _wait_for_login_result(page: "Page", success_selectors: tuple[str, ...]) -> None:
     deadline = time.monotonic() + (LOGIN_RESULT_WAIT_MS / 1000)
     last_body = ""
     while time.monotonic() < deadline:
         if _page_has_password_error(page):
             raise LoginError(UNFLASHED_MESSAGE)
-        if _is_visible(page, marker):
+        if _login_success_visible(page, success_selectors):
             return
         page.wait_for_timeout(250)
         last_body = _body_text(page)
     if _body_has_password_error(last_body):
         raise LoginError(UNFLASHED_MESSAGE)
     raise LoginError(f"Login did not complete within {LOGIN_RESULT_WAIT_MS // 1000}s")
+
+
+def _post_login_success_selectors(selectors: dict, marker: str) -> tuple[str, ...]:
+    desktop = selectors.get("desktop_launchers", {}) or {}
+    candidates = [
+        *(desktop.get("apps", {}) or {}).values(),
+        *(desktop.get("frames", {}) or {}).values(),
+    ]
+    if not _is_generic_page_marker(marker):
+        candidates.append(marker)
+
+    seen: set[str] = set()
+    result: list[str] = []
+    for selector in candidates:
+        if not selector or selector == "TODO" or selector in seen:
+            continue
+        seen.add(selector)
+        result.append(selector)
+
+    if not result:
+        result.append(marker)
+    return tuple(result)
+
+
+def _is_generic_page_marker(selector: str) -> bool:
+    compact = "".join(str(selector or "").split()).lower()
+    return compact in {"body", "html", "*", "body.lang-zh-cn"}
+
+
+def _login_success_visible(page: "Page", success_selectors: tuple[str, ...]) -> bool:
+    return any(_is_visible(page, selector) for selector in success_selectors)
 
 
 def _page_has_password_error(page: "Page") -> bool:

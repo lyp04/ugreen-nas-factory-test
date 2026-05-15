@@ -34,7 +34,7 @@ login:
   username_input: 'input[type="text"]'
   password_input: 'input[type="password"]'
   submit_button: 'button.ivu-btn-primary'
-  post_login_marker: 'body.lang-zh-CN'
+  post_login_marker: 'div[moduleid] .click-region, iframe[name]'
 
 # -----------------------------------------------------------------------------
 # Desktop app launchers and iframe anchors

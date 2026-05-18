@@ -319,7 +319,6 @@ UI_TEXT = {
         "app_title": "UGREEN NAS 出厂测试",
         "ready": "就绪",
         "queue_summary_empty": "连接设备：0 台",
-        "select_device_log": "选择左侧设备查看右侧日志",
         "select_device_log_sentence": "选择左侧设备查看右侧日志。",
         "no_logs": "该设备当前还没有日志。",
         "test_params": "测试参数",
@@ -345,8 +344,8 @@ UI_TEXT = {
         "remove_finished": "移除本台",
         "show_browser": "显示浏览器",
         "cancel_task": "中断任务",
+        "retry_task": "重试任务",
         "connected_devices": "连接设备",
-        "log": "日志",
         "tree_status": "状态",
         "tree_elapsed": "运行时间",
         "tree_progress": "进度",
@@ -362,12 +361,30 @@ UI_TEXT = {
         "auto_scan_waiting_form_config": "自动入队等待录表配置完成。",
         "queue_summary": "连接设备：{total} 台，活跃 {active} 台",
         "status_summary": "运行中 {running} | On Hold {on_hold} | 重试 {retrying} | 排队 {queued} | 完成 {success} | 失败 {failed}",
+        "tab_log": "日志",
+        "tab_materials": "物料",
+        "materials_select_device": "选择左侧设备查看录表物料。",
+        "materials_no_form": "本台设备未启用自动录表。",
+        "materials_no_report": "该设备还未提交录表。",
+        "materials_no_config": "录表配置缺少该机型物料信息。",
+        "materials_group_count": "已选 {selected} / 候选 {total}",
+        "materials_group_disabled": "未启用",
+        "materials_status_selected": "已选",
+        "materials_status_unselected": "未选",
+        "materials_status_missing": "缺料",
+        "materials_status_pending": "待录入",
+        "materials_status_group_disabled": "未启用",
+        "materials_submission_pending": "录表未完成",
+        "materials_summary_missing": "缺料 {count} 项",
+        "materials_col_name": "名称",
+        "materials_col_code": "编码",
+        "materials_col_qty": "数量",
+        "materials_col_status": "状态",
     },
     "en": {
         "app_title": "UGREEN NAS Factory Test",
         "ready": "Ready",
         "queue_summary_empty": "Connected devices: 0",
-        "select_device_log": "Select a device on the left to view logs",
         "select_device_log_sentence": "Select a device on the left to view logs.",
         "no_logs": "This device has no logs yet.",
         "test_params": "Test Parameters",
@@ -393,8 +410,8 @@ UI_TEXT = {
         "remove_finished": "Remove this device",
         "show_browser": "Show browser",
         "cancel_task": "Cancel task",
+        "retry_task": "Retry task",
         "connected_devices": "Connected Devices",
-        "log": "Log",
         "tree_status": "Status",
         "tree_elapsed": "Elapsed",
         "tree_progress": "Progress",
@@ -410,12 +427,30 @@ UI_TEXT = {
         "auto_scan_waiting_form_config": "Auto queue is waiting for form settings.",
         "queue_summary": "Connected devices: {total}, active {active}",
         "status_summary": "Running {running} | On Hold {on_hold} | Retrying {retrying} | Queued {queued} | Done {success} | Failed {failed}",
+        "tab_log": "Log",
+        "tab_materials": "Materials",
+        "materials_select_device": "Select a device on the left to view submitted materials.",
+        "materials_no_form": "Auto form entry was not enabled for this device.",
+        "materials_no_report": "Form has not been submitted yet.",
+        "materials_no_config": "No material config found for this model.",
+        "materials_group_count": "{selected} kept / {total} candidates",
+        "materials_group_disabled": "Not enabled",
+        "materials_status_selected": "Kept",
+        "materials_status_unselected": "Skipped",
+        "materials_status_missing": "Out of stock",
+        "materials_status_pending": "Pending",
+        "materials_status_group_disabled": "Not enabled",
+        "materials_submission_pending": "Submission incomplete",
+        "materials_summary_missing": "{count} out of stock",
+        "materials_col_name": "Name",
+        "materials_col_code": "Code",
+        "materials_col_qty": "Qty",
+        "materials_col_status": "Status",
     },
     "es-MX": {
         "app_title": "Prueba de fábrica UGREEN NAS",
         "ready": "Listo",
         "queue_summary_empty": "Dispositivos conectados: 0",
-        "select_device_log": "Selecciona un equipo a la izquierda para ver la bitácora",
         "select_device_log_sentence": "Selecciona un equipo a la izquierda para ver la bitácora.",
         "no_logs": "Este dispositivo aún no tiene registros.",
         "test_params": "Parámetros de prueba",
@@ -441,8 +476,8 @@ UI_TEXT = {
         "remove_finished": "Quitar este equipo",
         "show_browser": "Mostrar navegador",
         "cancel_task": "Cancelar tarea",
+        "retry_task": "Reintentar",
         "connected_devices": "Dispositivos conectados",
-        "log": "Bitácora",
         "tree_status": "Estado",
         "tree_elapsed": "Tiempo",
         "tree_progress": "Progreso",
@@ -458,6 +493,25 @@ UI_TEXT = {
         "auto_scan_waiting_form_config": "La cola automática espera la configuración de captura.",
         "queue_summary": "Dispositivos conectados: {total}, activos {active}",
         "status_summary": "En curso {running} | En espera {on_hold} | Reintentando {retrying} | En cola {queued} | Completadas {success} | Fallidas {failed}",
+        "tab_log": "Bitácora",
+        "tab_materials": "Materiales",
+        "materials_select_device": "Selecciona un equipo a la izquierda para ver los materiales enviados.",
+        "materials_no_form": "La captura automática no está activa para este equipo.",
+        "materials_no_report": "El formulario aún no se ha enviado.",
+        "materials_no_config": "No se encontró configuración de materiales para este modelo.",
+        "materials_group_count": "{selected} de {total} candidatos",
+        "materials_group_disabled": "No activado",
+        "materials_status_selected": "Registrado",
+        "materials_status_unselected": "Omitido",
+        "materials_status_missing": "Sin stock",
+        "materials_status_pending": "Pendiente",
+        "materials_status_group_disabled": "No activado",
+        "materials_submission_pending": "Envío incompleto",
+        "materials_summary_missing": "{count} sin stock",
+        "materials_col_name": "Nombre",
+        "materials_col_code": "Código",
+        "materials_col_qty": "Cantidad",
+        "materials_col_status": "Estado",
     },
 }
 
@@ -509,6 +563,7 @@ class FactoryTestGUI:
     AUTO_SCAN_INTERVAL_MS = 15_000
     AUTO_SCAN_RETRY_MS = 5_000
     TIMING_CHART_REFRESH_MS = 1_000
+    MATERIALS_REFRESH_MS = 3_000
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -546,7 +601,6 @@ class FactoryTestGUI:
         self.queue_summary_var = tk.StringVar(value=self._t("queue_summary_empty"))
         self.success_count_var = tk.StringVar(value=self._t("success_count", count=0))
         self.failed_count_var = tk.StringVar(value=self._t("failed_count", count=0))
-        self.log_title_var = tk.StringVar(value=self._t("select_device_log"))
         self._text_widgets: dict[str, tk.Widget] = {}
 
         self.sn_entry: ttk.Entry | None = None
@@ -565,6 +619,13 @@ class FactoryTestGUI:
         self.form_account_combo: ttk.Combobox | None = None
         self.device_tree: ttk.Treeview | None = None
         self.log_view: scrolledtext.ScrolledText | None = None
+        self.log_notebook: ttk.Notebook | None = None
+        self.log_tab_frame: ttk.Frame | None = None
+        self.materials_tab_frame: ttk.Frame | None = None
+        self.materials_tree: ttk.Treeview | None = None
+        self.materials_status_var = tk.StringVar(value="")
+        self.materials_status_label: ttk.Label | None = None
+        self.materials_refresh_after_id: str | None = None
         self.timing_canvas: tk.Canvas | None = None
         self.timing_chart_after_id: str | None = None
         self.auto_scan_worker: threading.Thread | None = None
@@ -668,15 +729,23 @@ class FactoryTestGUI:
             return []
         return [record for record in records if isinstance(record, dict)]
 
-    def _save_queue_state(self) -> None:
+    def _save_queue_state(self, merge_existing: bool = True) -> None:
         try:
             path = self._queue_state_path()
             path.parent.mkdir(parents=True, exist_ok=True)
+            records_by_id: dict[str, dict] = {}
+            if merge_existing:
+                for record in self._load_queue_state_records():
+                    task_id = str(record.get("task_id") or "").strip()
+                    if task_id:
+                        records_by_id[task_id] = record
+            for task in self.devices.values():
+                records_by_id[task.task_id] = self._queue_record_for_task(task)
             path.write_text(
                 json.dumps(
                     {
                         "date": self._today_key(),
-                        "devices": [self._queue_record_for_task(task) for task in self.devices.values()],
+                        "devices": list(records_by_id.values()),
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -983,16 +1052,60 @@ class FactoryTestGUI:
         queue_scroll.grid(row=1, column=1, sticky=tk.NS)
         self.device_tree.configure(yscrollcommand=queue_scroll.set)
 
-        log_frame = self._register_text("log", ttk.LabelFrame(content, text=self._t("log"), padding=8))
+        log_frame = ttk.Frame(content, padding=(8, 0, 0, 0))
         log_frame.columnconfigure(0, weight=1)
-        log_frame.rowconfigure(1, weight=1)
+        log_frame.rowconfigure(0, weight=1)
         content.add(log_frame, weight=2)
 
-        ttk.Label(log_frame, textvariable=self.log_title_var).grid(row=0, column=0, sticky=tk.W, pady=(0, 8))
-        self.log_view = scrolledtext.ScrolledText(log_frame, wrap=tk.WORD, font=("Consolas", 9))
-        self.log_view.grid(row=1, column=0, sticky=tk.NSEW)
+        self.log_notebook = ttk.Notebook(log_frame)
+        self.log_notebook.grid(row=0, column=0, sticky=tk.NSEW)
+
+        self.log_tab_frame = ttk.Frame(self.log_notebook)
+        self.log_tab_frame.columnconfigure(0, weight=1)
+        self.log_tab_frame.rowconfigure(0, weight=1)
+        self.log_notebook.add(self.log_tab_frame, text=self._t("tab_log"))
+        self.log_view = scrolledtext.ScrolledText(self.log_tab_frame, wrap=tk.WORD, font=("Consolas", 9))
+        self.log_view.grid(row=0, column=0, sticky=tk.NSEW)
         self.log_view.configure(state=tk.DISABLED)
         self._set_log_contents(self._t("select_device_log_sentence"))
+
+        self.materials_tab_frame = ttk.Frame(self.log_notebook)
+        self.materials_tab_frame.columnconfigure(0, weight=1)
+        self.materials_tab_frame.rowconfigure(1, weight=1)
+        self.log_notebook.add(self.materials_tab_frame, text=self._t("tab_materials"))
+        self.materials_status_label = ttk.Label(
+            self.materials_tab_frame,
+            textvariable=self.materials_status_var,
+            foreground="#555555",
+        )
+        self.materials_status_label.grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 6))
+        self.materials_tree = ttk.Treeview(
+            self.materials_tab_frame,
+            columns=("code", "qty", "status"),
+            show="tree headings",
+            selectmode="browse",
+        )
+        self.materials_tree.heading("#0", text=self._t("materials_col_name"))
+        self.materials_tree.heading("code", text=self._t("materials_col_code"))
+        self.materials_tree.heading("qty", text=self._t("materials_col_qty"))
+        self.materials_tree.heading("status", text=self._t("materials_col_status"))
+        self.materials_tree.column("#0", width=240, anchor=tk.W, stretch=True)
+        self.materials_tree.column("code", width=170, anchor=tk.W, stretch=False)
+        self.materials_tree.column("qty", width=56, anchor=tk.CENTER, stretch=False)
+        self.materials_tree.column("status", width=90, anchor=tk.CENTER, stretch=False)
+        self.materials_tree.tag_configure("group_selected", foreground="#1f7a1f", font=("Microsoft YaHei UI", 9, "bold"))
+        self.materials_tree.tag_configure("group_unselected", foreground="#777777", font=("Microsoft YaHei UI", 9, "bold"))
+        self.materials_tree.tag_configure("item_selected", foreground="#1f7a1f")
+        self.materials_tree.tag_configure("item_missing", foreground="#c0392b")
+        self.materials_tree.tag_configure("item_pending", foreground="#a87f1c")
+        self.materials_tree.grid(row=1, column=0, sticky=tk.NSEW)
+        materials_scroll = ttk.Scrollbar(
+            self.materials_tab_frame, orient=tk.VERTICAL, command=self.materials_tree.yview
+        )
+        materials_scroll.grid(row=1, column=1, sticky=tk.NS)
+        self.materials_tree.configure(yscrollcommand=materials_scroll.set)
+        self.materials_status_var.set(self._t("materials_select_device"))
+        self.log_notebook.bind("<<NotebookTabChanged>>", self._on_log_tab_changed)
 
         status_bar = ttk.Frame(main, relief=tk.SUNKEN, padding=(6, 2))
         status_bar.grid(row=2, column=0, sticky=tk.EW, pady=(8, 0))
@@ -1044,13 +1157,27 @@ class FactoryTestGUI:
             self.device_tree.heading("elapsed", text=self._t("tree_elapsed"))
             self.device_tree.heading("progress", text=self._t("tree_progress"))
             self.device_tree.heading("step", text=self._t("tree_step"))
+        if self.log_notebook is not None:
+            if self.log_tab_frame is not None:
+                self.log_notebook.tab(self.log_tab_frame, text=self._t("tab_log"))
+            if self.materials_tab_frame is not None:
+                self.log_notebook.tab(self.materials_tab_frame, text=self._t("tab_materials"))
+        if self.materials_tree is not None:
+            self.materials_tree.heading("#0", text=self._t("materials_col_name"))
+            self.materials_tree.heading("code", text=self._t("materials_col_code"))
+            self.materials_tree.heading("qty", text=self._t("materials_col_qty"))
+            self.materials_tree.heading("status", text=self._t("materials_col_status"))
         for task in self.devices.values():
             task.status = self._status_text(task.state_code)
             self._refresh_device_row(task)
-        if self.selected_task_id is None:
-            self.log_title_var.set(self._t("select_device_log"))
-        self._refresh_log_title()
         self._refresh_summary()
+        if self.selected_task_id is None:
+            self._clear_materials_tab(self._t("materials_select_device"))
+        else:
+            task = self.devices.get(self.selected_task_id)
+            if task is not None:
+                self._refresh_materials_tab(task)
+        self._refresh_action_states()
 
     def _on_sound_toggle(self) -> None:
         if self.sound_enabled_var.get():
@@ -1219,7 +1346,6 @@ class FactoryTestGUI:
         task.current_step = f"第 {task.attempt}/{task.max_attempts} 次测试启动"
         task.finished_monotonic = None
         self._refresh_device_row(task)
-        self._refresh_log_title()
         self._refresh_summary()
         self._refresh_action_states()
         self._save_queue_state()
@@ -1263,10 +1389,16 @@ class FactoryTestGUI:
         if previous_sn != task.sn:
             self._refresh_device_rows_for_sn(previous_sn)
         self._refresh_device_rows_for_task_identity(task)
-        self._refresh_log_title()
         self._refresh_summary()
         self._refresh_action_states()
         self._save_queue_state()
+        if (
+            event.get("type") == "finished"
+            and task.task_id == self.selected_task_id
+            and status_code in {"success", "failed"}
+        ):
+            self._refresh_materials_tab(task)
+            self._schedule_materials_refresh()
 
     def _show_failure_alert_if_needed(self, task: DeviceTask, error: str) -> None:
         if is_unflashed_password_error(error):
@@ -1536,6 +1668,138 @@ class FactoryTestGUI:
         self.log_view.insert(tk.END, msg)
         self.log_view.see(tk.END)
         self.log_view.configure(state=tk.DISABLED)
+
+    def _clear_materials_tab(self, status_text: str = "") -> None:
+        if self.materials_tree is None:
+            return
+        for item in self.materials_tree.get_children():
+            self.materials_tree.delete(item)
+        self.materials_status_var.set(status_text)
+
+    def _on_log_tab_changed(self, _event=None) -> None:
+        self._schedule_materials_refresh(delay_ms=0)
+
+    def _materials_tab_selected(self) -> bool:
+        if self.log_notebook is None or self.materials_tab_frame is None:
+            return False
+        try:
+            return str(self.log_notebook.select()) == str(self.materials_tab_frame)
+        except Exception:
+            return False
+
+    def _schedule_materials_refresh(self, delay_ms: int | None = None) -> None:
+        if self.materials_tree is None:
+            return
+        if not self._materials_tab_selected():
+            return
+        if self.materials_refresh_after_id is not None:
+            return
+        delay = self.MATERIALS_REFRESH_MS if delay_ms is None else delay_ms
+        self.materials_refresh_after_id = self.root.after(delay, self._run_materials_refresh)
+
+    def _run_materials_refresh(self) -> None:
+        self.materials_refresh_after_id = None
+        if self.selected_task_id is None or not self._materials_tab_selected():
+            return
+        task = self.devices.get(self.selected_task_id)
+        if task is None:
+            return
+        self._refresh_materials_tab(task)
+        self._schedule_materials_refresh()
+
+    def _refresh_materials_tab(self, task: DeviceTask) -> None:
+        if self.materials_tree is None:
+            return
+        if not task.auto_form_entry:
+            self._clear_materials_tab(self._t("materials_no_form"))
+            return
+        report_path = self._output_root() / task.sn / "test_report.json"
+        report = self._read_report(report_path) or {}
+        form_data = report.get("form_data") if isinstance(report.get("form_data"), dict) else None
+        if not form_data:
+            self._clear_materials_tab(self._t("materials_no_report"))
+            return
+        material_groups = form_data.get("material_groups") or []
+        form_result = report.get("form_result") if isinstance(report.get("form_result"), dict) else {}
+        removed_codes = {str(c) for c in (form_result.get("removed_material_codes") or [])}
+        form_status = str(form_result.get("status") or "").lower()
+        submission_complete = form_status in {"success", "already_submitted"}
+
+        self._clear_materials_tab()
+        rendered_any = False
+        for group in material_groups:
+            title = str(group.get("title") or "")
+            if not title:
+                continue
+            candidates = group.get("items") or []
+            total_count = len(candidates)
+            if total_count == 0:
+                group_tag = "group_unselected"
+                group_status = self._t("materials_status_group_disabled")
+                count_text = self._t("materials_group_disabled")
+                group_node = self.materials_tree.insert(
+                    "",
+                    tk.END,
+                    text=title,
+                    values=(count_text, "", group_status),
+                    open=False,
+                    tags=(group_tag,),
+                )
+                rendered_any = True
+                continue
+
+            kept_codes = [
+                str(item.get("code") or "")
+                for item in candidates
+                if str(item.get("code") or "") and str(item.get("code") or "") not in removed_codes
+            ]
+            selected_count = len(kept_codes)
+            group_tag = "group_selected" if selected_count > 0 else "group_unselected"
+            group_status = (
+                self._t("materials_status_selected") if selected_count > 0 else self._t("materials_status_unselected")
+            )
+            count_text = self._t("materials_group_count", selected=selected_count, total=total_count)
+            group_node = self.materials_tree.insert(
+                "",
+                tk.END,
+                text=title,
+                values=(count_text, "", group_status),
+                open=True,
+                tags=(group_tag,),
+            )
+            rendered_any = True
+            for item in candidates:
+                code = str(item.get("code") or "")
+                name = str(item.get("name") or code or "")
+                qty = item.get("default_qty") if item.get("default_qty") is not None else item.get("qty")
+                qty_text = str(qty) if qty not in (None, "") else ""
+                if not submission_complete:
+                    item_status = self._t("materials_status_pending")
+                    item_tag = "item_pending"
+                elif code and code in removed_codes:
+                    item_status = self._t("materials_status_missing")
+                    item_tag = "item_missing"
+                else:
+                    item_status = self._t("materials_status_selected")
+                    item_tag = "item_selected"
+                self.materials_tree.insert(
+                    group_node,
+                    tk.END,
+                    text=name,
+                    values=(code, qty_text, item_status),
+                    tags=(item_tag,),
+                )
+        if not rendered_any:
+            self.materials_status_var.set(self._t("materials_no_config"))
+            return
+        grade = str(form_data.get("grade") or "").upper()
+        model_label = str(form_data.get("model_label") or form_data.get("model_key") or "")
+        parts = [p for p in (model_label, f"{self._t('grade')} {grade}" if grade else "") if p]
+        if not submission_complete:
+            parts.append(self._t("materials_submission_pending"))
+        elif removed_codes:
+            parts.append(self._t("materials_summary_missing", count=len(removed_codes)))
+        self.materials_status_var.set(" | ".join(parts))
 
     def _clear_timing_chart(self) -> None:
         self._cancel_timing_chart_refresh()
@@ -2286,7 +2550,6 @@ class FactoryTestGUI:
 
         if select:
             self.selected_task_id = task.task_id
-            self._refresh_log_title()
             self._set_log_contents("")
         self._append_local_log(
             task.task_id,
@@ -2301,10 +2564,63 @@ class FactoryTestGUI:
         self._refresh_action_states()
         self._save_queue_state()
 
+        self._start_task_worker(task)
+        return task
+
+    def _start_task_worker(self, task: DeviceTask) -> None:
         worker = threading.Thread(target=self._run_test_task, args=(task,), daemon=True)
         self.workers[task.task_id] = worker
         worker.start()
-        return task
+
+    def _retry_failed_task(self, task: DeviceTask) -> DeviceTask | None:
+        if task.state_code != "failed":
+            return None
+        if self._has_active_task_for_same_device(task):
+            messagebox.showwarning("设备已在重试", f"SN {task.sn} 已有正在排队或运行的重试任务")
+            return None
+
+        retry_ip = task.display_ip or task.requested_ip
+        retry_task = DeviceTask(
+            task_id=self._next_task_id(task.sn),
+            sn=task.sn,
+            requested_ip=retry_ip,
+            mode=task.mode,
+            cleanup_before_finish=task.cleanup_before_finish,
+            factory_reset_before_finish=task.factory_reset_before_finish,
+            auto_form_entry=task.auto_form_entry,
+            auto_seed_previous_step=task.auto_seed_previous_step,
+            form_model=task.form_model,
+            form_grade=task.form_grade,
+            form_account_name=task.form_account_name,
+            actual_ip=task.actual_ip,
+            reserved_ips=set(task.reserved_ips or {retry_ip}),
+            network_interface=task.network_interface,
+            max_attempts=task.max_attempts,
+        )
+        retry_task.status = self._status_text(retry_task.state_code)
+        self.devices[retry_task.task_id] = retry_task
+        self._insert_device_row(retry_task, select=True)
+        self.selected_task_id = retry_task.task_id
+        self._set_log_contents("")
+        self._append_local_log(
+            retry_task.task_id,
+            f"SN {retry_task.sn} 从失败任务 {task.task_id} 手动重试，IP={retry_task.requested_ip}",
+        )
+        self._mark_daily_task_retry_pending(retry_task)
+        self._refresh_device_rows_for_task_identity(task)
+        self._refresh_summary()
+        self._refresh_action_states()
+        self._save_queue_state()
+        self._start_task_worker(retry_task)
+        return retry_task
+
+    def _has_active_task_for_same_device(self, task: DeviceTask) -> bool:
+        return any(
+            other.task_id != task.task_id
+            and other.state_code in self.ACTIVE_STATES
+            and self._same_device_identity(task, other)
+            for other in self.devices.values()
+        )
 
     def _run_test_task(self, task: DeviceTask) -> None:
         try:
@@ -2548,6 +2864,9 @@ class FactoryTestGUI:
         if task is None:
             messagebox.showwarning("\u672a\u9009\u62e9\u8bbe\u5907", "\u8bf7\u5148\u5728\u5de6\u4fa7\u961f\u5217\u4e2d\u9009\u4e2d\u4e00\u53f0\u8bbe\u5907")
             return
+        if task.state_code == "failed":
+            self._retry_failed_task(task)
+            return
         if task.state_code not in self.ACTIVE_STATES:
             messagebox.showwarning("\u65e0\u6cd5\u4e2d\u65ad", "\u53ea\u80fd\u4e2d\u65ad\u6b63\u5728\u6392\u961f\u6216\u8fd0\u884c\u7684\u4efb\u52a1")
             return
@@ -2641,50 +2960,39 @@ class FactoryTestGUI:
 
         if self.selected_task_id == task_id:
             self.selected_task_id = None
-            self.log_title_var.set(self._t("select_device_log"))
             self._set_log_contents(self._t("select_device_log_sentence"))
             self._clear_timing_chart()
+            self._clear_materials_tab(self._t("materials_select_device"))
 
         self._refresh_device_rows_for_task_identity(task)
         self._refresh_summary()
         self._refresh_action_states()
-        self._save_queue_state()
+        self._save_queue_state(merge_existing=False)
 
     def _on_select_device(self, _event) -> None:
         if self.device_tree is None:
             return
         selection = self.device_tree.selection()
         self.selected_task_id = selection[0] if selection else None
-        self._refresh_log_title()
         self._refresh_action_states()
         if self.selected_task_id is None:
             self._set_log_contents(self._t("select_device_log_sentence"))
             self._clear_timing_chart()
+            self._clear_materials_tab(self._t("materials_select_device"))
             return
 
         task = self.devices.get(self.selected_task_id)
         if task is None:
             self._set_log_contents(self._t("select_device_log_sentence"))
             self._clear_timing_chart()
+            self._clear_materials_tab(self._t("materials_select_device"))
             return
 
         self._set_log_contents("".join(task.logs) if task.logs else self._t("no_logs"))
         self._cancel_timing_chart_refresh()
         self._refresh_timing_chart(task)
-
-    def _refresh_log_title(self) -> None:
-        if self.selected_task_id is None:
-            self.log_title_var.set(self._t("select_device_log"))
-            return
-
-        task = self.devices.get(self.selected_task_id)
-        if task is None:
-            self.log_title_var.set(self._t("select_device_log"))
-            return
-
-        self.log_title_var.set(
-            f"SN {task.sn} | IP {task.display_ip} | {task.status} | {task.current_step}"
-        )
+        self._refresh_materials_tab(task)
+        self._schedule_materials_refresh(delay_ms=0)
 
     def _refresh_summary(self) -> None:
         queued = sum(1 for task in self.devices.values() if task.state_code == "queued")
@@ -2731,15 +3039,25 @@ class FactoryTestGUI:
         show_enabled = selected is not None and selected.browser_pid is not None
         if self.show_browser_btn is not None:
             self.show_browser_btn.configure(state=tk.NORMAL if show_enabled else tk.DISABLED)
-        cancel_enabled = (
-            selected is not None
-            and selected.state_code in self.ACTIVE_STATES
-            and not selected.cancel_event.is_set()
-        )
         if self.cancel_btn is not None:
+            action_key = "retry_task" if selected is not None and selected.state_code == "failed" else "cancel_task"
+            cancel_enabled = (
+                selected is not None
+                and (
+                    selected.state_code == "failed"
+                    or (selected.state_code in self.ACTIVE_STATES and not selected.cancel_event.is_set())
+                )
+            )
+            self.cancel_btn.configure(text=self._t(action_key))
             self.cancel_btn.configure(state=tk.NORMAL if cancel_enabled else tk.DISABLED)
 
     def _on_close(self) -> None:
+        if self.materials_refresh_after_id is not None:
+            try:
+                self.root.after_cancel(self.materials_refresh_after_id)
+            except Exception:
+                pass
+            self.materials_refresh_after_id = None
         for task in self.devices.values():
             if task.state_code not in self.ACTIVE_STATES:
                 continue

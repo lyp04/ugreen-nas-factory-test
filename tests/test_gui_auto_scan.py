@@ -27,6 +27,14 @@ class _Var:
         self.value = value
 
 
+class _Button:
+    def __init__(self):
+        self.options = {}
+
+    def configure(self, **kwargs):
+        self.options.update(kwargs)
+
+
 def _gui_with_daily_stats(tmp_path):
     gui = _gui_for_output(tmp_path)
     gui.language_var = SimpleNamespace(get=lambda: "中文")
@@ -51,6 +59,23 @@ def _gui_with_form_settings(tmp_path, auto_form=True, grade=""):
     gui.auto_form_entry_var = _Var(auto_form)
     gui.form_grade_var = _Var(grade)
     gui.form_account_var = _Var("operator01")
+    gui.status_var = _Var()
+    return gui
+
+
+def _gui_with_action_state(tmp_path):
+    gui = _gui_with_daily_stats(tmp_path)
+    gui.task_counter = 0
+    gui.selected_task_id = None
+    gui.workers = {}
+    gui.device_tree = None
+    gui.log_view = None
+    gui.timing_canvas = None
+    gui.timing_chart_after_id = None
+    gui.remove_current_btn = _Button()
+    gui.show_browser_btn = _Button()
+    gui.cancel_btn = _Button()
+    gui.queue_summary_var = _Var()
     gui.status_var = _Var()
     return gui
 
@@ -222,6 +247,59 @@ def test_failed_row_with_later_same_sn_retry_is_not_red(tmp_path) -> None:
     assert gui._row_tags_for_task(retry) == ()
 
 
+def test_cancel_button_becomes_retry_for_failed_task(tmp_path) -> None:
+    gui = _gui_with_action_state(tmp_path)
+    failed = DeviceTask(
+        task_id="task-1",
+        sn="HB670EE07251E54E",
+        requested_ip="192.168.0.214",
+        mode="setup",
+        cleanup_before_finish=True,
+        factory_reset_before_finish=True,
+        state_code="failed",
+    )
+    gui.devices = {failed.task_id: failed}
+    gui.selected_task_id = failed.task_id
+
+    gui._refresh_action_states()
+
+    assert gui.cancel_btn.options["text"] == "重试任务"
+    assert gui.cancel_btn.options["state"] == "normal"
+
+
+def test_retry_failed_task_adds_later_retry_and_clears_failed_count(monkeypatch, tmp_path) -> None:
+    gui = _gui_with_action_state(tmp_path)
+    monkeypatch.setattr(gui, "_start_task_worker", lambda _task: None)
+    failed = DeviceTask(
+        task_id="task-1",
+        sn="HB670EE07251E54E",
+        requested_ip="192.168.0.214",
+        mode="setup",
+        cleanup_before_finish=True,
+        factory_reset_before_finish=True,
+        auto_form_entry=True,
+        form_model="2800",
+        form_grade="B",
+        form_account_name="operator01",
+        state_code="failed",
+        reserved_ips={"192.168.0.214"},
+    )
+    gui.devices = {failed.task_id: failed}
+    gui.selected_task_id = failed.task_id
+    gui._record_daily_task_result(failed, "failed")
+
+    gui._on_cancel_task()
+
+    retry = gui._selected_task()
+    assert retry is not None
+    assert retry.task_id != failed.task_id
+    assert retry.state_code == "queued"
+    assert retry.sn == failed.sn
+    assert retry.requested_ip == failed.requested_ip
+    assert gui._row_tags_for_task(failed) == ()
+    assert gui.failed_count_var.get() == "今日失败 0 台"
+
+
 def test_daily_stats_survive_removed_rows_and_migrate_auto_sn_retry(tmp_path) -> None:
     gui = _gui_with_daily_stats(tmp_path)
     failed = DeviceTask(
@@ -299,6 +377,64 @@ def test_queue_state_ignores_previous_day(tmp_path) -> None:
         json.dumps({"date": "2000-01-01", "devices": [{"task_id": "old", "sn": "HB670EE07251E54E"}]}),
         encoding="utf-8",
     )
+
+    assert gui._load_queue_state_records() == []
+
+
+def test_queue_state_save_merges_existing_same_day_rows(tmp_path) -> None:
+    gui = _gui_with_queue_state(tmp_path)
+    path = gui._queue_state_path()
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "date": gui._today_key(),
+                "devices": [
+                    {
+                        "task_id": "old-001",
+                        "sn": "HB670EE0725123DD",
+                        "requested_ip": "192.168.0.229",
+                        "mode": "setup",
+                        "state_code": "success",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    task = DeviceTask(
+        task_id="new-001",
+        sn="HB670EE022513CDF",
+        requested_ip="192.168.0.143",
+        mode="setup",
+        cleanup_before_finish=True,
+        factory_reset_before_finish=True,
+        state_code="success",
+    )
+    gui.devices = {task.task_id: task}
+
+    gui._save_queue_state()
+
+    task_ids = {record["task_id"] for record in gui._load_queue_state_records()}
+    assert task_ids == {"old-001", "new-001"}
+
+
+def test_queue_state_remove_replaces_instead_of_merging(tmp_path) -> None:
+    gui = _gui_with_queue_state(tmp_path)
+    task = DeviceTask(
+        task_id="old-001",
+        sn="HB670EE0725123DD",
+        requested_ip="192.168.0.229",
+        mode="setup",
+        cleanup_before_finish=True,
+        factory_reset_before_finish=True,
+        state_code="success",
+    )
+    gui.devices = {task.task_id: task}
+    gui._save_queue_state()
+    gui.devices = {}
+
+    gui._save_queue_state(merge_existing=False)
 
     assert gui._load_queue_state_records() == []
 

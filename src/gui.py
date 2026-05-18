@@ -5,13 +5,15 @@ import ipaddress
 import json
 import queue
 import re
+import socket
 import subprocess
 import sys
 import threading
 import time
 import tkinter as tk
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
 
@@ -564,6 +566,8 @@ class FactoryTestGUI:
     AUTO_SCAN_RETRY_MS = 5_000
     TIMING_CHART_REFRESH_MS = 1_000
     MATERIALS_REFRESH_MS = 3_000
+    ROLLOVER_IP_PROBE_TIMEOUT = 0.5
+    ROLLOVER_MAX_IP_PROBE_WORKERS = 32
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -628,6 +632,7 @@ class FactoryTestGUI:
         self.materials_refresh_after_id: str | None = None
         self.timing_canvas: tk.Canvas | None = None
         self.timing_chart_after_id: str | None = None
+        self.daily_rollover_after_id: str | None = None
         self.auto_scan_worker: threading.Thread | None = None
         self.auto_scan_after_id: str | None = None
 
@@ -642,6 +647,7 @@ class FactoryTestGUI:
         self.root.after(0, self._on_auto_scan_toggle)
         self.root.after(100, self._drain_ui_queue)
         self.root.after(1000, self._refresh_elapsed_times)
+        self._schedule_daily_rollover()
 
     def _language_code(self) -> str:
         try:
@@ -681,7 +687,7 @@ class FactoryTestGUI:
         today = self._today_key()
         path = self._daily_stats_path()
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
         except Exception:
             return today, {}
         if str(data.get("date") or "") != today:
@@ -716,10 +722,104 @@ class FactoryTestGUI:
         self.daily_stats_devices = {}
         self._save_daily_stats()
 
+    def _detect_present_task_ips(self, tasks) -> set[str]:
+        task_ips = set()
+        for task in tasks:
+            task_ips.update(self._task_identity_ips(task))
+        task_ips = {ip for ip in task_ips if self._auto_scan_ip_allowed(ip, None)}
+        if not task_ips:
+            return set()
+
+        present = set()
+        try:
+            for hit in self._broadcast_scan_hits(1.0):
+                if hit.address in task_ips:
+                    present.add(hit.address)
+        except Exception:
+            pass
+
+        remaining = sorted(task_ips - present)
+        if not remaining:
+            return present
+
+        network = self.config.get("network") or {}
+        port = int(network.get("ugos_http_port") or 9999)
+        max_workers = min(self.ROLLOVER_MAX_IP_PROBE_WORKERS, max(1, len(remaining)))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(self._ip_port_present, ip, port): ip for ip in remaining}
+            for future in as_completed(futures):
+                ip = futures[future]
+                try:
+                    if future.result():
+                        present.add(ip)
+                except Exception:
+                    pass
+        return present
+
+    def _ip_port_present(self, ip: str, port: int) -> bool:
+        try:
+            with socket.create_connection((ip, port), timeout=self.ROLLOVER_IP_PROBE_TIMEOUT):
+                return True
+        except OSError:
+            return False
+
+    def _keep_task_after_daily_rollover(self, task: DeviceTask, present_ips: set[str]) -> bool:
+        return task.state_code in self.ACTIVE_STATES or bool(self._task_identity_ips(task) & present_ips)
+
+    def _milliseconds_until_next_midnight(self) -> int:
+        now = datetime.now()
+        next_midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        return max(1000, int((next_midnight - now).total_seconds() * 1000))
+
+    def _schedule_daily_rollover(self) -> None:
+        if self.daily_rollover_after_id is not None:
+            try:
+                self.root.after_cancel(self.daily_rollover_after_id)
+            except Exception:
+                pass
+        self.daily_rollover_after_id = self.root.after(
+            self._milliseconds_until_next_midnight(),
+            self._handle_daily_rollover,
+        )
+
+    def _handle_daily_rollover(self) -> None:
+        self.daily_rollover_after_id = None
+        self.daily_stats_date = self._today_key()
+        self.daily_stats_devices = {}
+        self._save_daily_stats()
+
+        removed_selected = self.selected_task_id is not None
+        present_ips = self._detect_present_task_ips(self.devices.values())
+        kept_devices = {
+            task_id: task
+            for task_id, task in self.devices.items()
+            if self._keep_task_after_daily_rollover(task, present_ips)
+        }
+        if self.device_tree is not None:
+            for task_id in list(self.devices):
+                if task_id not in kept_devices and self.device_tree.exists(task_id):
+                    self.device_tree.delete(task_id)
+        self.devices = kept_devices
+        self.workers = {
+            task_id: worker
+            for task_id, worker in self.workers.items()
+            if task_id in self.devices
+        }
+        if removed_selected and self.selected_task_id not in self.devices:
+            self.selected_task_id = None
+            self._set_log_contents(self._t("select_device_log_sentence"))
+            self._clear_timing_chart()
+            self._clear_materials_tab(self._t("materials_select_device"))
+
+        self._refresh_summary()
+        self._refresh_action_states()
+        self._save_queue_state(merge_existing=False)
+        self._schedule_daily_rollover()
+
     def _load_queue_state_records(self) -> list[dict]:
         path = self._queue_state_path()
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
         except Exception:
             return []
         if str(data.get("date") or "") != self._today_key():
@@ -735,7 +835,10 @@ class FactoryTestGUI:
             path.parent.mkdir(parents=True, exist_ok=True)
             records_by_id: dict[str, dict] = {}
             if merge_existing:
-                for record in self._load_queue_state_records():
+                existing_records = self._load_queue_state_records()
+                if not self.devices and not existing_records and path.exists():
+                    return
+                for record in existing_records:
                     task_id = str(record.get("task_id") or "").strip()
                     if task_id:
                         records_by_id[task_id] = record
@@ -1458,7 +1561,7 @@ class FactoryTestGUI:
 
     def _read_report(self, report_path: Path) -> dict | None:
         try:
-            return json.loads(report_path.read_text(encoding="utf-8"))
+            return json.loads(report_path.read_text(encoding="utf-8-sig"))
         except Exception:
             return None
 
@@ -3058,6 +3161,12 @@ class FactoryTestGUI:
             except Exception:
                 pass
             self.materials_refresh_after_id = None
+        if self.daily_rollover_after_id is not None:
+            try:
+                self.root.after_cancel(self.daily_rollover_after_id)
+            except Exception:
+                pass
+            self.daily_rollover_after_id = None
         for task in self.devices.values():
             if task.state_code not in self.ACTIVE_STATES:
                 continue

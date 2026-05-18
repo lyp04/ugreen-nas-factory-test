@@ -35,6 +35,20 @@ class _Button:
         self.options.update(kwargs)
 
 
+class _Root:
+    def __init__(self):
+        self.after_calls = []
+        self.cancelled = []
+
+    def after(self, delay_ms, callback):
+        after_id = f"after-{len(self.after_calls) + 1}"
+        self.after_calls.append((after_id, delay_ms, callback))
+        return after_id
+
+    def after_cancel(self, after_id):
+        self.cancelled.append(after_id)
+
+
 def _gui_with_daily_stats(tmp_path):
     gui = _gui_for_output(tmp_path)
     gui.language_var = SimpleNamespace(get=lambda: "中文")
@@ -65,11 +79,13 @@ def _gui_with_form_settings(tmp_path, auto_form=True, grade=""):
 
 def _gui_with_action_state(tmp_path):
     gui = _gui_with_daily_stats(tmp_path)
+    gui.root = _Root()
     gui.task_counter = 0
     gui.selected_task_id = None
     gui.workers = {}
     gui.device_tree = None
     gui.log_view = None
+    gui.materials_tree = None
     gui.timing_canvas = None
     gui.timing_chart_after_id = None
     gui.remove_current_btn = _Button()
@@ -340,6 +356,59 @@ def test_daily_stats_survive_removed_rows_and_migrate_auto_sn_retry(tmp_path) ->
     assert "ip:192.168.0.214" not in reloaded.daily_stats_devices
 
 
+def test_daily_rollover_clears_disconnected_records_but_keeps_active_and_present_ips(tmp_path) -> None:
+    gui = _gui_with_action_state(tmp_path)
+    disconnected = DeviceTask(
+        task_id="disconnected-001",
+        sn="HB670EE0725123DD",
+        requested_ip="192.168.0.229",
+        mode="setup",
+        cleanup_before_finish=True,
+        factory_reset_before_finish=True,
+        state_code="success",
+    )
+    connected = DeviceTask(
+        task_id="connected-002",
+        sn="HB670EE022513CDF",
+        requested_ip="192.168.0.143",
+        mode="setup",
+        cleanup_before_finish=True,
+        factory_reset_before_finish=True,
+        state_code="success",
+    )
+    active = DeviceTask(
+        task_id="active-003",
+        sn="HB670EE022517E15",
+        requested_ip="192.168.0.239",
+        mode="setup",
+        cleanup_before_finish=True,
+        factory_reset_before_finish=True,
+        state_code="running",
+    )
+    gui.devices = {
+        disconnected.task_id: disconnected,
+        connected.task_id: connected,
+        active.task_id: active,
+    }
+    gui.selected_task_id = disconnected.task_id
+    gui.daily_stats_devices = {
+        "sn:23DD": {"sn": disconnected.sn, "status": "success"},
+        "sn:3CDF": {"sn": connected.sn, "status": "success"},
+        "sn:7E15": {"sn": active.sn, "status": "failed"},
+    }
+    gui._detect_present_task_ips = lambda _tasks: {"192.168.0.143"}
+
+    gui._handle_daily_rollover()
+
+    assert list(gui.devices) == [connected.task_id, active.task_id]
+    assert gui.selected_task_id is None
+    assert gui._daily_status_counts() == (0, 0)
+    records = gui._load_queue_state_records()
+    assert [record["task_id"] for record in records] == [connected.task_id, active.task_id]
+    assert {record["state_code"] for record in records} == {"success", "running"}
+    assert gui.daily_rollover_after_id is not None
+
+
 def test_queue_state_restores_same_day_and_marks_active_cancelled(tmp_path) -> None:
     gui = _gui_with_queue_state(tmp_path)
     task = DeviceTask(
@@ -379,6 +448,62 @@ def test_queue_state_ignores_previous_day(tmp_path) -> None:
     )
 
     assert gui._load_queue_state_records() == []
+
+
+def test_queue_state_loads_utf8_bom_file(tmp_path) -> None:
+    gui = _gui_with_queue_state(tmp_path)
+    path = gui._queue_state_path()
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "date": gui._today_key(),
+                "devices": [{"task_id": "old-001", "sn": "HB670EE0725123DD"}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8-sig",
+    )
+
+    assert gui._load_queue_state_records()[0]["task_id"] == "old-001"
+
+
+def test_queue_state_empty_memory_does_not_overwrite_existing_file(tmp_path) -> None:
+    gui = _gui_with_queue_state(tmp_path)
+    path = gui._queue_state_path()
+    path.parent.mkdir(parents=True)
+    original = {
+        "date": gui._today_key(),
+        "devices": [{"task_id": "old-001", "sn": "HB670EE0725123DD"}],
+    }
+    path.write_text(json.dumps(original), encoding="utf-8-sig")
+    gui.devices = {}
+
+    gui._save_queue_state()
+
+    records = gui._load_queue_state_records()
+    assert len(records) == 1
+    assert records[0]["task_id"] == "old-001"
+
+
+def test_daily_stats_loads_utf8_bom_file(tmp_path) -> None:
+    gui = _gui_for_output(tmp_path)
+    path = gui._daily_stats_path()
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "date": gui._today_key(),
+                "devices": {"sn:23DD": {"sn": "HB670EE0725123DD", "status": "failed"}},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8-sig",
+    )
+
+    _, devices = gui._load_daily_stats()
+
+    assert devices["sn:23DD"]["status"] == "failed"
 
 
 def test_queue_state_save_merges_existing_same_day_rows(tmp_path) -> None:

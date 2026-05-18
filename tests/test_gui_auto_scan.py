@@ -16,6 +16,45 @@ def _gui_for_output(tmp_path):
     return gui
 
 
+class _Var:
+    def __init__(self, value=""):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+    def set(self, value):
+        self.value = value
+
+
+def _gui_with_daily_stats(tmp_path):
+    gui = _gui_for_output(tmp_path)
+    gui.language_var = SimpleNamespace(get=lambda: "中文")
+    gui.success_count_var = _Var()
+    gui.failed_count_var = _Var()
+    gui.daily_stats_date, gui.daily_stats_devices = gui._load_daily_stats()
+    return gui
+
+
+def _gui_with_queue_state(tmp_path):
+    gui = _gui_for_output(tmp_path)
+    gui.language_var = SimpleNamespace(get=lambda: "中文")
+    gui.task_counter = 0
+    gui.device_tree = None
+    return gui
+
+
+def _gui_with_form_settings(tmp_path, auto_form=True, grade=""):
+    gui = _gui_for_output(tmp_path)
+    gui.language_var = SimpleNamespace(get=lambda: "中文")
+    gui.form_entry_enabled = True
+    gui.auto_form_entry_var = _Var(auto_form)
+    gui.form_grade_var = _Var(grade)
+    gui.form_account_var = _Var("operator01")
+    gui.status_var = _Var()
+    return gui
+
+
 def test_existing_image_directory_does_not_block_auto_scan_by_sn(tmp_path) -> None:
     gui = _gui_for_output(tmp_path)
     image_dir = tmp_path / "HB670EE07251E54E" / "图片"
@@ -129,6 +168,162 @@ def test_cancelling_task_is_still_active(tmp_path) -> None:
 
     assert gui._active_task_count() == 1
     assert task.cancel_event.is_set()
+
+
+def test_success_and_latest_failure_rows_are_tagged(tmp_path) -> None:
+    gui = _gui_for_output(tmp_path)
+    success = DeviceTask(
+        task_id="task-1",
+        sn="HB670EE072512F12",
+        requested_ip="192.168.0.191",
+        mode="setup",
+        cleanup_before_finish=True,
+        factory_reset_before_finish=True,
+        state_code="success",
+    )
+    failed = DeviceTask(
+        task_id="task-2",
+        sn="HB670EE07251E54E",
+        requested_ip="192.168.0.214",
+        mode="setup",
+        cleanup_before_finish=True,
+        factory_reset_before_finish=True,
+        state_code="failed",
+    )
+    gui.devices = {"task-1": success, "task-2": failed}
+
+    assert gui._row_tags_for_task(success) == (gui.ROW_SUCCESS_TAG,)
+    assert gui._row_tags_for_task(failed) == (gui.ROW_FAILED_TAG,)
+
+
+def test_failed_row_with_later_same_sn_retry_is_not_red(tmp_path) -> None:
+    gui = _gui_for_output(tmp_path)
+    failed = DeviceTask(
+        task_id="task-1",
+        sn="E54E",
+        requested_ip="192.168.0.214",
+        mode="setup",
+        cleanup_before_finish=True,
+        factory_reset_before_finish=True,
+        state_code="failed",
+    )
+    retry = DeviceTask(
+        task_id="task-2",
+        sn="HB670EE07251E54E",
+        requested_ip="192.168.0.214",
+        mode="setup",
+        cleanup_before_finish=True,
+        factory_reset_before_finish=True,
+        state_code="running",
+    )
+    gui.devices = {"task-1": failed, "task-2": retry}
+
+    assert gui._row_tags_for_task(failed) == ()
+    assert gui._row_tags_for_task(retry) == ()
+
+
+def test_daily_stats_survive_removed_rows_and_migrate_auto_sn_retry(tmp_path) -> None:
+    gui = _gui_with_daily_stats(tmp_path)
+    failed = DeviceTask(
+        task_id="task-1",
+        sn="AUTOC0A800D6",
+        requested_ip="192.168.0.214",
+        mode="setup",
+        cleanup_before_finish=True,
+        factory_reset_before_finish=True,
+        state_code="failed",
+    )
+    retry = DeviceTask(
+        task_id="task-2",
+        sn="HB670EE07251E54E",
+        requested_ip="192.168.0.214",
+        mode="setup",
+        cleanup_before_finish=True,
+        factory_reset_before_finish=True,
+        state_code="running",
+    )
+
+    gui._record_daily_task_result(failed, "failed")
+    gui._refresh_status_counts()
+    assert gui.success_count_var.get() == "今日成功 0 台"
+    assert gui.failed_count_var.get() == "今日失败 1 台"
+
+    gui._mark_daily_task_retry_pending(retry)
+    assert gui.failed_count_var.get() == "今日失败 0 台"
+
+    gui._record_daily_task_result(retry, "success")
+    gui._refresh_status_counts()
+    assert gui.success_count_var.get() == "今日成功 1 台"
+    assert gui.failed_count_var.get() == "今日失败 0 台"
+
+    reloaded = _gui_with_daily_stats(tmp_path)
+    assert reloaded._daily_status_counts() == (1, 0)
+    assert "sn:E54E" in reloaded.daily_stats_devices
+    assert "ip:192.168.0.214" not in reloaded.daily_stats_devices
+
+
+def test_queue_state_restores_same_day_and_marks_active_cancelled(tmp_path) -> None:
+    gui = _gui_with_queue_state(tmp_path)
+    task = DeviceTask(
+        task_id="HB670EE07251E54E-001",
+        sn="HB670EE07251E54E",
+        requested_ip="192.168.0.214",
+        mode="setup",
+        cleanup_before_finish=True,
+        factory_reset_before_finish=True,
+        state_code="running",
+        progress=42,
+        current_step="截图传输中",
+    )
+    gui.devices = {task.task_id: task}
+
+    gui._save_queue_state()
+
+    reloaded = _gui_with_queue_state(tmp_path)
+    records = reloaded._load_queue_state_records()
+    restored = reloaded._task_from_queue_record(records[0])
+
+    assert len(records) == 1
+    assert restored is not None
+    assert restored.state_code == "cancelled"
+    assert restored.status == "已中断"
+    assert restored.progress == 42
+    assert restored.current_step == "上次退出时未完成：截图传输中"
+
+
+def test_queue_state_ignores_previous_day(tmp_path) -> None:
+    gui = _gui_with_queue_state(tmp_path)
+    path = gui._queue_state_path()
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps({"date": "2000-01-01", "devices": [{"task_id": "old", "sn": "HB670EE07251E54E"}]}),
+        encoding="utf-8",
+    )
+
+    assert gui._load_queue_state_records() == []
+
+
+def test_auto_scan_waits_for_grade_when_auto_form_is_enabled(monkeypatch, tmp_path) -> None:
+    gui = _gui_with_form_settings(tmp_path, auto_form=True, grade="")
+    monkeypatch.setattr(gui_module.form_entry, "available_models", lambda _root: ["2800"])
+
+    assert not gui._auto_scan_ready(show_warning=False)
+    assert "请选择 A/B" in gui.status_var.get()
+
+
+def test_auto_scan_ready_without_grade_when_auto_form_is_off(monkeypatch, tmp_path) -> None:
+    gui = _gui_with_form_settings(tmp_path, auto_form=False, grade="")
+    monkeypatch.setattr(gui_module.form_entry, "available_models", lambda _root: ["2800"])
+
+    assert gui._auto_scan_ready(show_warning=False)
+    assert gui.status_var.get().endswith("自动录表未开启，本次不会提交表单。")
+
+
+def test_auto_scan_ready_after_grade_selected(monkeypatch, tmp_path) -> None:
+    gui = _gui_with_form_settings(tmp_path, auto_form=True, grade="B")
+    monkeypatch.setattr(gui_module.form_entry, "available_models", lambda _root: [])
+
+    assert gui._auto_scan_ready(show_warning=False)
 
 
 def test_gui_recognizes_manual_abort_errors(tmp_path) -> None:

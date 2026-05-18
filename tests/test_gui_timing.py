@@ -24,6 +24,24 @@ def test_build_timing_slices_splits_each_update_cycle() -> None:
     assert slices["建池共享"] == 40
 
 
+def test_build_timing_slices_tolerates_small_out_of_order_log_lines() -> None:
+    logs = [
+        "10:56:28 | INFO    | SN HB670EE022517E15 已加入队列\n",
+        "10:56:30 | INFO    | 浏览器已在后台启动，可按“显示浏览器”查看\n",
+        "10:56:29 | INFO    | Setup wizard -> http://192.168.0.239:9999\n",
+        "10:57:10 | INFO    | [Page 0] welcome + agreements\n",
+        "10:59:16 | INFO    | Setup wizard complete; desktop reached\n",
+        "10:59:16 | INFO    | System update: existing update/reboot screen detected; waiting before provisioning\n",
+        "11:00:16 | INFO    | System update: verifying latest status after update/reboot\n",
+    ]
+
+    slices = {item.label: item.seconds for item in build_timing_slices(logs)}
+
+    assert slices["准备"] == 2
+    assert slices["首次设置"] == 166
+    assert slices["更新1"] == 60
+
+
 def test_compact_timing_slices_moves_short_phases_to_other() -> None:
     slices = _compact_timing_slices(
         [

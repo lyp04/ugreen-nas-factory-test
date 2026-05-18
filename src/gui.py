@@ -137,6 +137,7 @@ TIMING_COLORS = (
     "#bab0ab",
 )
 TIMING_MIN_VISIBLE_SECONDS = 20
+TIMING_DAY_ROLLOVER_THRESHOLD_SECONDS = 12 * 3600
 
 
 def format_elapsed(seconds: int) -> str:
@@ -157,9 +158,13 @@ def build_timing_slices(logs: list[str]) -> list[TimingSlice]:
             if not match:
                 continue
             second = int(match.group(1)) * 3600 + int(match.group(2)) * 60 + int(match.group(3))
-            if previous_second is not None and second + day_offset < previous_second:
-                day_offset += 24 * 3600
             absolute_second = second + day_offset
+            if previous_second is not None and absolute_second < previous_second:
+                if previous_second - absolute_second > TIMING_DAY_ROLLOVER_THRESHOLD_SECONDS:
+                    day_offset += 24 * 3600
+                    absolute_second = second + day_offset
+                else:
+                    absolute_second = previous_second
             previous_second = absolute_second
             entries.append((absolute_second, _log_message_text(line)))
 
@@ -189,12 +194,19 @@ def _compact_timing_slices(
     limit: int = 7,
     min_visible_seconds: int = TIMING_MIN_VISIBLE_SECONDS,
 ) -> list[TimingSlice]:
-    visible = [item for item in slices if item.seconds >= min_visible_seconds]
+    visible = sorted(
+        (item for item in slices if item.seconds >= min_visible_seconds),
+        key=lambda item: item.seconds,
+        reverse=True,
+    )
     other_seconds = sum(item.seconds for item in slices if item.seconds < min_visible_seconds)
-    if len(visible) > limit:
-        ranked = sorted(visible, key=lambda item: item.seconds, reverse=True)
-        visible = ranked[: limit - 1]
-        other_seconds += sum(item.seconds for item in ranked[limit - 1 :])
+    if len(visible) > limit - 1 and other_seconds > 0:
+        cutoff = limit - 1
+    else:
+        cutoff = limit
+    if len(visible) > cutoff:
+        other_seconds += sum(item.seconds for item in visible[cutoff:])
+        visible = visible[:cutoff]
     if other_seconds > 0:
         visible.append(TimingSlice("其他", other_seconds))
     return visible
@@ -220,7 +232,11 @@ def _timing_phase_after_message(
     if "Login succeeded" in message and not active_update:
         return "准备更新", update_index, False
 
-    if "System update:" in message or "System update is ready" in message:
+    if (
+        "System update:" in message
+        or "System update is ready" in message
+        or "System update flow finished" in message
+    ):
         starts_update = any(
             marker in message
             for marker in (
@@ -229,6 +245,9 @@ def _timing_phase_after_message(
                 "continuing update via",
                 "update notice is visible; continuing update",
                 "installation page is visible",
+                "clicked after download",
+                "waiting for installation/reboot to start",
+                "page disconnected/reloading after confirmation",
             )
         )
         if starts_update and not active_update:
@@ -251,7 +270,10 @@ def _timing_phase_after_message(
             )
         ):
             active_update = False
-            current = "检查更新" if "latest version" not in message else "准备建池"
+            if "latest version" in message or "System update flow finished" in message:
+                current = "准备建池"
+            else:
+                current = "检查更新"
         return current, update_index, active_update
 
     if message.startswith("Provisioning:"):
@@ -320,7 +342,7 @@ UI_TEXT = {
         "auto_seed_previous": "缺第一步时自动补录",
         "add_to_queue": "添加到队列",
         "open_screenshot_dir": "打开截图目录",
-        "remove_finished": "移除已完成",
+        "remove_finished": "移除本台",
         "show_browser": "显示浏览器",
         "cancel_task": "中断任务",
         "connected_devices": "连接设备",
@@ -330,10 +352,14 @@ UI_TEXT = {
         "tree_progress": "进度",
         "tree_step": "当前步骤",
         "sound": "提示音",
+        "success_count": "今日成功 {count} 台",
+        "failed_count": "今日失败 {count} 台",
         "language_zh": "中文",
         "language_en": "English",
         "language_es_mx": "Español (México)",
         "auto_form_off": "自动录表未开启，本次不会提交表单。",
+        "auto_scan_waiting_form_grade": "请选择 A/B，或关闭自动录表后再自动入队。",
+        "auto_scan_waiting_form_config": "自动入队等待录表配置完成。",
         "queue_summary": "连接设备：{total} 台，活跃 {active} 台",
         "status_summary": "运行中 {running} | On Hold {on_hold} | 重试 {retrying} | 排队 {queued} | 完成 {success} | 失败 {failed}",
     },
@@ -364,7 +390,7 @@ UI_TEXT = {
         "auto_seed_previous": "Auto-fill step 1 if missing",
         "add_to_queue": "Add to queue",
         "open_screenshot_dir": "Open screenshot folder",
-        "remove_finished": "Remove completed",
+        "remove_finished": "Remove this device",
         "show_browser": "Show browser",
         "cancel_task": "Cancel task",
         "connected_devices": "Connected Devices",
@@ -374,10 +400,14 @@ UI_TEXT = {
         "tree_progress": "Progress",
         "tree_step": "Current step",
         "sound": "Sound",
+        "success_count": "Today done {count}",
+        "failed_count": "Today failed {count}",
         "language_zh": "中文",
         "language_en": "English",
         "language_es_mx": "Español (México)",
         "auto_form_off": "Auto form entry is off; this run will not submit the form.",
+        "auto_scan_waiting_form_grade": "Select A/B, or turn off auto form entry before auto queue starts.",
+        "auto_scan_waiting_form_config": "Auto queue is waiting for form settings.",
         "queue_summary": "Connected devices: {total}, active {active}",
         "status_summary": "Running {running} | On Hold {on_hold} | Retrying {retrying} | Queued {queued} | Done {success} | Failed {failed}",
     },
@@ -408,7 +438,7 @@ UI_TEXT = {
         "auto_seed_previous": "Rellenar paso 1 si falta",
         "add_to_queue": "Añadir a la cola",
         "open_screenshot_dir": "Abrir carpeta de capturas",
-        "remove_finished": "Quitar completados",
+        "remove_finished": "Quitar este equipo",
         "show_browser": "Mostrar navegador",
         "cancel_task": "Cancelar tarea",
         "connected_devices": "Dispositivos conectados",
@@ -418,10 +448,14 @@ UI_TEXT = {
         "tree_progress": "Progreso",
         "tree_step": "Paso actual",
         "sound": "Sonido",
+        "success_count": "Hoy completadas {count}",
+        "failed_count": "Hoy fallidas {count}",
         "language_zh": "中文",
         "language_en": "English",
         "language_es_mx": "Español (México)",
         "auto_form_off": "La captura automática está desactivada; esta ejecución no enviará el formulario.",
+        "auto_scan_waiting_form_grade": "Selecciona A/B, o desactiva la captura automática para iniciar la cola.",
+        "auto_scan_waiting_form_config": "La cola automática espera la configuración de captura.",
         "queue_summary": "Dispositivos conectados: {total}, activos {active}",
         "status_summary": "En curso {running} | En espera {on_hold} | Reintentando {retrying} | En cola {queued} | Completadas {success} | Fallidas {failed}",
     },
@@ -464,8 +498,17 @@ class FactoryTestGUI:
     }
 
     ACTIVE_STATES = {"queued", "running", "transfer", "on_hold", "retrying", "cancelling"}
+    ROW_SUCCESS_TAG = "row_success"
+    ROW_FAILED_TAG = "row_failed"
+    ROW_SUCCESS_FG = "#16803c"
+    ROW_SUCCESS_BG = "#ecf8ef"
+    ROW_FAILED_FG = "#b42318"
+    ROW_FAILED_BG = "#fdecec"
+    DAILY_STATS_FILE = "gui_daily_stats.json"
+    QUEUE_STATE_FILE = "gui_queue_state.json"
     AUTO_SCAN_INTERVAL_MS = 15_000
     AUTO_SCAN_RETRY_MS = 5_000
+    TIMING_CHART_REFRESH_MS = 1_000
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -485,6 +528,7 @@ class FactoryTestGUI:
         self.smoke_worker: threading.Thread | None = None
         self.task_counter = 0
         self.selected_task_id: str | None = None
+        self.daily_stats_date, self.daily_stats_devices = self._load_daily_stats()
 
         self.sn_var = tk.StringVar()
         self.manual_ip_var = tk.StringVar()
@@ -494,17 +538,20 @@ class FactoryTestGUI:
         self.factory_reset_before_finish_var = tk.BooleanVar(value=True)
         self.auto_form_entry_var = tk.BooleanVar(value=FORM_ENTRY_ENABLED)
         self.auto_seed_previous_step_var = tk.BooleanVar(value=False)
-        self.form_grade_var = tk.StringVar(value="A")
+        self.form_grade_var = tk.StringVar(value="")
         self.form_account_var = tk.StringVar()
         self.sound_enabled_var = tk.BooleanVar(value=True)
         self.language_var = tk.StringVar(value=LANGUAGE_OPTIONS[0])
         self.status_var = tk.StringVar(value=self._t("ready"))
         self.queue_summary_var = tk.StringVar(value=self._t("queue_summary_empty"))
+        self.success_count_var = tk.StringVar(value=self._t("success_count", count=0))
+        self.failed_count_var = tk.StringVar(value=self._t("failed_count", count=0))
         self.log_title_var = tk.StringVar(value=self._t("select_device_log"))
         self._text_widgets: dict[str, tk.Widget] = {}
 
         self.sn_entry: ttk.Entry | None = None
         self.start_btn: ttk.Button | None = None
+        self.remove_current_btn: ttk.Button | None = None
         self.show_browser_btn: ttk.Button | None = None
         self.cancel_btn: ttk.Button | None = None
         self.auto_scan_check: ttk.Checkbutton | None = None
@@ -519,14 +566,18 @@ class FactoryTestGUI:
         self.device_tree: ttk.Treeview | None = None
         self.log_view: scrolledtext.ScrolledText | None = None
         self.timing_canvas: tk.Canvas | None = None
+        self.timing_chart_after_id: str | None = None
         self.auto_scan_worker: threading.Thread | None = None
         self.auto_scan_after_id: str | None = None
 
         self._build_layout()
+        self._restore_queue_state()
+        self._refresh_status_counts()
         if self.form_entry_enabled:
             self._refresh_form_accounts()
         self._attach_logger_sink()
         self._refresh_action_states()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(0, self._on_auto_scan_toggle)
         self.root.after(100, self._drain_ui_queue)
         self.root.after(1000, self._refresh_elapsed_times)
@@ -555,6 +606,186 @@ class FactoryTestGUI:
 
     def _timestamped(self, key: str, **kwargs) -> str:
         return f"{datetime.now().strftime('%H:%M:%S')}  {self._t(key, **kwargs)}"
+
+    def _today_key(self) -> str:
+        return datetime.now().strftime("%Y-%m-%d")
+
+    def _daily_stats_path(self) -> Path:
+        return self.project_root / "state" / self.DAILY_STATS_FILE
+
+    def _queue_state_path(self) -> Path:
+        return self.project_root / "state" / self.QUEUE_STATE_FILE
+
+    def _load_daily_stats(self) -> tuple[str, dict[str, dict]]:
+        today = self._today_key()
+        path = self._daily_stats_path()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return today, {}
+        if str(data.get("date") or "") != today:
+            return today, {}
+        devices = data.get("devices")
+        return today, dict(devices) if isinstance(devices, dict) else {}
+
+    def _save_daily_stats(self) -> None:
+        try:
+            path = self._daily_stats_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(
+                    {
+                        "date": self.daily_stats_date,
+                        "devices": self.daily_stats_devices,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            logger.warning(f"Could not save daily GUI stats: {exc}")
+
+    def _ensure_daily_stats_current(self) -> None:
+        today = self._today_key()
+        if getattr(self, "daily_stats_date", "") == today:
+            return
+        self.daily_stats_date = today
+        self.daily_stats_devices = {}
+        self._save_daily_stats()
+
+    def _load_queue_state_records(self) -> list[dict]:
+        path = self._queue_state_path()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        if str(data.get("date") or "") != self._today_key():
+            return []
+        records = data.get("devices")
+        if not isinstance(records, list):
+            return []
+        return [record for record in records if isinstance(record, dict)]
+
+    def _save_queue_state(self) -> None:
+        try:
+            path = self._queue_state_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(
+                    {
+                        "date": self._today_key(),
+                        "devices": [self._queue_record_for_task(task) for task in self.devices.values()],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            logger.warning(f"Could not save GUI queue state: {exc}")
+
+    def _queue_record_for_task(self, task: DeviceTask) -> dict[str, object]:
+        return {
+            "task_id": task.task_id,
+            "sn": task.sn,
+            "requested_ip": task.requested_ip,
+            "actual_ip": task.actual_ip,
+            "mode": task.mode,
+            "cleanup_before_finish": task.cleanup_before_finish,
+            "factory_reset_before_finish": task.factory_reset_before_finish,
+            "auto_form_entry": task.auto_form_entry,
+            "auto_seed_previous_step": task.auto_seed_previous_step,
+            "form_model": task.form_model,
+            "form_grade": task.form_grade,
+            "form_account_name": task.form_account_name,
+            "state_code": task.state_code,
+            "progress": task.progress,
+            "current_step": task.current_step,
+            "reserved_ips": sort_ip_strings(task.reserved_ips),
+            "network_interface": task.network_interface,
+            "attempt": task.attempt,
+            "max_attempts": task.max_attempts,
+            "elapsed_seconds": task.elapsed_seconds,
+        }
+
+    def _task_from_queue_record(self, record: dict) -> DeviceTask | None:
+        task_id = str(record.get("task_id") or "").strip()
+        sn = normalize_sn(str(record.get("sn") or ""))
+        requested_ip = str(record.get("requested_ip") or "auto").strip() or "auto"
+        if not task_id or not sn:
+            return None
+
+        state_code = str(record.get("state_code") or "cancelled")
+        current_step = str(record.get("current_step") or "上次队列恢复")
+        if state_code in self.ACTIVE_STATES:
+            state_code = "cancelled"
+            current_step = f"上次退出时未完成：{current_step}"
+
+        task = DeviceTask(
+            task_id=task_id,
+            sn=sn,
+            requested_ip=requested_ip,
+            mode=str(record.get("mode") or "setup"),
+            cleanup_before_finish=bool(record.get("cleanup_before_finish", True)),
+            factory_reset_before_finish=bool(record.get("factory_reset_before_finish", True)),
+            auto_form_entry=bool(record.get("auto_form_entry", False)),
+            auto_seed_previous_step=bool(record.get("auto_seed_previous_step", False)),
+            form_model=str(record.get("form_model") or ""),
+            form_grade=str(record.get("form_grade") or "A"),
+            form_account_name=str(record.get("form_account_name") or ""),
+            actual_ip=str(record.get("actual_ip") or ""),
+            state_code=state_code,
+            progress=self._safe_int(record.get("progress"), 0),
+            current_step=current_step,
+            reserved_ips=set(sort_ip_strings(self._queue_record_ips(record, requested_ip))),
+            network_interface=str(record.get("network_interface") or ""),
+            attempt=self._safe_int(record.get("attempt"), 0),
+            max_attempts=self._safe_int(record.get("max_attempts"), 2),
+        )
+        task.status = self._status_text(task.state_code)
+        elapsed_seconds = max(0, self._safe_int(record.get("elapsed_seconds"), 0))
+        now = time.monotonic()
+        task.started_monotonic = now - elapsed_seconds
+        if task.state_code not in self.ACTIVE_STATES:
+            task.finished_monotonic = now
+        task.logs.append(
+            f"{datetime.now().strftime('%H:%M:%S')} | INFO    | 已从今日上次队列恢复；不会自动继续运行\n"
+        )
+        return task
+
+    def _queue_record_ips(self, record: dict, fallback_ip: str) -> list[str]:
+        reserved = record.get("reserved_ips")
+        if isinstance(reserved, list):
+            return [str(ip) for ip in reserved]
+        return [fallback_ip]
+
+    def _safe_int(self, value, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _restore_queue_state(self) -> None:
+        restored = 0
+        max_counter = self.task_counter
+        for record in self._load_queue_state_records():
+            task = self._task_from_queue_record(record)
+            if task is None or task.task_id in self.devices:
+                continue
+            self.devices[task.task_id] = task
+            max_counter = max(max_counter, self._task_counter_from_id(task.task_id))
+            self._insert_device_row(task, select=False)
+            restored += 1
+        self.task_counter = max_counter
+        if restored:
+            self._refresh_summary()
+
+    def _task_counter_from_id(self, task_id: str) -> int:
+        match = re.search(r"-(\d+)$", task_id)
+        return int(match.group(1)) if match else 0
 
     def _build_layout(self) -> None:
         self.root.title(self._t("app_title"))
@@ -622,6 +853,7 @@ class FactoryTestGUI:
             option_frame,
             text=self._t("auto_form_entry"),
             variable=self.auto_form_entry_var,
+            command=self._on_auto_form_entry_toggle,
         )
         self._register_text("auto_form_entry", self.auto_form_entry_check)
         self.auto_form_entry_check.pack(side=tk.LEFT)
@@ -636,7 +868,13 @@ class FactoryTestGUI:
         self._register_text("grade", ttk.Label(form_frame, text=self._t("grade"))).pack(side=tk.LEFT, padx=(0, 4))
         self.form_grade_radios = []
         for grade in ("A", "B"):
-            radio = ttk.Radiobutton(form_frame, text=grade, variable=self.form_grade_var, value=grade)
+            radio = ttk.Radiobutton(
+                form_frame,
+                text=grade,
+                variable=self.form_grade_var,
+                value=grade,
+                command=self._on_form_grade_changed,
+            )
             radio.pack(side=tk.LEFT, padx=(0, 6))
             self.form_grade_radios.append(radio)
         self._register_text("account", ttk.Label(form_frame, text=self._t("account"))).pack(side=tk.LEFT, padx=(0, 4))
@@ -677,9 +915,13 @@ class FactoryTestGUI:
         self._register_text(
             "open_screenshot_dir", ttk.Button(btn_frame, text=self._t("open_screenshot_dir"), command=self._open_output)
         ).pack(side=tk.LEFT, padx=(0, 6))
-        self._register_text(
-            "remove_finished", ttk.Button(btn_frame, text=self._t("remove_finished"), command=self._remove_finished_tasks)
-        ).pack(side=tk.LEFT, padx=(0, 6))
+        self.remove_current_btn = ttk.Button(
+            btn_frame,
+            text=self._t("remove_finished"),
+            command=self._remove_current_task,
+        )
+        self._register_text("remove_finished", self.remove_current_btn)
+        self.remove_current_btn.pack(side=tk.LEFT, padx=(0, 6))
         self.show_browser_btn = ttk.Button(btn_frame, text=self._t("show_browser"), command=self._on_show_browser)
         self._register_text("show_browser", self.show_browser_btn)
         self.show_browser_btn.pack(side=tk.LEFT, padx=(0, 6))
@@ -712,6 +954,16 @@ class FactoryTestGUI:
 
         columns = ("sn", "ip", "status", "elapsed", "progress", "step")
         self.device_tree = ttk.Treeview(queue_frame, columns=columns, show="headings", selectmode="browse")
+        self.device_tree.tag_configure(
+            self.ROW_SUCCESS_TAG,
+            foreground=self.ROW_SUCCESS_FG,
+            background=self.ROW_SUCCESS_BG,
+        )
+        self.device_tree.tag_configure(
+            self.ROW_FAILED_TAG,
+            foreground=self.ROW_FAILED_FG,
+            background=self.ROW_FAILED_BG,
+        )
         self.device_tree.heading("sn", text="SN")
         self.device_tree.heading("ip", text="IP")
         self.device_tree.heading("status", text=self._t("tree_status"))
@@ -762,6 +1014,20 @@ class FactoryTestGUI:
         )
         self._register_text("sound", self.sound_check)
         self.sound_check.pack(side=tk.RIGHT, padx=(0, 12))
+        status_counts = ttk.Frame(status_bar)
+        status_counts.pack(side=tk.RIGHT, padx=(0, 10))
+        tk.Label(
+            status_counts,
+            textvariable=self.success_count_var,
+            foreground=self.ROW_SUCCESS_FG,
+            padx=4,
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            status_counts,
+            textvariable=self.failed_count_var,
+            foreground=self.ROW_FAILED_FG,
+            padx=4,
+        ).pack(side=tk.LEFT)
 
     def _on_language_changed(self, _event=None) -> None:
         self._apply_language()
@@ -853,7 +1119,7 @@ class FactoryTestGUI:
         task.logs.append(message)
         if task.task_id == self.selected_task_id:
             self._append_log(message)
-            self._refresh_timing_chart(task)
+            self._schedule_timing_chart_refresh(task)
 
     def _handle_confirm_previous_step(self, event: dict) -> None:
         reply = event.get("reply")
@@ -956,6 +1222,7 @@ class FactoryTestGUI:
         self._refresh_log_title()
         self._refresh_summary()
         self._refresh_action_states()
+        self._save_queue_state()
 
     def _handle_task_event(self, event: dict) -> None:
         task = self.devices.get(str(event.get("task_id")))
@@ -963,6 +1230,7 @@ class FactoryTestGUI:
             return
 
         status_code = str(event.get("status") or task.state_code)
+        previous_sn = task.sn
         task.state_code = status_code
         task.status = self._status_text(status_code)
         event_sn = normalize_sn(str(event.get("sn") or ""))
@@ -988,11 +1256,17 @@ class FactoryTestGUI:
         if event.get("type") == "finished" and status_code == "cancelled":
             task.finished_monotonic = time.monotonic()
             self._play_completion_sound(success=False)
+        if event.get("type") == "finished" and status_code in {"success", "failed"}:
+            self._record_daily_task_result(task, status_code)
 
         self._refresh_device_row(task)
+        if previous_sn != task.sn:
+            self._refresh_device_rows_for_sn(previous_sn)
+        self._refresh_device_rows_for_task_identity(task)
         self._refresh_log_title()
         self._refresh_summary()
         self._refresh_action_states()
+        self._save_queue_state()
 
     def _show_failure_alert_if_needed(self, task: DeviceTask, error: str) -> None:
         if is_unflashed_password_error(error):
@@ -1103,12 +1377,137 @@ class FactoryTestGUI:
                 f"{task.progress}%",
                 task.current_step,
             ),
+            tags=self._row_tags_for_task(task),
         )
+
+    def _insert_device_row(self, task: DeviceTask, select: bool) -> None:
+        if self.device_tree is None:
+            return
+        self.device_tree.insert(
+            "",
+            tk.END,
+            iid=task.task_id,
+            values=(task.sn, task.display_ip, task.status, task.elapsed_display, f"{task.progress}%", task.current_step),
+            tags=self._row_tags_for_task(task),
+        )
+        if select:
+            self.device_tree.selection_set(task.task_id)
+            self.device_tree.focus(task.task_id)
+
+    def _row_tags_for_task(self, task: DeviceTask) -> tuple[str, ...]:
+        if task.state_code == "success":
+            return (self.ROW_SUCCESS_TAG,)
+        if task.state_code == "failed" and not self._has_later_task_for_same_device(task):
+            return (self.ROW_FAILED_TAG,)
+        return ()
+
+    def _has_later_task_for_same_device(self, task: DeviceTask) -> bool:
+        after_current = False
+        for other in self.devices.values():
+            if other.task_id == task.task_id:
+                after_current = True
+                continue
+            if after_current and self._same_device_identity(task, other):
+                return True
+        return False
+
+    def _same_device_identity(self, left: DeviceTask, right: DeviceTask) -> bool:
+        if same_sn_identity(left.sn, right.sn):
+            return True
+        if is_auto_sn_placeholder(left.sn) or is_auto_sn_placeholder(right.sn):
+            return bool(self._task_identity_ips(left) & self._task_identity_ips(right))
+        return False
+
+    def _task_identity_ips(self, task: DeviceTask) -> set[str]:
+        ips = {
+            str(task.requested_ip or "").strip(),
+            str(task.actual_ip or "").strip(),
+            *(str(ip or "").strip() for ip in task.reserved_ips),
+        }
+        return {ip for ip in ips if ip and ip.lower() != "auto"}
+
+    def _refresh_device_rows_for_sn(self, sn: str) -> None:
+        normalized = normalize_sn(sn)
+        if not normalized:
+            return
+        for task in self.devices.values():
+            if same_sn_identity(task.sn, normalized) or task.sn == normalized:
+                self._refresh_device_row(task)
+
+    def _refresh_device_rows_for_task_identity(self, target: DeviceTask) -> None:
+        for task in self.devices.values():
+            if task.task_id == target.task_id or self._same_device_identity(task, target):
+                self._refresh_device_row(task)
+
+    def _daily_task_keys(self, task: DeviceTask) -> list[str]:
+        keys: list[str] = []
+        normalized_sn = normalize_sn(task.sn)
+        tail = sn_tail(normalized_sn)
+        if normalized_sn and not is_auto_sn_placeholder(normalized_sn) and len(tail) >= 4:
+            keys.append(f"sn:{tail}")
+        keys.extend(f"ip:{ip}" for ip in sorted(self._task_identity_ips(task)))
+        if not keys:
+            keys.append(f"task:{task.task_id}")
+        return keys
+
+    def _preferred_daily_task_key(self, task: DeviceTask) -> str:
+        keys = self._daily_task_keys(task)
+        return next((key for key in keys if key.startswith("sn:")), keys[0])
+
+    def _daily_entry_key_for_task(self, task: DeviceTask) -> str | None:
+        for key in self._daily_task_keys(task):
+            if key in self.daily_stats_devices:
+                return key
+        return None
+
+    def _mark_daily_task_retry_pending(self, task: DeviceTask) -> None:
+        self._ensure_daily_stats_current()
+        existing_key = self._daily_entry_key_for_task(task)
+        if existing_key is None:
+            return
+        entry = dict(self.daily_stats_devices.get(existing_key) or {})
+        if str(entry.get("status") or "") != "failed":
+            return
+        preferred_key = self._preferred_daily_task_key(task)
+        if preferred_key != existing_key:
+            self.daily_stats_devices.pop(existing_key, None)
+        entry.update(self._daily_task_payload(task, "retrying"))
+        self.daily_stats_devices[preferred_key] = entry
+        self._save_daily_stats()
+        self._refresh_status_counts()
+
+    def _record_daily_task_result(self, task: DeviceTask, status_code: str) -> None:
+        if status_code not in {"success", "failed"}:
+            return
+        self._ensure_daily_stats_current()
+        existing_key = self._daily_entry_key_for_task(task)
+        preferred_key = self._preferred_daily_task_key(task)
+        entry = dict(self.daily_stats_devices.get(existing_key or preferred_key) or {})
+        if existing_key and existing_key != preferred_key:
+            self.daily_stats_devices.pop(existing_key, None)
+        entry.update(self._daily_task_payload(task, status_code))
+        self.daily_stats_devices[preferred_key] = entry
+        self._save_daily_stats()
+
+    def _daily_task_payload(self, task: DeviceTask, status_code: str) -> dict[str, str]:
+        return {
+            "sn": task.sn,
+            "ip": task.display_ip,
+            "status": status_code,
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+
+    def _daily_status_counts(self) -> tuple[int, int]:
+        self._ensure_daily_stats_current()
+        success = sum(1 for entry in self.daily_stats_devices.values() if entry.get("status") == "success")
+        failed = sum(1 for entry in self.daily_stats_devices.values() if entry.get("status") == "failed")
+        return success, failed
 
     def _refresh_elapsed_times(self) -> None:
         for task in self.devices.values():
             if task.state_code in self.ACTIVE_STATES:
                 self._refresh_device_row(task)
+        self._refresh_status_counts()
         self.root.after(1000, self._refresh_elapsed_times)
 
     def _append_local_log(self, task_id: str, message: str) -> None:
@@ -1119,7 +1518,7 @@ class FactoryTestGUI:
         task.logs.append(line)
         if task.task_id == self.selected_task_id:
             self._append_log(line)
-            self._refresh_timing_chart(task)
+            self._schedule_timing_chart_refresh(task)
 
     def _set_log_contents(self, text: str) -> None:
         if self.log_view is None:
@@ -1139,6 +1538,7 @@ class FactoryTestGUI:
         self.log_view.configure(state=tk.DISABLED)
 
     def _clear_timing_chart(self) -> None:
+        self._cancel_timing_chart_refresh()
         if self.timing_canvas is None:
             return
         self.timing_canvas.delete("all")
@@ -1149,6 +1549,33 @@ class FactoryTestGUI:
             fill="#777777",
             font=("Microsoft YaHei UI", 9),
         )
+
+    def _cancel_timing_chart_refresh(self) -> None:
+        if self.timing_chart_after_id is None:
+            return
+        try:
+            self.root.after_cancel(self.timing_chart_after_id)
+        except Exception:
+            pass
+        self.timing_chart_after_id = None
+
+    def _schedule_timing_chart_refresh(self, task: DeviceTask) -> None:
+        if self.timing_canvas is None or task.task_id != self.selected_task_id:
+            return
+        if self.timing_chart_after_id is not None:
+            return
+        self.timing_chart_after_id = self.root.after(
+            self.TIMING_CHART_REFRESH_MS, self._run_timing_chart_refresh
+        )
+
+    def _run_timing_chart_refresh(self) -> None:
+        self.timing_chart_after_id = None
+        if self.selected_task_id is None:
+            return
+        task = self.devices.get(self.selected_task_id)
+        if task is None:
+            return
+        self._refresh_timing_chart(task)
 
     def _refresh_timing_chart(self, task: DeviceTask) -> None:
         if self.timing_canvas is None:
@@ -1199,7 +1626,7 @@ class FactoryTestGUI:
         legend_x = pie_left + pie_size + 16
         legend_y = 14
         line_height = 18
-        for index, item in enumerate(display_slices[:7]):
+        for index, item in enumerate(display_slices):
             y = legend_y + index * line_height
             percent = item.seconds / total * 100
             color = TIMING_COLORS[index % len(TIMING_COLORS)]
@@ -1239,25 +1666,40 @@ class FactoryTestGUI:
         if self.factory_reset_before_finish_var.get() and not self.cleanup_before_finish_var.get():
             self.cleanup_before_finish_var.set(True)
 
+    def _on_auto_form_entry_toggle(self) -> None:
+        if not self.auto_form_entry_var.get():
+            self.status_var.set(self._timestamped("auto_form_off"))
+        if self.auto_scan_var.get():
+            self._on_auto_scan_toggle()
+
+    def _on_form_grade_changed(self) -> None:
+        if self.auto_scan_var.get():
+            self._on_auto_scan_toggle()
+
     def _on_auto_scan_toggle(self) -> None:
         if self.auto_scan_var.get():
-            if not self._validate_form_settings():
-                self.auto_scan_var.set(False)
+            if not self._auto_scan_ready(show_warning=False):
+                self._cancel_scheduled_auto_scan()
                 return
             self.status_var.set(f"{datetime.now().strftime('%H:%M:%S')}  自动扫描已开启")
             self._schedule_auto_scan(0)
             return
 
+        self._cancel_scheduled_auto_scan()
+        self.status_var.set(f"{datetime.now().strftime('%H:%M:%S')}  自动扫描已关闭")
+
+    def _cancel_scheduled_auto_scan(self) -> None:
         if self.auto_scan_after_id is not None:
             try:
                 self.root.after_cancel(self.auto_scan_after_id)
             except Exception:
                 pass
             self.auto_scan_after_id = None
-        self.status_var.set(f"{datetime.now().strftime('%H:%M:%S')}  自动扫描已关闭")
 
     def _schedule_auto_scan(self, delay_ms: int) -> None:
         if not self.auto_scan_var.get():
+            return
+        if not self._auto_scan_ready(show_warning=False):
             return
         if self.auto_scan_after_id is not None:
             try:
@@ -1269,6 +1711,8 @@ class FactoryTestGUI:
     def _start_auto_scan(self) -> None:
         self.auto_scan_after_id = None
         if not self.auto_scan_var.get():
+            return
+        if not self._auto_scan_ready(show_warning=False):
             return
         if self.auto_scan_worker and self.auto_scan_worker.is_alive():
             self._schedule_auto_scan(self.AUTO_SCAN_RETRY_MS)
@@ -1583,6 +2027,9 @@ class FactoryTestGUI:
         added = 0
         skipped = 0
         if success:
+            if not self._auto_scan_ready(show_warning=False):
+                self._refresh_action_states()
+                return
             network = self.config.get("network") or {}
             allowed_network = self._auto_scan_network(str(network.get("subnet") or "192.168.0.0/24"))
             for device in event.get("devices") or []:
@@ -1634,7 +2081,7 @@ class FactoryTestGUI:
             )
 
         self._refresh_action_states()
-        if self.auto_scan_var.get():
+        if self.auto_scan_var.get() and self._auto_scan_ready(show_warning=False):
             self._schedule_auto_scan(self.AUTO_SCAN_INTERVAL_MS if success else self.AUTO_SCAN_RETRY_MS)
 
     def _on_sn_enter(self, _event) -> None:
@@ -1659,9 +2106,8 @@ class FactoryTestGUI:
     def _refresh_form_grade_options(self) -> None:
         if not self.form_entry_enabled:
             return
-        grades = ["A", "B"]
-        if self.form_grade_var.get() not in grades and grades:
-            self.form_grade_var.set(grades[0])
+        if self.form_grade_var.get().strip().upper() not in {"A", "B"}:
+            self.form_grade_var.set("")
 
     def _on_switch_account(self, _event=None) -> None:
         if not self.form_entry_enabled:
@@ -1734,7 +2180,20 @@ class FactoryTestGUI:
         buttons.grid(row=2, column=0, columnspan=2, sticky=tk.EW)
         ttk.Button(buttons, text="保存并切换", command=save_account).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(buttons, text="取消", command=dialog.destroy).pack(side=tk.LEFT)
-    def _validate_form_settings(self) -> bool:
+    def _form_grade_choice(self) -> str:
+        grade = self.form_grade_var.get().strip().upper()
+        return grade if grade in {"A", "B"} else ""
+
+    def _auto_scan_ready(self, show_warning: bool) -> bool:
+        if self._validate_form_settings(show_warning=show_warning):
+            return True
+        if not show_warning and self.auto_form_entry_var.get() and not self._form_grade_choice():
+            self.status_var.set(self._timestamped("auto_scan_waiting_form_grade"))
+        elif not show_warning:
+            self.status_var.set(self._timestamped("auto_scan_waiting_form_config"))
+        return False
+
+    def _validate_form_settings(self, show_warning: bool = True) -> bool:
         if not self.form_entry_enabled:
             self.auto_form_entry_var.set(False)
             return True
@@ -1743,7 +2202,14 @@ class FactoryTestGUI:
             return True
         account_name = self.form_account_var.get().strip()
         if not account_name:
-            messagebox.showwarning("缺少录表账号", "请先添加或选择一个录表账号。")
+            if show_warning:
+                messagebox.showwarning("缺少录表账号", "请先添加或选择一个录表账号。")
+            return False
+        grade = self._form_grade_choice()
+        if not grade:
+            self.status_var.set(self._timestamped("auto_scan_waiting_form_grade"))
+            if show_warning:
+                messagebox.showwarning("未选择等级", "请先选择 A/B，或关闭自动录表。")
             return False
         try:
             for model in form_entry.available_models(self.project_root):
@@ -1751,15 +2217,16 @@ class FactoryTestGUI:
                     {"sn": "PREVIEW"},
                     self.project_root,
                     model=model,
-                    grade=self.form_grade_var.get(),
+                    grade=grade,
                 )
         except Exception as exc:
-            messagebox.showwarning("录表配置不可用", str(exc))
+            if show_warning:
+                messagebox.showwarning("录表配置不可用", str(exc))
             return False
         return True
 
     def _on_start_test(self) -> None:
-        if not self._validate_form_settings():
+        if not self._validate_form_settings(show_warning=True):
             return
         sn = normalize_sn(self.sn_var.get().strip())
         nas_ip = self._nas_ip()
@@ -1808,23 +2275,14 @@ class FactoryTestGUI:
             auto_form_entry=auto_form_entry,
             auto_seed_previous_step=auto_seed_previous_step,
             form_model=model_key_from_sn(sn) or "",
-            form_grade=self.form_grade_var.get() if self.form_entry_enabled else "",
+            form_grade=self._form_grade_choice() if auto_form_entry else "",
             form_account_name=self.form_account_var.get().strip() if auto_form_entry else "",
             reserved_ips=set(reserved_ips or {nas_ip}),
             network_interface=network_interface,
         )
         task.status = self._status_text(task.state_code)
         self.devices[task.task_id] = task
-        if self.device_tree is not None:
-            self.device_tree.insert(
-                "",
-                tk.END,
-                iid=task.task_id,
-                values=(task.sn, task.display_ip, task.status, task.elapsed_display, "0%", task.current_step),
-            )
-            if select:
-                self.device_tree.selection_set(task.task_id)
-                self.device_tree.focus(task.task_id)
+        self._insert_device_row(task, select=select)
 
         if select:
             self.selected_task_id = task.task_id
@@ -1837,8 +2295,11 @@ class FactoryTestGUI:
             f"自动录表={task.auto_form_entry}，自动补第一步={task.auto_seed_previous_step}，"
             f"机型={task.form_model or 'SN自动识别'}，等级={task.form_grade}，账号={task.form_account_name}",
         )
+        self._mark_daily_task_retry_pending(task)
+        self._refresh_device_rows_for_task_identity(task)
         self._refresh_summary()
         self._refresh_action_states()
+        self._save_queue_state()
 
         worker = threading.Thread(target=self._run_test_task, args=(task,), daemon=True)
         self.workers[task.task_id] = worker
@@ -2105,6 +2566,7 @@ class FactoryTestGUI:
             self._append_local_log(task.task_id, "\u5df2\u5173\u95ed\u8be5\u4efb\u52a1\u7684\u540e\u53f0\u6d4f\u89c8\u5668")
             task.browser_pid = None
         self._refresh_action_states()
+        self._save_queue_state()
 
     def _on_show_browser(self) -> None:
         task = self._selected_task()
@@ -2161,29 +2623,32 @@ class FactoryTestGUI:
             messagebox.showerror("冒烟检查失败", message)
         self._refresh_action_states()
 
-    def _remove_finished_tasks(self) -> None:
-        finished_ids = [
-            task_id
-            for task_id, task in self.devices.items()
-            if task.state_code in {"success", "failed", "cancelled"}
-        ]
-        if not finished_ids:
+    def _remove_current_task(self) -> None:
+        task = self._selected_task()
+        if task is None:
             return
+        if task.state_code in self.ACTIVE_STATES:
+            messagebox.showwarning("任务仍在运行", "请先中断或等待本台完成后再移除。")
+            return
+        self._remove_task(task)
 
-        selected_removed = self.selected_task_id in finished_ids
-        for task_id in finished_ids:
-            self.devices.pop(task_id, None)
-            if self.device_tree is not None and self.device_tree.exists(task_id):
-                self.device_tree.delete(task_id)
+    def _remove_task(self, task: DeviceTask) -> None:
+        task_id = task.task_id
+        self.devices.pop(task_id, None)
+        self.workers.pop(task_id, None)
+        if self.device_tree is not None and self.device_tree.exists(task_id):
+            self.device_tree.delete(task_id)
 
-        if selected_removed:
+        if self.selected_task_id == task_id:
             self.selected_task_id = None
             self.log_title_var.set(self._t("select_device_log"))
             self._set_log_contents(self._t("select_device_log_sentence"))
             self._clear_timing_chart()
 
+        self._refresh_device_rows_for_task_identity(task)
         self._refresh_summary()
         self._refresh_action_states()
+        self._save_queue_state()
 
     def _on_select_device(self, _event) -> None:
         if self.device_tree is None:
@@ -2204,6 +2669,7 @@ class FactoryTestGUI:
             return
 
         self._set_log_contents("".join(task.logs) if task.logs else self._t("no_logs"))
+        self._cancel_timing_chart_refresh()
         self._refresh_timing_chart(task)
 
     def _refresh_log_title(self) -> None:
@@ -2228,11 +2694,12 @@ class FactoryTestGUI:
         retrying = sum(1 for task in self.devices.values() if task.state_code == "retrying")
         cancelling = sum(1 for task in self.devices.values() if task.state_code == "cancelling")
         success = sum(1 for task in self.devices.values() if task.state_code == "success")
-        failed = sum(1 for task in self.devices.values() if task.state_code == "failed")
+        failed = sum(1 for task in self.devices.values() if self.ROW_FAILED_TAG in self._row_tags_for_task(task))
         cancelled = sum(1 for task in self.devices.values() if task.state_code == "cancelled")
         active = queued + running + transfer + on_hold + retrying + cancelling
 
         self.queue_summary_var.set(self._t("queue_summary", total=len(self.devices), active=active))
+        self._refresh_status_counts()
         self.status_var.set(
             f"{datetime.now().strftime('%H:%M:%S')}  "
             + self._t(
@@ -2246,8 +2713,21 @@ class FactoryTestGUI:
             )
         )
 
+    def _refresh_status_counts(self, success: int | None = None, failed: int | None = None) -> None:
+        if success is None or failed is None:
+            daily_success, daily_failed = self._daily_status_counts()
+            if success is None:
+                success = daily_success
+            if failed is None:
+                failed = daily_failed
+        self.success_count_var.set(self._t("success_count", count=success))
+        self.failed_count_var.set(self._t("failed_count", count=failed))
+
     def _refresh_action_states(self) -> None:
         selected = self._selected_task()
+        remove_enabled = selected is not None and selected.state_code not in self.ACTIVE_STATES
+        if self.remove_current_btn is not None:
+            self.remove_current_btn.configure(state=tk.NORMAL if remove_enabled else tk.DISABLED)
         show_enabled = selected is not None and selected.browser_pid is not None
         if self.show_browser_btn is not None:
             self.show_browser_btn.configure(state=tk.NORMAL if show_enabled else tk.DISABLED)
@@ -2259,9 +2739,27 @@ class FactoryTestGUI:
         if self.cancel_btn is not None:
             self.cancel_btn.configure(state=tk.NORMAL if cancel_enabled else tk.DISABLED)
 
+    def _on_close(self) -> None:
+        for task in self.devices.values():
+            if task.state_code not in self.ACTIVE_STATES:
+                continue
+            task.cancel_event.set()
+            task.state_code = "cancelled"
+            task.status = self._status_text("cancelled")
+            task.current_step = f"上次退出时未完成：{task.current_step}"
+            task.finished_monotonic = time.monotonic()
+        self._save_queue_state()
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
     def _next_task_id(self, sn: str) -> str:
-        self.task_counter += 1
-        return f"{sn}-{self.task_counter:03d}"
+        while True:
+            self.task_counter += 1
+            task_id = f"{sn}-{self.task_counter:03d}"
+            if task_id not in self.devices:
+                return task_id
 
     def _has_active_sn(self, sn: str) -> bool:
         return any(

@@ -9,8 +9,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import yaml
 
-DEFAULT_AUTOUPDATE_ROOT = Path(r"${USERPROFILE}\ugreen-nas-autoupdate")
+
 DEFAULT_SELECTED_MATERIAL_GROUPS = {"补充包材", "补充配件"}
 
 
@@ -18,23 +19,36 @@ class FormEntryError(RuntimeError):
     pass
 
 
+def _project_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[1]
+
+
+def _config_autoupdate_root() -> Path | None:
+    config_path = _project_root() / "config" / "config.yml"
+    try:
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return None
+    raw = ((data.get("paths") or {}).get("autoupdate_root") or "").strip()
+    return Path(raw) if raw else None
+
+
 def autoupdate_root() -> Path:
-    candidates = []
+    candidates: list[Path] = []
     if os.environ.get("UGREEN_AUTOUPDATE_ROOT"):
         candidates.append(Path(os.environ["UGREEN_AUTOUPDATE_ROOT"]))
-    candidates.extend(
-        [
-            DEFAULT_AUTOUPDATE_ROOT,
-            Path(__file__).resolve().parents[2] / "ugreen-nas-autoupdate",
-            Path(__file__).resolve().parents[1].parent.parent / "ugreen-nas-autoupdate",
-        ]
-    )
+    config_root = _config_autoupdate_root()
+    if config_root is not None:
+        candidates.append(config_root)
+    candidates.append(_project_root().parent / "ugreen-nas-autoupdate")
     for candidate in candidates:
         if (candidate / "automation" / "runner.py").exists():
             return candidate
     raise FormEntryError(
-        "找不到自动录表系统，请设置 UGREEN_AUTOUPDATE_ROOT 或放在 "
-        r"${USERPROFILE}\ugreen-nas-autoupdate"
+        "找不到自动录表系统，请设置 UGREEN_AUTOUPDATE_ROOT 或在 config/config.yml 的 "
+        "paths.autoupdate_root 里配置正确路径"
     )
 
 
@@ -120,14 +134,18 @@ def build_report_form_data(
         uploads[field] = {**item, "path": path}
 
     selected_groups = set(material_form.get("selected_material_groups") or DEFAULT_SELECTED_MATERIAL_GROUPS)
+    selected_codes = {str(code) for code in material_form.get("selected_material_codes") or []}
     all_materials = material_form.get("materials") or []
     material_groups = []
     for group in form.get("part_groups", []):
         group_title = str(group.get("title") or "")
-        group_items = [
+        candidates = [
             normalize_material(item)
             for item in all_materials
-            if str(item.get("group") or "") == group_title and (not selected_groups or group_title in selected_groups)
+            if str(item.get("group") or "") == group_title
+        ]
+        group_items = candidates if group_title in selected_groups else [
+            item for item in candidates if item.get("code") in selected_codes
         ]
         material_groups.append({**group, "items": group_items})
 
@@ -201,6 +219,24 @@ def _run_autoupdate_bridge(payload: dict[str, Any]) -> dict[str, Any]:
         return json.loads(text)
     except json.JSONDecodeError as exc:
         raise FormEntryError(f"自动录表系统返回不可解析: {text}") from exc
+
+
+def refresh_form_materials(project_root: Path | None = None, account_name: str | None = None) -> dict[str, Any]:
+    root = autoupdate_root()
+    python = os.environ.get("UGREEN_AUTOUPDATE_PYTHON") or sys.executable
+    if getattr(sys, "frozen", False):
+        python = os.environ.get("UGREEN_AUTOUPDATE_PYTHON") or "python"
+    cmd = [python, "-m", "automation.runner", "forms", "refresh"]
+    if account_name:
+        cmd.extend(["--account", account_name])
+    result = subprocess.run(cmd, cwd=root, text=True, capture_output=True, timeout=180)
+    if result.returncode != 0:
+        raise FormEntryError((result.stderr or result.stdout or "鑷姩褰曡〃鐗╂枡鍒锋柊澶辫触").strip())
+    text = (result.stdout or "").strip().splitlines()[-1]
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise FormEntryError(f"鑷姩褰曡〃鐗╂枡鍒锋柊杩斿洖涓嶅彲瑙ｆ瀽: {text}") from exc
 
 
 def list_accounts(project_root: Path | None = None) -> list[dict[str, Any]]:

@@ -35,6 +35,30 @@ class _Button:
         self.options.update(kwargs)
 
 
+class _Tree:
+    def __init__(self):
+        self.rows = {}
+        self.next_id = 0
+
+    def get_children(self):
+        return list(self.rows)
+
+    def delete(self, item):
+        self.rows.pop(item, None)
+
+    def insert(self, parent, index, text="", values=(), open=False, tags=()):
+        self.next_id += 1
+        item_id = f"row-{self.next_id}"
+        self.rows[item_id] = {
+            "parent": parent,
+            "text": text,
+            "values": values,
+            "open": open,
+            "tags": tags,
+        }
+        return item_id
+
+
 class _Root:
     def __init__(self):
         self.after_calls = []
@@ -156,6 +180,55 @@ def test_auto_form_success_report_requires_successful_upload(tmp_path) -> None:
     )
 
     assert gui._has_completed_output_for_sn("E54E")
+
+
+def test_materials_tab_shows_fresh_full_retry_mode(tmp_path) -> None:
+    gui = _gui_for_output(tmp_path)
+    gui.language_var = SimpleNamespace(get=lambda: "中文")
+    gui.materials_tree = _Tree()
+    gui.materials_status_var = _Var()
+    task = DeviceTask(
+        task_id="task-1",
+        sn="HB670EE07251E54E",
+        requested_ip="192.168.0.214",
+        mode="setup",
+        cleanup_before_finish=True,
+        factory_reset_before_finish=True,
+        auto_form_entry=True,
+    )
+    sn_root = tmp_path / task.sn
+    sn_root.mkdir()
+    (sn_root / "test_report.json").write_text(
+        json.dumps(
+            {
+                "form_data": {
+                    "model_label": "DXP2800",
+                    "grade": "A",
+                    "material_groups": [
+                        {
+                            "title": "补充包材",
+                            "items": [
+                                {"code": "MR_A", "name": "包材 A", "default_qty": 1},
+                                {"code": "MR_B", "name": "包材 B", "default_qty": 1},
+                            ],
+                        }
+                    ],
+                },
+                "form_result": {
+                    "status": "success",
+                    "material_selection_mode": "fresh_full_select_then_retry_remove_missing",
+                    "removed_material_codes": ["MR_B"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    gui._refresh_materials_tab(task)
+
+    assert "每次重取物料，全选后反选缺料" in gui.materials_status_var.get()
+    assert "缺料 1 项" in gui.materials_status_var.get()
+    assert any(row["text"] == "包材 B" and "item_missing" in row["tags"] for row in gui.materials_tree.rows.values())
 
 
 def test_failed_report_does_not_block_auto_scan(tmp_path) -> None:

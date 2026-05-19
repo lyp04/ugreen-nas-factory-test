@@ -57,6 +57,19 @@ def _merge_session_dirs(source: Path, target: Path) -> None:
             continue
         if not destination.exists():
             shutil.move(str(item), str(destination))
+            continue
+        try:
+            source_mtime = item.stat().st_mtime
+            target_mtime = destination.stat().st_mtime
+        except OSError:
+            continue
+        if source_mtime <= target_mtime:
+            continue
+        try:
+            destination.unlink()
+        except OSError:
+            continue
+        shutil.move(str(item), str(destination))
 
 
 def capture_page(page: "Page", sn: str, page_key: str, dest_dir: Path) -> Path:

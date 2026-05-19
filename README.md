@@ -32,13 +32,13 @@ powershell -ExecutionPolicy Bypass -File .\build-exe.ps1
 
 仓库不跟踪运行产物、日志、截图、虚拟环境、PyInstaller 产物和大体积传输测试包。
 
-自动录表桥接默认查找：
+自动录表桥接路径按优先级查找：
 
-```text
-${USERPROFILE}\ugreen-nas-autoupdate
-```
+1. 环境变量 `UGREEN_AUTOUPDATE_ROOT`
+2. `config/config.yml` 里的 `paths.autoupdate_root`
+3. factory-test 项目同级目录 `ugreen-nas-autoupdate`
 
-如果放在其他位置，请设置 `UGREEN_AUTOUPDATE_ROOT`。
+GUI 启动时会自动调用 `ugreen-nas-autoupdate` 的 `forms refresh` 命令刷新后台表单物料，不依赖外部定时任务。
 
 传输测速用文件默认在项目根目录查找：
 

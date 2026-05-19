@@ -365,6 +365,25 @@ UI_TEXT = {
         "status_summary": "运行中 {running} | On Hold {on_hold} | 重试 {retrying} | 排队 {queued} | 完成 {success} | 失败 {failed}",
         "tab_log": "日志",
         "tab_materials": "物料",
+        "tab_measurements": "测试数据",
+        "measure_select_device": "选择左侧设备查看测试数据。",
+        "measure_no_data": "暂无测试数据，等待测试运行后再查看。",
+        "measure_section_system": "系统",
+        "measure_section_storage": "存储池",
+        "measure_section_transfer": "传输测速",
+        "measure_section_fan": "温度 / 风扇",
+        "measure_ugos_version": "UGOS 版本",
+        "measure_link_bps": "网口速率",
+        "measure_hdd_pool": "HDD 存储池",
+        "measure_ssd_pool": "SSD 存储池",
+        "measure_hdd_write": "HDD 写入",
+        "measure_hdd_read": "HDD 读取",
+        "measure_ssd_write": "SSD 写入",
+        "measure_ssd_read": "SSD 读取",
+        "measure_fan_normal": "普通模式",
+        "measure_fan_silent": "安静模式",
+        "measure_fan_full": "全速模式",
+        "measure_threshold": "阈值",
         "materials_select_device": "选择左侧设备查看录表物料。",
         "materials_no_form": "本台设备未启用自动录表。",
         "materials_no_report": "该设备还未提交录表。",
@@ -378,6 +397,7 @@ UI_TEXT = {
         "materials_status_group_disabled": "未启用",
         "materials_submission_pending": "录表未完成",
         "materials_summary_missing": "缺料 {count} 项",
+        "materials_mode_fresh_full_retry": "每次重取物料，全选后反选缺料",
         "materials_col_name": "名称",
         "materials_col_code": "编码",
         "materials_col_qty": "数量",
@@ -431,6 +451,25 @@ UI_TEXT = {
         "status_summary": "Running {running} | On Hold {on_hold} | Retrying {retrying} | Queued {queued} | Done {success} | Failed {failed}",
         "tab_log": "Log",
         "tab_materials": "Materials",
+        "tab_measurements": "Measurements",
+        "measure_select_device": "Select a device on the left to view its measurements.",
+        "measure_no_data": "No measurements captured yet for this device.",
+        "measure_section_system": "System",
+        "measure_section_storage": "Storage pools",
+        "measure_section_transfer": "Transfer speed",
+        "measure_section_fan": "Temperature / fan",
+        "measure_ugos_version": "UGOS version",
+        "measure_link_bps": "Link speed",
+        "measure_hdd_pool": "HDD pool",
+        "measure_ssd_pool": "SSD pool",
+        "measure_hdd_write": "HDD write",
+        "measure_hdd_read": "HDD read",
+        "measure_ssd_write": "SSD write",
+        "measure_ssd_read": "SSD read",
+        "measure_fan_normal": "Normal mode",
+        "measure_fan_silent": "Silent mode",
+        "measure_fan_full": "Full-speed mode",
+        "measure_threshold": "threshold",
         "materials_select_device": "Select a device on the left to view submitted materials.",
         "materials_no_form": "Auto form entry was not enabled for this device.",
         "materials_no_report": "Form has not been submitted yet.",
@@ -444,6 +483,7 @@ UI_TEXT = {
         "materials_status_group_disabled": "Not enabled",
         "materials_submission_pending": "Submission incomplete",
         "materials_summary_missing": "{count} out of stock",
+        "materials_mode_fresh_full_retry": "Fresh material list, submit all then remove out-of-stock items",
         "materials_col_name": "Name",
         "materials_col_code": "Code",
         "materials_col_qty": "Qty",
@@ -497,6 +537,25 @@ UI_TEXT = {
         "status_summary": "En curso {running} | En espera {on_hold} | Reintentando {retrying} | En cola {queued} | Completadas {success} | Fallidas {failed}",
         "tab_log": "Bitácora",
         "tab_materials": "Materiales",
+        "tab_measurements": "Mediciones",
+        "measure_select_device": "Selecciona un equipo a la izquierda para ver sus mediciones.",
+        "measure_no_data": "Aún no hay mediciones para este equipo.",
+        "measure_section_system": "Sistema",
+        "measure_section_storage": "Pools de almacenamiento",
+        "measure_section_transfer": "Velocidad de transferencia",
+        "measure_section_fan": "Temperatura / ventilador",
+        "measure_ugos_version": "Versión UGOS",
+        "measure_link_bps": "Velocidad de enlace",
+        "measure_hdd_pool": "Pool HDD",
+        "measure_ssd_pool": "Pool SSD",
+        "measure_hdd_write": "Escritura HDD",
+        "measure_hdd_read": "Lectura HDD",
+        "measure_ssd_write": "Escritura SSD",
+        "measure_ssd_read": "Lectura SSD",
+        "measure_fan_normal": "Modo normal",
+        "measure_fan_silent": "Modo silencioso",
+        "measure_fan_full": "Velocidad máxima",
+        "measure_threshold": "mínimo",
         "materials_select_device": "Selecciona un equipo a la izquierda para ver los materiales enviados.",
         "materials_no_form": "La captura automática no está activa para este equipo.",
         "materials_no_report": "El formulario aún no se ha enviado.",
@@ -510,6 +569,7 @@ UI_TEXT = {
         "materials_status_group_disabled": "No activado",
         "materials_submission_pending": "Envío incompleto",
         "materials_summary_missing": "{count} sin stock",
+        "materials_mode_fresh_full_retry": "Lista actualizada, enviar todo y retirar faltantes",
         "materials_col_name": "Nombre",
         "materials_col_code": "Código",
         "materials_col_qty": "Cantidad",
@@ -566,6 +626,7 @@ class FactoryTestGUI:
     AUTO_SCAN_RETRY_MS = 5_000
     TIMING_CHART_REFRESH_MS = 1_000
     MATERIALS_REFRESH_MS = 3_000
+    MEASURE_REFRESH_MS = 3_000
     ROLLOVER_IP_PROBE_TIMEOUT = 0.5
     ROLLOVER_MAX_IP_PROBE_WORKERS = 32
 
@@ -630,6 +691,13 @@ class FactoryTestGUI:
         self.materials_status_var = tk.StringVar(value="")
         self.materials_status_label: ttk.Label | None = None
         self.materials_refresh_after_id: str | None = None
+        self.measure_tab_frame: ttk.Frame | None = None
+        self.measure_canvas: tk.Canvas | None = None
+        self.measure_inner: ttk.Frame | None = None
+        self.measure_window: int | None = None
+        self.measure_status_var = tk.StringVar(value="")
+        self.measure_status_label: ttk.Label | None = None
+        self.measure_refresh_after_id: str | None = None
         self.timing_canvas: tk.Canvas | None = None
         self.timing_chart_after_id: str | None = None
         self.daily_rollover_after_id: str | None = None
@@ -641,6 +709,7 @@ class FactoryTestGUI:
         self._refresh_status_counts()
         if self.form_entry_enabled:
             self._refresh_form_accounts()
+            self.root.after(0, self._refresh_form_materials_on_startup)
         self._attach_logger_sink()
         self._refresh_action_states()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -810,6 +879,7 @@ class FactoryTestGUI:
             self._set_log_contents(self._t("select_device_log_sentence"))
             self._clear_timing_chart()
             self._clear_materials_tab(self._t("materials_select_device"))
+            self._clear_measurements_tab(self._t("measure_select_device"))
 
         self._refresh_summary()
         self._refresh_action_states()
@@ -1208,6 +1278,53 @@ class FactoryTestGUI:
         materials_scroll.grid(row=1, column=1, sticky=tk.NS)
         self.materials_tree.configure(yscrollcommand=materials_scroll.set)
         self.materials_status_var.set(self._t("materials_select_device"))
+
+        self.measure_tab_frame = ttk.Frame(self.log_notebook)
+        self.measure_tab_frame.columnconfigure(0, weight=1)
+        self.measure_tab_frame.rowconfigure(1, weight=1)
+        self.log_notebook.add(self.measure_tab_frame, text=self._t("tab_measurements"))
+        self.measure_status_label = ttk.Label(
+            self.measure_tab_frame,
+            textvariable=self.measure_status_var,
+            foreground="#555555",
+        )
+        self.measure_status_label.grid(row=0, column=0, columnspan=2, sticky=tk.W, padx=(4, 0), pady=(4, 6))
+        self.measure_canvas = tk.Canvas(
+            self.measure_tab_frame,
+            highlightthickness=0,
+            borderwidth=0,
+            background=self.measure_tab_frame.winfo_toplevel().cget("background"),
+        )
+        self.measure_canvas.grid(row=1, column=0, sticky=tk.NSEW)
+        measure_scroll = ttk.Scrollbar(
+            self.measure_tab_frame, orient=tk.VERTICAL, command=self.measure_canvas.yview
+        )
+        measure_scroll.grid(row=1, column=1, sticky=tk.NS)
+        self.measure_canvas.configure(yscrollcommand=measure_scroll.set)
+        self.measure_inner = ttk.Frame(self.measure_canvas, padding=(4, 0, 4, 8))
+        self.measure_window = self.measure_canvas.create_window((0, 0), window=self.measure_inner, anchor="nw")
+        self.measure_inner.bind(
+            "<Configure>",
+            lambda _e: self.measure_canvas.configure(scrollregion=self.measure_canvas.bbox("all")),
+        )
+        self.measure_canvas.bind(
+            "<Configure>",
+            lambda e: self.measure_canvas.itemconfigure(self.measure_window, width=e.width),
+        )
+
+        def _on_measure_enter(_e):
+            self.measure_canvas.bind_all("<MouseWheel>", _on_measure_wheel)
+
+        def _on_measure_leave(_e):
+            self.measure_canvas.unbind_all("<MouseWheel>")
+
+        def _on_measure_wheel(e):
+            self.measure_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+
+        self.measure_canvas.bind("<Enter>", _on_measure_enter)
+        self.measure_canvas.bind("<Leave>", _on_measure_leave)
+        self.measure_status_var.set(self._t("measure_select_device"))
+
         self.log_notebook.bind("<<NotebookTabChanged>>", self._on_log_tab_changed)
 
         status_bar = ttk.Frame(main, relief=tk.SUNKEN, padding=(6, 2))
@@ -1265,6 +1382,8 @@ class FactoryTestGUI:
                 self.log_notebook.tab(self.log_tab_frame, text=self._t("tab_log"))
             if self.materials_tab_frame is not None:
                 self.log_notebook.tab(self.materials_tab_frame, text=self._t("tab_materials"))
+            if self.measure_tab_frame is not None:
+                self.log_notebook.tab(self.measure_tab_frame, text=self._t("tab_measurements"))
         if self.materials_tree is not None:
             self.materials_tree.heading("#0", text=self._t("materials_col_name"))
             self.materials_tree.heading("code", text=self._t("materials_col_code"))
@@ -1276,10 +1395,12 @@ class FactoryTestGUI:
         self._refresh_summary()
         if self.selected_task_id is None:
             self._clear_materials_tab(self._t("materials_select_device"))
+            self._clear_measurements_tab(self._t("measure_select_device"))
         else:
             task = self.devices.get(self.selected_task_id)
             if task is not None:
                 self._refresh_materials_tab(task)
+                self._refresh_measurements_tab(task)
         self._refresh_action_states()
 
     def _on_sound_toggle(self) -> None:
@@ -1332,6 +1453,8 @@ class FactoryTestGUI:
             self._finish_smoke(event)
         elif event_type == "auto_scan_done":
             self._finish_auto_scan(event)
+        elif event_type == "form_material_refresh":
+            self.status_var.set(str(event.get("message") or ""))
         elif event_type == "confirm_previous_step":
             self._handle_confirm_previous_step(event)
         elif event_type == "confirm_disk_shortage":
@@ -1502,6 +1625,8 @@ class FactoryTestGUI:
         ):
             self._refresh_materials_tab(task)
             self._schedule_materials_refresh()
+            self._refresh_measurements_tab(task)
+            self._schedule_measurements_refresh()
 
     def _show_failure_alert_if_needed(self, task: DeviceTask, error: str) -> None:
         if is_unflashed_password_error(error):
@@ -1779,14 +1904,149 @@ class FactoryTestGUI:
             self.materials_tree.delete(item)
         self.materials_status_var.set(status_text)
 
+    def _clear_measurements_tab(self, status_text: str = "") -> None:
+        measure_inner = getattr(self, "measure_inner", None)
+        if measure_inner is None:
+            return
+        for child in measure_inner.winfo_children():
+            child.destroy()
+        self.measure_status_var.set(status_text)
+        measure_canvas = getattr(self, "measure_canvas", None)
+        if measure_canvas is not None:
+            measure_canvas.yview_moveto(0)
+
+    def _add_measure_section(self, title: str) -> ttk.LabelFrame:
+        section = ttk.LabelFrame(self.measure_inner, text=title, padding=(10, 6, 10, 8))
+        section.columnconfigure(0, weight=0)
+        section.columnconfigure(1, weight=1)
+        section.pack(fill=tk.X, padx=2, pady=(0, 8))
+        return section
+
+    def _add_measure_row(self, section: ttk.LabelFrame, row_index: int, label: str, value: str, tone: str = "") -> None:
+        color_map = {"good": "#1f7a1f", "bad": "#c0392b", "muted": "#777777"}
+        value_color = color_map.get(tone, "#222222")
+        ttk.Label(section, text=label, foreground="#666666").grid(
+            row=row_index, column=0, sticky=tk.W, padx=(0, 16), pady=2
+        )
+        ttk.Label(
+            section,
+            text=value,
+            foreground=value_color,
+            font=("Microsoft YaHei UI", 10, "bold"),
+        ).grid(row=row_index, column=1, sticky=tk.W, pady=2)
+
+    def _refresh_measurements_tab(self, task: DeviceTask) -> None:
+        if self.measure_inner is None:
+            return
+        report_path = self._output_root() / task.sn / "test_report.json"
+        report = self._read_report(report_path) or {}
+        captured = report.get("captured_values") if isinstance(report.get("captured_values"), dict) else None
+        if not captured:
+            self._clear_measurements_tab(self._t("measure_no_data"))
+            return
+
+        self._clear_measurements_tab()
+        rendered_any = False
+
+        sys_rows: list[tuple[str, str, str]] = []
+        ugos = (captured.get("system_update") or {}).get("ugos_version")
+        if ugos:
+            sys_rows.append((self._t("measure_ugos_version"), str(ugos), ""))
+        link_bps = (captured.get("network_interface") or {}).get("link_bps")
+        if link_bps:
+            sys_rows.append((self._t("measure_link_bps"), f"{link_bps} Gbps", "good"))
+        if sys_rows:
+            section = self._add_measure_section(self._t("measure_section_system"))
+            for i, (label, value, tone) in enumerate(sys_rows):
+                self._add_measure_row(section, i, label, value, tone)
+            rendered_any = True
+
+        sp = captured.get("storage_pool") or {}
+        storage_rows: list[tuple[str, str, str]] = []
+        if sp.get("hdd_pool_raid"):
+            storage_rows.append((self._t("measure_hdd_pool"), str(sp["hdd_pool_raid"]), ""))
+        if sp.get("ssd_pool_raid"):
+            storage_rows.append((self._t("measure_ssd_pool"), str(sp["ssd_pool_raid"]), ""))
+        if storage_rows:
+            section = self._add_measure_section(self._t("measure_section_storage"))
+            for i, (label, value, tone) in enumerate(storage_rows):
+                self._add_measure_row(section, i, label, value, tone)
+            rendered_any = True
+
+        transfer_rows: list[tuple[str, str, str]] = []
+        for key, label_key in (
+            ("hdd_write", "measure_hdd_write"),
+            ("hdd_read", "measure_hdd_read"),
+            ("ssd_write", "measure_ssd_write"),
+            ("ssd_read", "measure_ssd_read"),
+        ):
+            page = captured.get(key) or {}
+            rate = page.get("rate")
+            if not rate:
+                continue
+            threshold = page.get("threshold_mbps")
+            status = str(page.get("speed_status") or "").lower()
+            suffix = (
+                f"   ({self._t('measure_threshold')} {threshold} MB/s)" if threshold else ""
+            )
+            tone = "good" if status == "ok" else ("bad" if status else "")
+            transfer_rows.append((self._t(label_key), f"{rate}{suffix}", tone))
+        if transfer_rows:
+            section = self._add_measure_section(self._t("measure_section_transfer"))
+            for i, (label, value, tone) in enumerate(transfer_rows):
+                self._add_measure_row(section, i, label, value, tone)
+            rendered_any = True
+
+        fan_rows: list[tuple[str, str, str]] = []
+        for key, label_key in (
+            ("fan_normal", "measure_fan_normal"),
+            ("fan_silent", "measure_fan_silent"),
+            ("fan_full_speed", "measure_fan_full"),
+        ):
+            page = captured.get(key) or {}
+            temp = page.get("cpu_temp")
+            rpm = page.get("device_fan_rpm")
+            if not temp and not rpm:
+                continue
+            parts = [str(p) for p in (temp, rpm) if p]
+            fan_rows.append((self._t(label_key), "   |   ".join(parts), ""))
+        if fan_rows:
+            section = self._add_measure_section(self._t("measure_section_fan"))
+            for i, (label, value, tone) in enumerate(fan_rows):
+                self._add_measure_row(section, i, label, value, tone)
+            rendered_any = True
+
+        if not rendered_any:
+            self.measure_status_var.set(self._t("measure_no_data"))
+            return
+
+        sn = str(report.get("sn") or task.sn)
+        model = str(report.get("form_model") or "")
+        parts = [sn]
+        if model:
+            parts.append(model)
+        status_code = str(report.get("status") or "")
+        if status_code:
+            parts.append(self._status_text(status_code) if status_code in self.STATUS_TEXT else status_code)
+        self.measure_status_var.set("  |  ".join(parts))
+
     def _on_log_tab_changed(self, _event=None) -> None:
         self._schedule_materials_refresh(delay_ms=0)
+        self._schedule_measurements_refresh(delay_ms=0)
 
     def _materials_tab_selected(self) -> bool:
         if self.log_notebook is None or self.materials_tab_frame is None:
             return False
         try:
             return str(self.log_notebook.select()) == str(self.materials_tab_frame)
+        except Exception:
+            return False
+
+    def _measure_tab_selected(self) -> bool:
+        if self.log_notebook is None or self.measure_tab_frame is None:
+            return False
+        try:
+            return str(self.log_notebook.select()) == str(self.measure_tab_frame)
         except Exception:
             return False
 
@@ -1809,6 +2069,26 @@ class FactoryTestGUI:
             return
         self._refresh_materials_tab(task)
         self._schedule_materials_refresh()
+
+    def _schedule_measurements_refresh(self, delay_ms: int | None = None) -> None:
+        if self.measure_inner is None:
+            return
+        if not self._measure_tab_selected():
+            return
+        if self.measure_refresh_after_id is not None:
+            return
+        delay = self.MEASURE_REFRESH_MS if delay_ms is None else delay_ms
+        self.measure_refresh_after_id = self.root.after(delay, self._run_measurements_refresh)
+
+    def _run_measurements_refresh(self) -> None:
+        self.measure_refresh_after_id = None
+        if self.selected_task_id is None or not self._measure_tab_selected():
+            return
+        task = self.devices.get(self.selected_task_id)
+        if task is None:
+            return
+        self._refresh_measurements_tab(task)
+        self._schedule_measurements_refresh()
 
     def _refresh_materials_tab(self, task: DeviceTask) -> None:
         if self.materials_tree is None:
@@ -1898,6 +2178,8 @@ class FactoryTestGUI:
         grade = str(form_data.get("grade") or "").upper()
         model_label = str(form_data.get("model_label") or form_data.get("model_key") or "")
         parts = [p for p in (model_label, f"{self._t('grade')} {grade}" if grade else "") if p]
+        if str(form_result.get("material_selection_mode") or "") == "fresh_full_select_then_retry_remove_missing":
+            parts.append(self._t("materials_mode_fresh_full_retry"))
         if not submission_complete:
             parts.append(self._t("materials_submission_pending"))
         elif removed_codes:
@@ -2469,6 +2751,32 @@ class FactoryTestGUI:
         elif names:
             self.form_account_var.set(names[0])
         self._refresh_form_grade_options()
+
+    def _refresh_form_materials_on_startup(self) -> None:
+        if not self.form_entry_enabled:
+            return
+        account_name = self.form_account_var.get().strip()
+
+        def worker() -> None:
+            try:
+                result = form_entry.refresh_form_materials(self.project_root, account_name=account_name or None)
+                forms = result.get("forms") if isinstance(result, dict) else []
+                total = sum(int(item.get("selected_count") or 0) for item in forms if isinstance(item, dict))
+                self.ui_queue.put(
+                    {
+                        "type": "form_material_refresh",
+                        "message": f"{datetime.now().strftime('%H:%M:%S')}  已刷新录表物料，当前提交物料 {total} 项",
+                    }
+                )
+            except Exception as exc:
+                self.ui_queue.put(
+                    {
+                        "type": "form_material_refresh",
+                        "message": f"{datetime.now().strftime('%H:%M:%S')}  录表物料刷新失败：{exc}",
+                    }
+                )
+
+        threading.Thread(target=worker, name="form-material-refresh", daemon=True).start()
 
     def _refresh_form_grade_options(self) -> None:
         if not self.form_entry_enabled:
@@ -3066,6 +3374,7 @@ class FactoryTestGUI:
             self._set_log_contents(self._t("select_device_log_sentence"))
             self._clear_timing_chart()
             self._clear_materials_tab(self._t("materials_select_device"))
+            self._clear_measurements_tab(self._t("measure_select_device"))
 
         self._refresh_device_rows_for_task_identity(task)
         self._refresh_summary()
@@ -3082,6 +3391,7 @@ class FactoryTestGUI:
             self._set_log_contents(self._t("select_device_log_sentence"))
             self._clear_timing_chart()
             self._clear_materials_tab(self._t("materials_select_device"))
+            self._clear_measurements_tab(self._t("measure_select_device"))
             return
 
         task = self.devices.get(self.selected_task_id)
@@ -3089,6 +3399,7 @@ class FactoryTestGUI:
             self._set_log_contents(self._t("select_device_log_sentence"))
             self._clear_timing_chart()
             self._clear_materials_tab(self._t("materials_select_device"))
+            self._clear_measurements_tab(self._t("measure_select_device"))
             return
 
         self._set_log_contents("".join(task.logs) if task.logs else self._t("no_logs"))
@@ -3096,6 +3407,8 @@ class FactoryTestGUI:
         self._refresh_timing_chart(task)
         self._refresh_materials_tab(task)
         self._schedule_materials_refresh(delay_ms=0)
+        self._refresh_measurements_tab(task)
+        self._schedule_measurements_refresh(delay_ms=0)
 
     def _refresh_summary(self) -> None:
         queued = sum(1 for task in self.devices.values() if task.state_code == "queued")

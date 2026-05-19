@@ -2,6 +2,7 @@
 
 import json
 import ipaddress
+import re
 import sys
 import threading
 import time
@@ -70,6 +71,9 @@ PAGE_LABELS = {
     "fan_full_speed": "风扇全速模式",
 }
 FORM_MISSING_ACCESSORY_STAGE = "未上传：缺少配件照片"
+FAN_RPM_FAILURE_STAGE = "风扇转速异常"
+FAN_RPM_KEYS = ("resource_monitor", "fan_normal", "fan_silent", "fan_full_speed")
+NUMBER_RE = re.compile(r"[-+]?(?:\d+(?:,\d{3})+|\d+)(?:\.\d+)?")
 POOL_CREATION_ERROR_MARKERS = (
     "Storage pool summary did not appear in time after creation",
     "Storage-pool creation dialog did not render any configured disk options in time",
@@ -145,6 +149,8 @@ def _merge_resume_report(report: dict, previous: dict) -> None:
         report["form_result"] = dict(form_result)
     if previous.get("provisioned"):
         report["provisioned"] = True
+    if previous.get("provision_started"):
+        report["provision_started"] = True
     previous_status = str(previous.get("status") or "").strip()
     if previous_status and previous_status != "success":
         report["resumed_from_status"] = previous_status
@@ -160,7 +166,44 @@ def _form_result_is_success(report: dict) -> bool:
 
 
 def _has_resume_artifacts(report: dict) -> bool:
-    return bool(report.get("provisioned") or report.get("captured") or report.get("captured_values"))
+    return bool(
+        report.get("provisioned")
+        or report.get("provision_started")
+        or report.get("captured")
+        or report.get("captured_values")
+    )
+
+
+def _first_number(value: object) -> float | None:
+    match = NUMBER_RE.search(str(value or ""))
+    if not match:
+        return None
+    try:
+        return float(match.group(0).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def _fan_rpm_failures(captured_values: dict) -> list[str]:
+    failures: list[str] = []
+    for page_key in FAN_RPM_KEYS:
+        values = captured_values.get(page_key)
+        if not isinstance(values, dict):
+            continue
+        raw = values.get("device_fan_rpm")
+        rpm = _first_number(raw)
+        label = _page_label(page_key)
+        if rpm is None:
+            failures.append(f"{label} 未读取到风扇转速")
+        elif rpm <= 0:
+            failures.append(f"{label} 风扇转速 {raw}，必须大于 0")
+    return failures
+
+
+def _validate_captured_measurements(captured_values: dict) -> None:
+    failures = _fan_rpm_failures(captured_values)
+    if failures:
+        raise RuntimeError(f"{FAN_RPM_FAILURE_STAGE}: {'；'.join(failures)}")
 
 
 def _write_report_checkpoint(dirs: dict[str, Path], report: dict, stage: str | None = None) -> None:
@@ -187,6 +230,8 @@ def is_unflashed_password_error(exc_or_message: object) -> bool:
 
 
 def failure_stage_for_error(exc_or_message: object) -> str:
+    if FAN_RPM_FAILURE_STAGE in str(exc_or_message):
+        return FAN_RPM_FAILURE_STAGE
     if is_pool_creation_timeout_error(exc_or_message):
         return POOL_CREATION_FAILURE_STAGE
     if is_unflashed_password_error(exc_or_message):
@@ -316,7 +361,7 @@ def run_test(
         raise ValueError("SN must contain at least the last 4 alphanumeric characters")
 
     requested_form_model = _normalize_model_override(form_model)
-    form_model = _resolve_model_for_sn(sn, requested_form_model)[0]
+    form_model, form_model_source = _resolve_model_for_sn(sn, requested_form_model)
     form_features_enabled = FORM_ENTRY_ENABLED and form_entry is not None
     if not form_features_enabled:
         auto_form_entry = False
@@ -347,7 +392,7 @@ def run_test(
         "factory_reset_before_finish": factory_reset_before_finish,
         "auto_form_entry": auto_form_entry,
         "form_model": form_model,
-        "model_source": _resolve_model_for_sn(sn, requested_form_model)[1],
+        "model_source": form_model_source,
         "form_grade": form_grade,
         "form_account_name": form_account_name,
         "status": "running",
@@ -532,6 +577,9 @@ def run_test(
 
                     progress.set_stage("准备共享目录", status="running", nas_ip=ip)
                     _raise_if_cancelled(cancel_requested_cb)
+                    reset_existing_pools = not _has_resume_artifacts(report)
+                    report["provision_started"] = True
+                    checkpoint("准备共享目录")
                     provision_flow.run(
                         page,
                         config,
@@ -539,7 +587,7 @@ def run_test(
                         config["admin"],
                         confirm_disk_shortage_cb=confirm_disk_shortage_cb,
                         model=form_model,
-                        reset_existing_pools=not _has_resume_artifacts(report),
+                        reset_existing_pools=reset_existing_pools,
                     )
                     report["provisioned"] = True
                     progress.complete_step("共享目录已就绪", nas_ip=ip)
@@ -585,6 +633,7 @@ def run_test(
                     )
                     report["captured"] = saved
                     report["captured_values"] = captured_values
+                    _validate_captured_measurements(captured_values)
                     checkpoint("截图完成")
 
                     if auto_form_entry:
@@ -718,7 +767,7 @@ def run_cleanup(sn: str, nas_ip: str = "auto", setup_file_log: bool = True) -> d
     device_lock_acquired = False
     if not device_lock.acquire(blocking=False):
         logger.info(f"NAS {ip}: another task is active, waiting on hold")
-        device_lock.acquire()
+        _acquire_lock_until_cancelled(device_lock, None)
     device_lock_acquired = True
     logger.info(f"NAS {ip}: device lock acquired")
     wait_until_ready(ip, port, config["network"]["service_ready_timeout"])

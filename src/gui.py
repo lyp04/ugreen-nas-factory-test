@@ -754,15 +754,77 @@ class FactoryTestGUI:
 
     def _load_daily_stats(self) -> tuple[str, dict[str, dict]]:
         today = self._today_key()
+        devices: dict[str, dict] = {}
         path = self._daily_stats_path()
         try:
             data = json.loads(path.read_text(encoding="utf-8-sig"))
         except Exception:
-            return today, {}
-        if str(data.get("date") or "") != today:
-            return today, {}
-        devices = data.get("devices")
-        return today, dict(devices) if isinstance(devices, dict) else {}
+            data = {}
+        if str(data.get("date") or "") == today and isinstance(data.get("devices"), dict):
+            devices.update(dict(data["devices"]))
+        devices.update(self._daily_stats_from_output_folders(today))
+        return today, devices
+
+    def _daily_stats_from_output_folders(self, today: str) -> dict[str, dict]:
+        try:
+            output_root = self._output_root()
+        except Exception as exc:
+            logger.warning(f"Could not scan daily output folders: {exc}")
+            return {}
+        if not output_root.exists():
+            return {}
+
+        devices: dict[str, dict] = {}
+        try:
+            folders = list(output_root.iterdir())
+        except Exception as exc:
+            logger.warning(f"Could not list daily output folders: {exc}")
+            return {}
+        for sn_root in folders:
+            if not sn_root.is_dir():
+                continue
+            entry = self._daily_entry_from_output_folder(sn_root, today)
+            if entry is None:
+                continue
+            key, payload = entry
+            devices[key] = payload
+        return devices
+
+    def _daily_entry_from_output_folder(self, sn_root: Path, today: str) -> tuple[str, dict] | None:
+        try:
+            if self._path_created_date(sn_root) != today:
+                return None
+        except Exception:
+            return None
+
+        report = self._read_report(sn_root / "test_report.json")
+        if not report:
+            return None
+        status = str(report.get("status") or "").lower()
+        if status not in {"success", "failed"}:
+            return None
+
+        report_sn = normalize_sn(str(report.get("sn") or ""))
+        folder_sn = normalize_sn(sn_root.name)
+        sn = report_sn or folder_sn
+        key = self._daily_output_entry_key(sn, sn_root)
+        return key, {
+            "sn": sn,
+            "status": status,
+            "updated_at": str(report.get("finished_at") or report.get("started_at") or ""),
+            "source": "output_folder",
+            "folder": str(sn_root),
+        }
+
+    def _daily_output_entry_key(self, sn: str, sn_root: Path) -> str:
+        normalized_sn = normalize_sn(sn)
+        tail = sn_tail(normalized_sn)
+        if normalized_sn and not is_auto_sn_placeholder(normalized_sn) and len(tail) >= 4:
+            return f"sn:{tail}"
+        return f"folder:{sn_root.name}"
+
+    def _path_created_date(self, path: Path) -> str:
+        return datetime.fromtimestamp(path.stat().st_ctime).strftime("%Y-%m-%d")
 
     def _save_daily_stats(self) -> None:
         try:
@@ -787,8 +849,7 @@ class FactoryTestGUI:
         today = self._today_key()
         if getattr(self, "daily_stats_date", "") == today:
             return
-        self.daily_stats_date = today
-        self.daily_stats_devices = {}
+        self.daily_stats_date, self.daily_stats_devices = self._load_daily_stats()
         self._save_daily_stats()
 
     def _detect_present_task_ips(self, tasks) -> set[str]:
@@ -853,8 +914,7 @@ class FactoryTestGUI:
 
     def _handle_daily_rollover(self) -> None:
         self.daily_rollover_after_id = None
-        self.daily_stats_date = self._today_key()
-        self.daily_stats_devices = {}
+        self.daily_stats_date, self.daily_stats_devices = self._load_daily_stats()
         self._save_daily_stats()
 
         removed_selected = self.selected_task_id is not None

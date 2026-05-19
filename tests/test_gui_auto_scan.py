@@ -579,6 +579,60 @@ def test_daily_stats_loads_utf8_bom_file(tmp_path) -> None:
     assert devices["sn:23DD"]["status"] == "failed"
 
 
+def test_daily_stats_bootstraps_today_counts_from_output_folder_creation_date(monkeypatch, tmp_path) -> None:
+    gui = _gui_for_output(tmp_path)
+    today = gui._today_key()
+    success_sn = "HB670EE0725123DD"
+    failed_sn = "HB670EE07251E54E"
+    stale_sn = "HB670EE07251ABCD"
+
+    state_path = gui._daily_stats_path()
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "date": today,
+                "devices": {
+                    "sn:23DD": {"sn": success_sn, "status": "failed"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    for sn, status in ((success_sn, "success"), (failed_sn, "failed"), (stale_sn, "success")):
+        sn_root = tmp_path / sn
+        sn_root.mkdir()
+        (sn_root / "test_report.json").write_text(
+            json.dumps(
+                {
+                    "sn": sn,
+                    "status": status,
+                    "started_at": f"{today}T08:00:00",
+                    "finished_at": f"{today}T08:30:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(
+        gui,
+        "_path_created_date",
+        lambda path: "2000-01-01" if path.name == stale_sn else today,
+    )
+
+    date, devices = gui._load_daily_stats()
+
+    assert date == today
+    assert devices["sn:23DD"]["status"] == "success"
+    assert devices["sn:E54E"]["status"] == "failed"
+    assert "sn:ABCD" not in devices
+
+    gui.daily_stats_date = date
+    gui.daily_stats_devices = devices
+    assert gui._daily_status_counts() == (1, 1)
+
+
 def test_queue_state_save_merges_existing_same_day_rows(tmp_path) -> None:
     gui = _gui_with_queue_state(tmp_path)
     path = gui._queue_state_path()

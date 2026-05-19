@@ -947,17 +947,126 @@ class FactoryTestGUI:
         self._schedule_daily_rollover()
 
     def _load_queue_state_records(self) -> list[dict]:
+        today = self._today_key()
+        records: list[dict] = []
         path = self._queue_state_path()
         try:
             data = json.loads(path.read_text(encoding="utf-8-sig"))
         except Exception:
+            data = {}
+        if str(data.get("date") or "") == today and isinstance(data.get("devices"), list):
+            records = [record for record in data["devices"] if isinstance(record, dict)]
+        return self._merge_queue_records_with_output(records, today)
+
+    def _merge_queue_records_with_output(self, records: list[dict], today: str) -> list[dict]:
+        merged_by_key: dict[str, dict] = {}
+        order: list[str] = []
+
+        def add_or_update(record: dict, prefer_output: bool = False) -> None:
+            key = self._queue_record_identity_key(record)
+            if not key:
+                return
+            if key not in merged_by_key:
+                merged_by_key[key] = dict(record)
+                order.append(key)
+                return
+            if not prefer_output:
+                merged_by_key[key].update(record)
+                return
+            existing = dict(merged_by_key[key])
+            task_id = str(existing.get("task_id") or "").strip()
+            existing.update(record)
+            if task_id:
+                existing["task_id"] = task_id
+            merged_by_key[key] = existing
+
+        for record in records:
+            add_or_update(record)
+        for record in self._queue_records_from_output_folders(today):
+            add_or_update(record, prefer_output=True)
+        return [merged_by_key[key] for key in order]
+
+    def _queue_records_from_output_folders(self, today: str) -> list[dict]:
+        try:
+            output_root = self._output_root()
+        except Exception as exc:
+            logger.warning(f"Could not scan queue output folders: {exc}")
             return []
-        if str(data.get("date") or "") != self._today_key():
+        try:
+            folders = sorted(
+                (path for path in output_root.iterdir() if path.is_dir()),
+                key=lambda path: path.stat().st_ctime,
+            )
+        except Exception as exc:
+            logger.warning(f"Could not list queue output folders: {exc}")
             return []
-        records = data.get("devices")
-        if not isinstance(records, list):
-            return []
-        return [record for record in records if isinstance(record, dict)]
+
+        records: list[dict] = []
+        for index, sn_root in enumerate(folders, start=1):
+            record = self._queue_record_from_output_folder(sn_root, today, index)
+            if record is not None:
+                records.append(record)
+        return records
+
+    def _queue_record_from_output_folder(self, sn_root: Path, today: str, index: int) -> dict | None:
+        try:
+            if self._path_created_date(sn_root) != today:
+                return None
+        except Exception:
+            return None
+
+        report = self._read_report(sn_root / "test_report.json")
+        if not report:
+            return None
+        status = str(report.get("status") or "").lower()
+        if status not in {"success", "failed"}:
+            return None
+
+        sn = normalize_sn(str(report.get("sn") or sn_root.name))
+        if not sn:
+            return None
+        nas_ip = str(report.get("nas_ip") or "auto").strip() or "auto"
+        current_step = str(report.get("current_stage") or report.get("error") or "")
+        if not current_step:
+            current_step = "Restored from output report"
+        return {
+            "task_id": f"{sn}-{index:03d}",
+            "sn": sn,
+            "requested_ip": nas_ip,
+            "actual_ip": nas_ip if nas_ip.lower() != "auto" else "",
+            "mode": str(report.get("mode") or "setup"),
+            "cleanup_before_finish": bool(report.get("cleanup_before_finish", True)),
+            "factory_reset_before_finish": bool(report.get("factory_reset_before_finish", True)),
+            "auto_form_entry": bool(report.get("auto_form_entry", False)),
+            "auto_seed_previous_step": False,
+            "form_model": str(report.get("form_model") or model_key_from_sn(sn) or ""),
+            "form_grade": str(report.get("form_grade") or "A"),
+            "form_account_name": str(report.get("form_account_name") or ""),
+            "state_code": status,
+            "progress": 100 if status == "success" else 0,
+            "current_step": current_step,
+            "reserved_ips": [] if nas_ip.lower() == "auto" else [nas_ip],
+            "network_interface": str(report.get("network_interface") or ""),
+            "attempt": self._safe_int(report.get("attempt"), 1),
+            "max_attempts": self._safe_int(report.get("max_attempts"), 2),
+            "elapsed_seconds": self._report_elapsed_seconds(report),
+        }
+
+    def _queue_record_identity_key(self, record: dict) -> str:
+        sn = normalize_sn(str(record.get("sn") or ""))
+        tail = sn_tail(sn)
+        if sn and not is_auto_sn_placeholder(sn) and len(tail) >= 4:
+            return f"sn:{tail}"
+        task_id = str(record.get("task_id") or "").strip()
+        return f"task:{task_id}" if task_id else ""
+
+    def _report_elapsed_seconds(self, report: dict) -> int:
+        try:
+            started = datetime.fromisoformat(str(report.get("started_at") or ""))
+            finished = datetime.fromisoformat(str(report.get("finished_at") or ""))
+        except Exception:
+            return 0
+        return max(0, int((finished - started).total_seconds()))
 
     def _save_queue_state(self, merge_existing: bool = True) -> None:
         try:

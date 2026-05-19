@@ -541,6 +541,76 @@ def test_queue_state_loads_utf8_bom_file(tmp_path) -> None:
     assert gui._load_queue_state_records()[0]["task_id"] == "old-001"
 
 
+def test_queue_state_bootstraps_today_records_from_output_folders(monkeypatch, tmp_path) -> None:
+    gui = _gui_with_queue_state(tmp_path)
+    today = gui._today_key()
+    success_sn = "HB670EE0725123DD"
+    failed_sn = "HB670EE07251E54E"
+    stale_sn = "HB670EE07251ABCD"
+
+    state_path = gui._queue_state_path()
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "date": today,
+                "devices": [
+                    {
+                        "task_id": "kept-042",
+                        "sn": success_sn,
+                        "requested_ip": "auto",
+                        "state_code": "failed",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    for sn, status, ip in (
+        (success_sn, "success", "192.168.0.123"),
+        (failed_sn, "failed", "192.168.0.124"),
+        (stale_sn, "success", "192.168.0.125"),
+    ):
+        sn_root = tmp_path / sn
+        sn_root.mkdir()
+        (sn_root / "test_report.json").write_text(
+            json.dumps(
+                {
+                    "sn": sn,
+                    "mode": "setup",
+                    "status": status,
+                    "nas_ip": ip,
+                    "started_at": f"{today}T08:00:00",
+                    "finished_at": f"{today}T08:30:00",
+                    "current_stage": "done",
+                    "auto_form_entry": True,
+                    "form_model": "2800",
+                    "form_grade": "B",
+                    "form_account_name": "operator01",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(
+        gui,
+        "_path_created_date",
+        lambda path: "2000-01-01" if path.name == stale_sn else today,
+    )
+
+    records = gui._load_queue_state_records()
+    records_by_sn = {record["sn"]: record for record in records}
+
+    assert len(records) == 2
+    assert records_by_sn[success_sn]["task_id"] == "kept-042"
+    assert records_by_sn[success_sn]["state_code"] == "success"
+    assert records_by_sn[success_sn]["requested_ip"] == "192.168.0.123"
+    assert records_by_sn[success_sn]["elapsed_seconds"] == 1800
+    assert records_by_sn[failed_sn]["state_code"] == "failed"
+    assert stale_sn not in records_by_sn
+
+
 def test_queue_state_empty_memory_does_not_overwrite_existing_file(tmp_path) -> None:
     gui = _gui_with_queue_state(tmp_path)
     path = gui._queue_state_path()

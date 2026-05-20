@@ -567,10 +567,10 @@ def test_queue_state_bootstraps_today_records_from_output_folders(monkeypatch, t
         encoding="utf-8",
     )
 
-    for sn, status, ip in (
-        (success_sn, "success", "192.168.0.123"),
-        (failed_sn, "failed", "192.168.0.124"),
-        (stale_sn, "success", "192.168.0.125"),
+    for sn, status, ip, started_at in (
+        (success_sn, "success", "192.168.0.123", f"{today}T09:00:00"),
+        (failed_sn, "failed", "192.168.0.124", f"{today}T08:00:00"),
+        (stale_sn, "success", "192.168.0.125", f"{today}T07:00:00"),
     ):
         sn_root = tmp_path / sn
         sn_root.mkdir()
@@ -581,8 +581,8 @@ def test_queue_state_bootstraps_today_records_from_output_folders(monkeypatch, t
                     "mode": "setup",
                     "status": status,
                     "nas_ip": ip,
-                    "started_at": f"{today}T08:00:00",
-                    "finished_at": f"{today}T08:30:00",
+                    "started_at": started_at,
+                    "finished_at": started_at.replace(":00:00", ":30:00"),
                     "current_stage": "done",
                     "auto_form_entry": True,
                     "form_model": "2800",
@@ -598,11 +598,18 @@ def test_queue_state_bootstraps_today_records_from_output_folders(monkeypatch, t
         "_path_created_date",
         lambda path: "2000-01-01" if path.name == stale_sn else today,
     )
+    created_at_by_name = {
+        success_sn: f"{today}T09:00:00",
+        failed_sn: f"{today}T08:00:00",
+        stale_sn: f"{today}T07:00:00",
+    }
+    monkeypatch.setattr(gui, "_path_created_timestamp", lambda path: created_at_by_name[path.name])
 
     records = gui._load_queue_state_records()
     records_by_sn = {record["sn"]: record for record in records}
 
     assert len(records) == 2
+    assert [record["sn"] for record in records] == [failed_sn, success_sn]
     assert records_by_sn[success_sn]["task_id"] == "kept-042"
     assert records_by_sn[success_sn]["state_code"] == "success"
     assert records_by_sn[success_sn]["requested_ip"] == "192.168.0.123"

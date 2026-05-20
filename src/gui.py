@@ -826,6 +826,9 @@ class FactoryTestGUI:
     def _path_created_date(self, path: Path) -> str:
         return datetime.fromtimestamp(path.stat().st_ctime).strftime("%Y-%m-%d")
 
+    def _path_created_timestamp(self, path: Path) -> str:
+        return datetime.fromtimestamp(path.stat().st_ctime).isoformat(timespec="seconds")
+
     def _save_daily_stats(self) -> None:
         try:
             path = self._daily_stats_path()
@@ -960,7 +963,6 @@ class FactoryTestGUI:
 
     def _merge_queue_records_with_output(self, records: list[dict], today: str) -> list[dict]:
         merged_by_key: dict[str, dict] = {}
-        order: list[str] = []
 
         def add_or_update(record: dict, prefer_output: bool = False) -> None:
             key = self._queue_record_identity_key(record)
@@ -968,7 +970,6 @@ class FactoryTestGUI:
                 return
             if key not in merged_by_key:
                 merged_by_key[key] = dict(record)
-                order.append(key)
                 return
             if not prefer_output:
                 merged_by_key[key].update(record)
@@ -984,7 +985,7 @@ class FactoryTestGUI:
             add_or_update(record)
         for record in self._queue_records_from_output_folders(today):
             add_or_update(record, prefer_output=True)
-        return [merged_by_key[key] for key in order]
+        return self._sort_queue_records(list(merged_by_key.values()))
 
     def _queue_records_from_output_folders(self, today: str) -> list[dict]:
         try:
@@ -1029,6 +1030,7 @@ class FactoryTestGUI:
         current_step = str(report.get("current_stage") or report.get("error") or "")
         if not current_step:
             current_step = "Restored from output report"
+        order_at = self._report_order_timestamp(report, sn_root)
         return {
             "task_id": f"{sn}-{index:03d}",
             "sn": sn,
@@ -1050,6 +1052,9 @@ class FactoryTestGUI:
             "attempt": self._safe_int(report.get("attempt"), 1),
             "max_attempts": self._safe_int(report.get("max_attempts"), 2),
             "elapsed_seconds": self._report_elapsed_seconds(report),
+            "started_at": str(report.get("started_at") or ""),
+            "finished_at": str(report.get("finished_at") or ""),
+            "queue_order_at": order_at,
         }
 
     def _queue_record_identity_key(self, record: dict) -> str:
@@ -1068,6 +1073,37 @@ class FactoryTestGUI:
             return 0
         return max(0, int((finished - started).total_seconds()))
 
+    def _report_order_timestamp(self, report: dict, sn_root: Path) -> str:
+        try:
+            return self._path_created_timestamp(sn_root)
+        except Exception:
+            pass
+        for key in ("started_at", "finished_at"):
+            value = str(report.get(key) or "").strip()
+            if value:
+                return value
+        return ""
+
+    def _sort_queue_records(self, records: list[dict]) -> list[dict]:
+        return sorted(records, key=self._queue_record_sort_key)
+
+    def _queue_record_sort_key(self, record: dict) -> tuple[int, float, int, str]:
+        raw_value = str(
+            record.get("queue_order_at")
+            or record.get("started_at")
+            or record.get("finished_at")
+            or ""
+        ).strip()
+        try:
+            timestamp = datetime.fromisoformat(raw_value).timestamp()
+            has_timestamp = 0
+        except Exception:
+            timestamp = 0.0
+            has_timestamp = 1
+        task_id = str(record.get("task_id") or "")
+        sn = normalize_sn(str(record.get("sn") or ""))
+        return (has_timestamp, timestamp, self._task_counter_from_id(task_id), sn)
+
     def _save_queue_state(self, merge_existing: bool = True) -> None:
         try:
             path = self._queue_state_path()
@@ -1083,11 +1119,12 @@ class FactoryTestGUI:
                         records_by_id[task_id] = record
             for task in self.devices.values():
                 records_by_id[task.task_id] = self._queue_record_for_task(task)
+            records = self._sort_queue_records(list(records_by_id.values()))
             path.write_text(
                 json.dumps(
                     {
                         "date": self._today_key(),
-                        "devices": list(records_by_id.values()),
+                        "devices": records,
                     },
                     ensure_ascii=False,
                     indent=2,

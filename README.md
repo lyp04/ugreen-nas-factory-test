@@ -80,6 +80,7 @@ GUI 启动时会按 `config/update-config.json` 的配置去 GitHub Releases 拉
 - 客户端 `src/version.py` 里的 `VERSION_CODE` 严格小于 `update.json.versionCode` 时才会触发更新提示。
 - 用户点 “下载并安装” 后，新 exe 会先校验 SHA-256，再由 `state/updates/updater.ps1` 等待当前进程退出后原地替换 exe 并重启。
 - 发版动作只需要 `git tag vX.Y.Z && git push --tags`：CI 工作流会把 tag 名当 `versionName`，`git rev-list --count HEAD` 当 `versionCode`，自动 stamp 进 `src/version.py` 再打包。
+- 已部署的 v0.1.0 / v0.1.1 无法自动升级（早期 swap 脚本用 `Move-Item -Force` 会在某些环境下静默 no-op；v0.1.2 已改用 `[System.IO.File]::Move`）。首次需要把 v0.1.2 的 exe 手动拷到工厂电脑替换原 exe，之后才会正常自动更新。
 
 ## 目录
 

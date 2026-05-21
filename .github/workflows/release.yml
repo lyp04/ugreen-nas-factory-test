@@ -79,7 +79,17 @@ jobs:
       - name: Run unit tests
         shell: pwsh
         run: |
-          python -m pytest tests/test_updater.py tests/test_sn_utils.py tests/test_print_labels.py tests/test_ugreen_broadcast.py tests/test_screenshot_utils.py tests/test_form_entry_materials.py -v
+          # Only test files we know are dep-light and on the current branch.
+          # test_print_labels lives only on feature/auto-print-label.
+          $tests = @(
+              "tests/test_updater.py",
+              "tests/test_sn_utils.py",
+              "tests/test_ugreen_broadcast.py",
+              "tests/test_screenshot_utils.py",
+              "tests/test_form_entry_materials.py",
+              "tests/test_print_labels.py"
+          ) | Where-Object { Test-Path $_ }
+          python -m pytest @tests -v
 
       - name: Build exe
         shell: pwsh

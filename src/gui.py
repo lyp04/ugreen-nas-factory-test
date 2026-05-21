@@ -1002,6 +1002,9 @@ class FactoryTestGUI:
         return self._merge_queue_records_with_output(records, today)
 
     def _queue_record_in_window(self, record: dict, cutoff: datetime, file_date_is_today: bool) -> bool:
+        ctime = self._sn_folder_ctime(normalize_sn(str(record.get("sn") or "")))
+        if ctime is not None:
+            return datetime.fromtimestamp(ctime) >= cutoff
         has_any_timestamp = False
         for key in ("queue_added_at", "queue_order_at", "started_at", "finished_at"):
             raw = str(record.get(key) or "").strip()
@@ -1015,6 +1018,19 @@ class FactoryTestGUI:
             if ts >= cutoff:
                 return True
         return file_date_is_today and not has_any_timestamp
+
+    def _sn_folder_ctime(self, sn: str) -> float | None:
+        if not sn:
+            return None
+        try:
+            path = self._output_root() / sn
+            raw = self._path_created_timestamp(path)
+        except (OSError, FileNotFoundError):
+            return None
+        try:
+            return datetime.fromisoformat(raw).timestamp()
+        except (ValueError, TypeError):
+            return None
 
     def _merge_queue_records_with_output(self, records: list[dict], today: str) -> list[dict]:
         merged_by_key: dict[str, dict] = {}
@@ -1143,6 +1159,12 @@ class FactoryTestGUI:
         return sorted(records, key=self._queue_record_sort_key)
 
     def _queue_record_sort_key(self, record: dict) -> tuple[int, float, int, str]:
+        task_id = str(record.get("task_id") or "")
+        sn = normalize_sn(str(record.get("sn") or ""))
+        counter = self._task_counter_from_id(task_id)
+        ctime = self._sn_folder_ctime(sn)
+        if ctime is not None:
+            return (0, ctime, counter, sn)
         raw_value = str(
             record.get("queue_added_at")
             or record.get("queue_order_at")
@@ -1152,13 +1174,9 @@ class FactoryTestGUI:
         ).strip()
         try:
             timestamp = datetime.fromisoformat(raw_value).timestamp()
-            has_timestamp = 0
-        except Exception:
-            timestamp = 0.0
-            has_timestamp = 1
-        task_id = str(record.get("task_id") or "")
-        sn = normalize_sn(str(record.get("sn") or ""))
-        return (has_timestamp, timestamp, self._task_counter_from_id(task_id), sn)
+            return (1, timestamp, counter, sn)
+        except (ValueError, TypeError):
+            return (2, 0.0, counter, sn)
 
     def _save_queue_state(self, merge_existing: bool = True) -> None:
         try:
@@ -1235,8 +1253,6 @@ class FactoryTestGUI:
             state_code = original_state
 
         queue_added_at = str(record.get("queue_added_at") or record.get("queue_order_at") or "").strip()
-        if not queue_added_at:
-            queue_added_at = datetime.now().isoformat(timespec="seconds")
 
         task = DeviceTask(
             task_id=task_id,

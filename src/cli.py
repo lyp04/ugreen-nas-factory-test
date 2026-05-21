@@ -234,7 +234,7 @@ def failure_stage_for_error(exc_or_message: object) -> str:
     if FAN_RPM_FAILURE_STAGE in message:
         return FAN_RPM_FAILURE_STAGE
     if is_pool_creation_timeout_error(exc_or_message):
-        return POOL_CREATION_FAILURE_STAGE
+        return _pool_failure_stage(message)
     if is_unflashed_password_error(exc_or_message):
         return UNFLASHED_TITLE
     capture_match = re.search(r"Capture failed at page '([A-Za-z0-9_]+)'", message)
@@ -248,7 +248,39 @@ def failure_stage_for_error(exc_or_message: object) -> str:
         if speed_match:
             return f"{label} 失败：{speed_match.group(1)} MB/s"
         return f"{label} 截图失败"
+    if "did not become ready within" in message:
+        sec = re.search(r"within\s+(\d+)\s*s", message)
+        return f"设备上线超时（{sec.group(1)}s）" if sec else "设备上线超时"
+    if "stayed on 'service starting' screen" in message:
+        sec = re.search(r"for\s+(\d+)\s*s", message)
+        return f"UGOS 卡在服务启动中（{sec.group(1)}s）" if sec else "UGOS 卡在服务启动中"
+    if "missing device information" in message:
+        return "UGOS 设备信息缺失"
+    if "Could not determine whether setup wizard or login page" in message:
+        return "UGOS 页面状态未知"
+    if "SN未解绑" in message or "请先解绑SN" in message:
+        return "SN 未解绑"
+    if "already has a submitted record for this form" in message:
+        return "表单已有提交记录"
     return "测试失败"
+
+
+def _pool_failure_stage(message: str) -> str:
+    missing = re.search(r"has missing disks\s+\[([^\]]+)\]", message)
+    if missing:
+        disks = re.findall(r"'([^']+)'", missing.group(1))
+        if disks:
+            return f"建池失败：缺{'、'.join(disks)}"
+        return "建池失败：硬盘缺失"
+    if "has no configured disks available" in message:
+        return "建池失败：硬盘配置不匹配"
+    if "Storage pool summary did not appear in time" in message:
+        return "建池失败：摘要超时"
+    if "did not render any configured disk options" in message:
+        return "建池失败：弹窗无可用盘"
+    if "did not expose any unused healthy disks" in message:
+        return "建池失败：无可用未使用盘"
+    return POOL_CREATION_FAILURE_STAGE
 
 
 class TaskProgress:

@@ -47,11 +47,52 @@ def test_pool_creation_timeout_uses_pool_failure_stage() -> None:
     missing_disks_error = RuntimeError(
         "Storage-pool creation aborted by user: 存储池1 has no configured disks available"
     )
+    missing_specific = RuntimeError(
+        "Storage-pool creation aborted by user: 存储池2 has missing disks ['M.2硬盘2']"
+    )
 
     assert cli.is_pool_creation_timeout_error(error)
     assert cli.is_pool_creation_timeout_error(missing_disks_error)
-    assert cli.failure_stage_for_error(error) == "建池失败"
-    assert cli.failure_stage_for_error(missing_disks_error) == "建池失败"
+    assert cli.failure_stage_for_error(error) == "建池失败：摘要超时"
+    assert cli.failure_stage_for_error(missing_disks_error) == "建池失败：硬盘配置不匹配"
+    assert cli.failure_stage_for_error(missing_specific) == "建池失败：缺M.2硬盘2"
+
+
+def test_ugos_not_ready_stage() -> None:
+    error = RuntimeError("UGOS at 192.168.0.151:9999 did not become ready within 90s")
+    assert cli.failure_stage_for_error(error) == "设备上线超时（90s）"
+
+
+def test_service_starting_stuck_stage() -> None:
+    error = RuntimeError(
+        "UGOS setup page stayed on 'service starting' screen for 300s; last page: <empty>"
+    )
+    assert cli.failure_stage_for_error(error) == "UGOS 卡在服务启动中（300s）"
+
+
+def test_sn_not_unbound_stage() -> None:
+    assert cli.failure_stage_for_error(RuntimeError("SN未解绑，请先解绑SN")) == "SN 未解绑"
+
+
+def test_form_already_submitted_stage() -> None:
+    error = RuntimeError(
+        "SN EC752JJ3825157A4 already has a submitted record for this form."
+    )
+    assert cli.failure_stage_for_error(error) == "表单已有提交记录"
+
+
+def test_capture_speed_failure_stage() -> None:
+    error = RuntimeError("Capture failed at page 'hdd_read': 99 MB/s < 120 MB/s")
+    assert cli.failure_stage_for_error(error) == "HDD 读取 失败：99 MB/s"
+
+
+def test_capture_screenshot_only_stage() -> None:
+    error = RuntimeError("Capture failed at page 'hdd_read'")
+    assert cli.failure_stage_for_error(error) == "HDD 读取 截图失败"
+
+
+def test_unknown_error_falls_back() -> None:
+    assert cli.failure_stage_for_error(RuntimeError("something else")) == "测试失败"
 
 
 def test_select_candidate_reserves_visible_sn_aliases(monkeypatch) -> None:

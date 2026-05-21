@@ -149,10 +149,13 @@ jobs:
           $sha = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLower()
           $notes = ""
           try {
-            # Annotated tag body if any; falls back to commit subject.
-            $notes = (git tag -l --format='%(contents)' "${{ steps.tag.outputs.tag }}").Trim()
+            # Annotated tag body if any; falls back to commit subject. Force the
+            # git output to a single string so ConvertTo-Json doesn't emit an array.
+            $rawTag = git tag -l --format='%(contents)' "${{ steps.tag.outputs.tag }}" | Out-String
+            $notes = $rawTag.Trim()
             if ([string]::IsNullOrWhiteSpace($notes)) {
-              $notes = (git log -1 --pretty=%B).Trim()
+              $rawCommit = git log -1 --pretty=%B | Out-String
+              $notes = $rawCommit.Trim()
             }
           } catch {}
           $manifest = [ordered]@{

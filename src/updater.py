@@ -395,7 +395,15 @@ function Write-LogLine([string]$line) {
     }
 }
 
+function Get-ShortHash([string]$path) {
+    if (-not (Test-Path -LiteralPath $path)) { return "missing" }
+    try { return (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.Substring(0, 16) }
+    catch { return ("err:" + $_.Exception.Message) }
+}
+
 Write-LogLine ("[" + (Get-Date -Format o) + "] swap start pid=" + $PidToWait)
+Write-LogLine ("  NewPath=" + $NewPath + " sha=" + (Get-ShortHash $NewPath))
+Write-LogLine ("  OldPath=" + $OldPath + " sha=" + (Get-ShortHash $OldPath))
 
 try {
     Wait-Process -Id $PidToWait -Timeout 60 -ErrorAction SilentlyContinue
@@ -405,7 +413,12 @@ Start-Sleep -Milliseconds 500
 $ok = $false
 for ($i = 0; $i -lt 20; $i++) {
     try {
-        Move-Item -Force -LiteralPath $NewPath -Destination $OldPath
+        # Use .NET File APIs instead of Move-Item: Move-Item -Force has been
+        # observed to report success while leaving both source and destination
+        # untouched when launched as a detached subprocess child. The .NET
+        # primitives raise on failure, so we can detect it properly.
+        if ([System.IO.File]::Exists($OldPath)) { [System.IO.File]::Delete($OldPath) }
+        [System.IO.File]::Move($NewPath, $OldPath)
         $ok = $true
         break
     } catch {
@@ -419,7 +432,8 @@ if (-not $ok) {
     exit 1
 }
 
-Write-LogLine ("[" + (Get-Date -Format o) + "] swap ok, restarting")
+Write-LogLine ("[" + (Get-Date -Format o) + "] swap done OldPath sha=" + (Get-ShortHash $OldPath))
+
 try {
     Start-Process -FilePath $OldPath
 } catch {

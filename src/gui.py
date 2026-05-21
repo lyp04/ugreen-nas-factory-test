@@ -106,6 +106,8 @@ class DeviceTask:
     max_attempts: int = 2
     started_monotonic: float = field(default_factory=time.monotonic)
     finished_monotonic: float | None = None
+    queue_added_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
+    interrupted_on_exit: bool = False
 
     @property
     def display_ip(self) -> str:
@@ -988,9 +990,31 @@ class FactoryTestGUI:
             data = json.loads(path.read_text(encoding="utf-8-sig"))
         except Exception:
             data = {}
-        if str(data.get("date") or "") == today and isinstance(data.get("devices"), list):
+        if isinstance(data.get("devices"), list):
             records = [record for record in data["devices"] if isinstance(record, dict)]
+        cutoff = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        file_date_is_today = str(data.get("date") or "") == today
+        records = [
+            record
+            for record in records
+            if self._queue_record_in_window(record, cutoff, file_date_is_today)
+        ]
         return self._merge_queue_records_with_output(records, today)
+
+    def _queue_record_in_window(self, record: dict, cutoff: datetime, file_date_is_today: bool) -> bool:
+        has_any_timestamp = False
+        for key in ("queue_added_at", "queue_order_at", "started_at", "finished_at"):
+            raw = str(record.get(key) or "").strip()
+            if not raw:
+                continue
+            try:
+                ts = datetime.fromisoformat(raw)
+            except ValueError:
+                continue
+            has_any_timestamp = True
+            if ts >= cutoff:
+                return True
+        return file_date_is_today and not has_any_timestamp
 
     def _merge_queue_records_with_output(self, records: list[dict], today: str) -> list[dict]:
         merged_by_key: dict[str, dict] = {}
@@ -1120,7 +1144,8 @@ class FactoryTestGUI:
 
     def _queue_record_sort_key(self, record: dict) -> tuple[int, float, int, str]:
         raw_value = str(
-            record.get("queue_order_at")
+            record.get("queue_added_at")
+            or record.get("queue_order_at")
             or record.get("started_at")
             or record.get("finished_at")
             or ""
@@ -1188,6 +1213,9 @@ class FactoryTestGUI:
             "attempt": task.attempt,
             "max_attempts": task.max_attempts,
             "elapsed_seconds": task.elapsed_seconds,
+            "queue_added_at": task.queue_added_at,
+            "queue_order_at": task.queue_added_at,
+            "interrupted_on_exit": task.interrupted_on_exit,
         }
 
     def _task_from_queue_record(self, record: dict) -> DeviceTask | None:
@@ -1197,11 +1225,18 @@ class FactoryTestGUI:
         if not task_id or not sn:
             return None
 
-        state_code = str(record.get("state_code") or "cancelled")
+        original_state = str(record.get("state_code") or "cancelled")
         current_step = str(record.get("current_step") or "上次队列恢复")
-        if state_code in self.ACTIVE_STATES:
+        was_interrupted = original_state in self.ACTIVE_STATES or bool(record.get("interrupted_on_exit"))
+        if original_state in self.ACTIVE_STATES:
             state_code = "cancelled"
             current_step = f"上次退出时未完成：{current_step}"
+        else:
+            state_code = original_state
+
+        queue_added_at = str(record.get("queue_added_at") or record.get("queue_order_at") or "").strip()
+        if not queue_added_at:
+            queue_added_at = datetime.now().isoformat(timespec="seconds")
 
         task = DeviceTask(
             task_id=task_id,
@@ -1223,6 +1258,8 @@ class FactoryTestGUI:
             network_interface=str(record.get("network_interface") or ""),
             attempt=self._safe_int(record.get("attempt"), 0),
             max_attempts=self._safe_int(record.get("max_attempts"), 2),
+            queue_added_at=queue_added_at,
+            interrupted_on_exit=was_interrupted,
         )
         task.status = self._status_text(task.state_code)
         elapsed_seconds = max(0, self._safe_int(record.get("elapsed_seconds"), 0))
@@ -1230,10 +1267,35 @@ class FactoryTestGUI:
         task.started_monotonic = now - elapsed_seconds
         if task.state_code not in self.ACTIVE_STATES:
             task.finished_monotonic = now
+        disk_logs = self._load_task_logs_from_disk(sn)
+        if disk_logs:
+            task.logs.extend(disk_logs)
         task.logs.append(
-            f"{datetime.now().strftime('%H:%M:%S')} | INFO    | 已从今日上次队列恢复；不会自动继续运行\n"
+            f"{datetime.now().strftime('%H:%M:%S')} | INFO    | 已从上次队列恢复\n"
         )
         return task
+
+    def _load_task_logs_from_disk(self, sn: str) -> list[str]:
+        try:
+            log_path = self._output_root() / sn / "run.log"
+        except Exception:
+            return []
+        try:
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return []
+        lines: list[str] = []
+        loguru_re = re.compile(
+            r"^\d{4}-\d{2}-\d{2}\s+(\d{2}:\d{2}:\d{2})(?:\.\d+)?\s*\|\s*(\S+)\s*\|\s*[^|]*?-\s*(.*)$"
+        )
+        for raw in text.splitlines():
+            match = loguru_re.match(raw)
+            if match:
+                time_part, level_part, message = match.groups()
+                lines.append(f"{time_part} | {level_part:<7} | {message}\n")
+            elif raw.strip():
+                lines.append(raw + "\n")
+        return lines
 
     def _queue_record_ips(self, record: dict, fallback_ip: str) -> list[str]:
         reserved = record.get("reserved_ips")
@@ -1250,6 +1312,7 @@ class FactoryTestGUI:
     def _restore_queue_state(self) -> None:
         restored = 0
         max_counter = self.task_counter
+        interrupted: list[DeviceTask] = []
         for record in self._load_queue_state_records():
             task = self._task_from_queue_record(record)
             if task is None or task.task_id in self.devices:
@@ -1257,10 +1320,57 @@ class FactoryTestGUI:
             self.devices[task.task_id] = task
             max_counter = max(max_counter, self._task_counter_from_id(task.task_id))
             self._insert_device_row(task, select=False)
+            if task.interrupted_on_exit:
+                interrupted.append(task)
             restored += 1
         self.task_counter = max_counter
         if restored:
             self._refresh_summary()
+        if interrupted:
+            self.root.after(0, lambda: self._auto_resume_interrupted_tasks(interrupted))
+
+    def _auto_resume_interrupted_tasks(self, tasks: list[DeviceTask]) -> None:
+        candidates = [
+            task
+            for task in tasks
+            if task.task_id in self.devices
+            and task.interrupted_on_exit
+            and not self._has_active_task_for_same_device(task)
+        ]
+        if not candidates:
+            return
+        try:
+            present_ips = self._detect_present_task_ips(candidates)
+        except Exception as exc:
+            logger.warning(f"Could not probe interrupted-task IPs on startup: {exc}")
+            return
+        for task in candidates:
+            if task.task_id not in self.devices or not task.interrupted_on_exit:
+                continue
+            if self._has_active_task_for_same_device(task):
+                continue
+            if self._task_identity_ips(task) & present_ips:
+                self._resume_interrupted_task(task)
+
+    def _resume_interrupted_task(self, task: DeviceTask) -> None:
+        if not task.interrupted_on_exit or task.task_id not in self.devices:
+            return
+        task.interrupted_on_exit = False
+        task.cancel_event = threading.Event()
+        task.state_code = "queued"
+        task.status = self._status_text("queued")
+        task.current_step = "上次未完成，检测到设备在线，自动续跑"
+        task.progress = 0
+        task.attempt = 0
+        task.finished_monotonic = None
+        task.started_monotonic = time.monotonic()
+        self._refresh_device_row(task)
+        self._refresh_device_rows_for_task_identity(task)
+        self._append_local_log(task.task_id, "检测到设备仍然在线，自动恢复执行")
+        self._refresh_summary()
+        self._refresh_action_states()
+        self._save_queue_state()
+        self._start_task_worker(task)
 
     def _task_counter_from_id(self, task_id: str) -> int:
         match = re.search(r"-(\d+)$", task_id)
@@ -2060,7 +2170,8 @@ class FactoryTestGUI:
     def _row_tags_for_task(self, task: DeviceTask) -> tuple[str, ...]:
         if task.state_code == "success":
             return (self.ROW_SUCCESS_TAG,)
-        if task.state_code == "failed" and not self._has_later_task_for_same_device(task):
+        needs_retry = task.state_code == "failed" or task.interrupted_on_exit
+        if needs_retry and not self._has_later_task_for_same_device(task):
             return (self.ROW_FAILED_TAG,)
         return ()
 
@@ -3287,7 +3398,7 @@ class FactoryTestGUI:
         worker.start()
 
     def _retry_failed_task(self, task: DeviceTask) -> DeviceTask | None:
-        if task.state_code != "failed":
+        if task.state_code != "failed" and not task.interrupted_on_exit:
             return None
         if self._has_active_task_for_same_device(task):
             messagebox.showwarning("设备已在重试", f"SN {task.sn} 已有正在排队或运行的重试任务")
@@ -3578,7 +3689,7 @@ class FactoryTestGUI:
         if task is None:
             messagebox.showwarning("\u672a\u9009\u62e9\u8bbe\u5907", "\u8bf7\u5148\u5728\u5de6\u4fa7\u961f\u5217\u4e2d\u9009\u4e2d\u4e00\u53f0\u8bbe\u5907")
             return
-        if task.state_code == "failed":
+        if task.state_code == "failed" or task.interrupted_on_exit:
             self._retry_failed_task(task)
             return
         if task.state_code not in self.ACTIVE_STATES:
@@ -3759,11 +3870,12 @@ class FactoryTestGUI:
         if self.show_browser_btn is not None:
             self.show_browser_btn.configure(state=tk.NORMAL if show_enabled else tk.DISABLED)
         if self.cancel_btn is not None:
-            action_key = "retry_task" if selected is not None and selected.state_code == "failed" else "cancel_task"
+            show_retry = selected is not None and (selected.state_code == "failed" or selected.interrupted_on_exit)
+            action_key = "retry_task" if show_retry else "cancel_task"
             cancel_enabled = (
                 selected is not None
                 and (
-                    selected.state_code == "failed"
+                    show_retry
                     or (selected.state_code in self.ACTIVE_STATES and not selected.cancel_event.is_set())
                 )
             )
@@ -3791,6 +3903,7 @@ class FactoryTestGUI:
             task.status = self._status_text("cancelled")
             task.current_step = f"上次退出时未完成：{task.current_step}"
             task.finished_monotonic = time.monotonic()
+            task.interrupted_on_exit = True
         self._save_queue_state()
         try:
             self.root.destroy()

@@ -48,6 +48,38 @@ GUI 启动时会自动调用 `ugreen-nas-autoupdate` 的 `forms refresh` 命令�
 
 如果这些文件放在别处，请改 `config/config.yml` 里的 `transfer.source_files`。
 
+## 自动更新
+
+GUI 启动时会按 `config/update-config.json` 的配置去 GitHub Releases 拉取新版本。模板见 `config/update-config.example.json`：
+
+```json
+{
+  "enabled": true,
+  "owner": "lyp04",
+  "repo": "ugreen-nas-factory-test",
+  "token": "github_pat_xxx",
+  "manifestAsset": "update.json",
+  "releaseTag": ""
+}
+```
+
+- `enabled=false` 或缺少 owner/repo/token 时整个检查会被跳过，不会影响主流程。
+- 发布时把 `update.json` 和实际的 exe 一起上传成 release asset。manifest 字段示例：
+
+```json
+{
+  "packageName": "ugreen-nas-factory-test",
+  "versionCode": 2,
+  "versionName": "0.2.0",
+  "exeAsset": "UGREEN-NAS-Test.exe",
+  "sha256": "<exe 的 sha256>",
+  "notes": "本次更新内容..."
+}
+```
+
+- 客户端 `src/version.py` 里的 `VERSION_CODE` 严格小于 `update.json.versionCode` 时才会触发更新提示。
+- 用户点 “下载并安装” 后，新 exe 会先校验 SHA-256，再由 `state/updates/updater.ps1` 等待当前进程退出后原地替换 exe 并重启。
+
 ## 目录
 
 - `src/`: 出厂测试源码

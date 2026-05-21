@@ -1,0 +1,197 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (e.g. v0.2.0). Created on the current ref if missing."
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Resolve tag
+        id: tag
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ github.event.inputs.tag }}"
+          } else {
+            $tag = "${{ github.ref_name }}"
+          }
+          if (-not $tag.StartsWith("v")) {
+            throw "Tag must start with 'v' (got '$tag')"
+          }
+          $name = $tag.Substring(1)
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "name=$name" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute version code
+        id: code
+        shell: pwsh
+        run: |
+          $code = (git rev-list --count HEAD).Trim()
+          "code=$code" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "version_code = $code"
+
+      - name: Stamp src/version.py
+        shell: pwsh
+        run: |
+          $content = @"
+          from __future__ import annotations
+
+          PACKAGE_NAME = "ugreen-nas-factory-test"
+          VERSION_NAME = "${{ steps.tag.outputs.name }}"
+          VERSION_CODE = ${{ steps.code.outputs.code }}
+
+          __all__ = ["PACKAGE_NAME", "VERSION_NAME", "VERSION_CODE"]
+          "@
+          Set-Content -Path src/version.py -Value $content -Encoding utf8
+          Get-Content src/version.py
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Python deps
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-dev.txt
+
+      - name: Run unit tests
+        shell: pwsh
+        run: |
+          python -m pytest tests/test_updater.py tests/test_sn_utils.py tests/test_print_labels.py tests/test_ugreen_broadcast.py tests/test_screenshot_utils.py tests/test_form_entry_materials.py -v
+
+      - name: Build exe
+        shell: pwsh
+        run: |
+          # build-exe.ps1 expects .venv\Scripts\python.exe. Skip its env check and
+          # invoke PyInstaller directly with the Python that setup-python provided.
+          if (Test-Path build) { Remove-Item -Recurse -Force build }
+          if (-not (Test-Path dist)) { New-Item -ItemType Directory -Force dist | Out-Null }
+          python -m pip install pyinstaller
+          python -m PyInstaller `
+            --name "UGREEN-NAS-Test" `
+            --onefile `
+            --windowed `
+            --collect-all playwright `
+            --collect-all zeroconf `
+            --hidden-import "src.cli" `
+            --hidden-import "src.gui" `
+            --hidden-import "src.updater" `
+            --hidden-import "src.version" `
+            --hidden-import "src.form_entry" `
+            --hidden-import "src.flows.setup_wizard" `
+            --hidden-import "src.flows.login" `
+            --hidden-import "src.flows.capture" `
+            --hidden-import "src.flows.provision" `
+            --hidden-import "src.flows.cleanup" `
+            --hidden-import "src.flows.reset_factory" `
+            --hidden-import "src.discovery.discover" `
+            --hidden-import "src.discovery.mdns_scanner" `
+            --hidden-import "src.discovery.port_scanner" `
+            --hidden-import "src.discovery.ugreen_broadcast" `
+            .\src\gui.py
+          if (-not (Test-Path dist\UGREEN-NAS-Test.exe)) {
+            throw "PyInstaller did not produce dist\UGREEN-NAS-Test.exe"
+          }
+
+      - name: Stage dist/config for downstream packaging
+        shell: pwsh
+        env:
+          CLIENT_UPDATE_PAT: ${{ secrets.CLIENT_UPDATE_PAT }}
+        run: |
+          if (Test-Path dist\config) { Remove-Item -Recurse -Force dist\config }
+          New-Item -ItemType Directory -Force dist\config | Out-Null
+          Copy-Item -Recurse -Force config\* dist\config\
+          # Replace the example with a real config the customer can use.
+          if ([string]::IsNullOrWhiteSpace($env:CLIENT_UPDATE_PAT)) {
+            Write-Host "::warning::CLIENT_UPDATE_PAT secret is empty — release will ship with a placeholder token."
+            $token = "github_pat_xxx"
+          } else {
+            $token = $env:CLIENT_UPDATE_PAT
+          }
+          $cfg = [ordered]@{
+            enabled       = $true
+            owner         = "${{ github.repository_owner }}"
+            repo          = "$(($env:GITHUB_REPOSITORY -split '/')[1])"
+            token         = $token
+            manifestAsset = "update.json"
+            releaseTag    = ""
+          }
+          ($cfg | ConvertTo-Json -Depth 4) | Set-Content -Path dist\config\update-config.json -Encoding utf8
+          Remove-Item -Force dist\config\update-config.example.json -ErrorAction SilentlyContinue
+
+      - name: Build update.json manifest
+        id: manifest
+        shell: pwsh
+        run: |
+          $exe = "dist\UGREEN-NAS-Test.exe"
+          $sha = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLower()
+          $notes = ""
+          try {
+            # Annotated tag body if any; falls back to commit subject.
+            $notes = (git tag -l --format='%(contents)' "${{ steps.tag.outputs.tag }}").Trim()
+            if ([string]::IsNullOrWhiteSpace($notes)) {
+              $notes = (git log -1 --pretty=%B).Trim()
+            }
+          } catch {}
+          $manifest = [ordered]@{
+            packageName = "ugreen-nas-factory-test"
+            versionCode = [int]"${{ steps.code.outputs.code }}"
+            versionName = "${{ steps.tag.outputs.name }}"
+            exeAsset    = "UGREEN-NAS-Test.exe"
+            sha256      = $sha
+            notes       = $notes
+          }
+          ($manifest | ConvertTo-Json -Depth 4) | Set-Content -Path dist\update.json -Encoding utf8
+          Get-Content dist\update.json
+
+      - name: Package dist as zip for convenience
+        shell: pwsh
+        run: |
+          $zipName = "UGREEN-NAS-Test-${{ steps.tag.outputs.name }}.zip"
+          Compress-Archive -Path dist\UGREEN-NAS-Test.exe, dist\config -DestinationPath "dist\$zipName" -Force
+          "zip=dist\$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Upload build artifacts (for inspection on failures)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ steps.tag.outputs.tag }}
+          path: |
+            dist/UGREEN-NAS-Test.exe
+            dist/update.json
+            dist/config/update-config.json
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Create or update GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/UGREEN-NAS-Test.exe
+            dist/update.json

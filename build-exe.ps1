@@ -38,6 +38,8 @@ Write-Host "== 构建 EXE ==" -ForegroundColor Cyan
     --collect-all zeroconf `
     --hidden-import "src.cli" `
     --hidden-import "src.gui" `
+    --hidden-import "src.updater" `
+    --hidden-import "src.version" `
     --hidden-import "src.form_entry" `
     --hidden-import "src.flows.setup_wizard" `
     --hidden-import "src.flows.login" `

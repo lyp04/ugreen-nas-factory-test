@@ -27,3 +27,5 @@ logs/
 
 .env
 *.local.*
+
+config/update-config.json

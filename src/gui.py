@@ -38,6 +38,7 @@ if __package__ in {None, ""}:
     )
     from src.discovery import ugreen_broadcast
     from src.discovery.discover import find_nas_candidates
+    from src.updater import UpdateInfo, UpdateManager, format_version
     from src.utils.browser_control import show_browser_windows, terminate_browser_process
     from src.utils.config_loader import load_configs
     from src.utils.logger import remove_default_sinks
@@ -63,6 +64,7 @@ else:
     )
     from .discovery import ugreen_broadcast
     from .discovery.discover import find_nas_candidates
+    from .updater import UpdateInfo, UpdateManager, format_version
     from .utils.browser_control import show_browser_windows, terminate_browser_process
     from .utils.config_loader import load_configs
     from .utils.logger import remove_default_sinks
@@ -402,6 +404,14 @@ UI_TEXT = {
         "materials_col_code": "编码",
         "materials_col_qty": "数量",
         "materials_col_status": "状态",
+        "update_available_title": "发现新版本",
+        "update_available_body": "当前版本: {current}\n最新版本: {latest}",
+        "update_install_button": "下载并安装",
+        "update_later_button": "稍后",
+        "update_progress_title": "更新进度",
+        "update_failed_title": "更新失败",
+        "update_installing_title": "正在安装更新",
+        "update_installing_body": "新版本 {version} 准备就绪，应用即将自动退出并完成升级。",
     },
     "en": {
         "app_title": "UGREEN NAS Factory Test",
@@ -488,6 +498,14 @@ UI_TEXT = {
         "materials_col_code": "Code",
         "materials_col_qty": "Qty",
         "materials_col_status": "Status",
+        "update_available_title": "New version available",
+        "update_available_body": "Current: {current}\nLatest:  {latest}",
+        "update_install_button": "Download and install",
+        "update_later_button": "Later",
+        "update_progress_title": "Update progress",
+        "update_failed_title": "Update failed",
+        "update_installing_title": "Installing update",
+        "update_installing_body": "Version {version} is ready; the app will exit and upgrade itself.",
     },
     "es-MX": {
         "app_title": "Prueba de fábrica UGREEN NAS",
@@ -574,6 +592,14 @@ UI_TEXT = {
         "materials_col_code": "Código",
         "materials_col_qty": "Cantidad",
         "materials_col_status": "Estado",
+        "update_available_title": "Nueva versión disponible",
+        "update_available_body": "Versión actual: {current}\nÚltima versión: {latest}",
+        "update_install_button": "Descargar e instalar",
+        "update_later_button": "Más tarde",
+        "update_progress_title": "Progreso de la actualización",
+        "update_failed_title": "Error de actualización",
+        "update_installing_title": "Instalando actualización",
+        "update_installing_body": "La versión {version} está lista; la app se cerrará y se actualizará sola.",
     },
 }
 
@@ -704,6 +730,10 @@ class FactoryTestGUI:
         self.auto_scan_worker: threading.Thread | None = None
         self.auto_scan_after_id: str | None = None
 
+        self.update_manager = UpdateManager(self.project_root, self.ui_queue)
+        self._pending_update: UpdateInfo | None = None
+        self._update_install_active = False
+
         self._build_layout()
         self._restore_queue_state()
         self._refresh_status_counts()
@@ -717,6 +747,7 @@ class FactoryTestGUI:
         self.root.after(100, self._drain_ui_queue)
         self.root.after(1000, self._refresh_elapsed_times)
         self._schedule_daily_rollover()
+        self.root.after(500, self.update_manager.check_on_startup)
 
     def _language_code(self) -> str:
         try:
@@ -1667,6 +1698,72 @@ class FactoryTestGUI:
             self._handle_confirm_disk_shortage(event)
         elif event_type == "resolve_form_grade":
             self._handle_resolve_form_grade(event)
+        elif event_type == "update_available":
+            self._handle_update_available(event)
+        elif event_type == "update_progress":
+            self._handle_update_progress(event)
+        elif event_type == "update_failed":
+            self._handle_update_failed(event)
+        elif event_type == "update_installing":
+            self._handle_update_installing(event)
+
+    def _handle_update_available(self, event: dict) -> None:
+        update = event.get("update")
+        if not isinstance(update, UpdateInfo):
+            return
+        if self._pending_update is not None or self._update_install_active:
+            return
+        self._pending_update = update
+        current = format_version()
+        latest = f"{update.version_name} ({update.version_code})"
+        body = self._t("update_available_body", current=current, latest=latest)
+        if update.notes:
+            body = f"{body}\n\n{update.notes}"
+        title = self._t("update_available_title")
+        try:
+            confirm = messagebox.askyesno(
+                title,
+                body,
+                icon=messagebox.INFO,
+                detail=self._t("update_install_button"),
+            )
+        except tk.TclError:
+            self._pending_update = None
+            return
+        if not confirm:
+            self._pending_update = None
+            return
+        self._update_install_active = True
+        self.update_manager.download_and_install(update)
+
+    def _handle_update_progress(self, event: dict) -> None:
+        self.status_var.set(str(event.get("message") or ""))
+
+    def _handle_update_failed(self, event: dict) -> None:
+        self._pending_update = None
+        self._update_install_active = False
+        try:
+            messagebox.showerror(
+                self._t("update_failed_title"),
+                str(event.get("message") or ""),
+            )
+        except tk.TclError:
+            pass
+
+    def _handle_update_installing(self, event: dict) -> None:
+        self._pending_update = None
+        version_name = str(event.get("version_name") or "")
+        try:
+            messagebox.showinfo(
+                self._t("update_installing_title"),
+                self._t("update_installing_body", version=version_name),
+            )
+        except tk.TclError:
+            pass
+        try:
+            self.root.after(100, self._on_close)
+        except tk.TclError:
+            pass
 
     def _handle_log_event(self, event: dict) -> None:
         task = self.devices.get(str(event.get("task_id")))

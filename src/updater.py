@@ -434,20 +434,13 @@ if (-not $ok) {
 
 Write-LogLine ("[" + (Get-Date -Format o) + "] swap done OldPath sha=" + (Get-ShortHash $OldPath))
 
-# Let Windows' first-run scanners (Defender/SmartScreen) settle before we
-# launch the freshly-written exe. PyInstaller --onefile extracts python312.dll
-# into _MEI* on startup; if AV is still holding the file image, the DLL load
-# fails with ERROR_MOD_NOT_FOUND ("找不到指定的模块"). 3s is enough in practice
-# for the kernel to finish the post-write virus scan on a non-network drive.
-Start-Sleep -Seconds 3
-
-try {
-    Start-Process -FilePath $OldPath
-} catch {
-    Write-LogLine ("[" + (Get-Date -Format o) + "] restart failed: " + $_.Exception.Message)
-    exit 2
-}
-Write-LogLine ("[" + (Get-Date -Format o) + "] restart launched")
+# Deliberately do NOT auto-launch the new exe. PyInstaller --onefile unpacks
+# python312.dll into _MEI* on startup, and Windows Defender's first-execution
+# scan on a freshly-written 50MB binary often holds the image image longer than
+# any reasonable Start-Sleep can wait out, deleting the extracted DLL before the
+# bootstrap loads it (ERROR_MOD_NOT_FOUND, "找不到指定的模块"). The user just
+# clicked "下载并安装" so they're at the keyboard — let them re-launch when the
+# UI tells them to. Subsequent double-clicks read the post-scan file fine.
 exit 0
 """
 

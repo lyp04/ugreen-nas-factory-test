@@ -410,8 +410,8 @@ UI_TEXT = {
         "update_later_button": "稍后",
         "update_progress_title": "更新进度",
         "update_failed_title": "更新失败",
-        "update_installing_title": "正在安装更新",
-        "update_installing_body": "新版本 {version} 准备就绪，应用即将自动退出并完成升级。",
+        "update_installing_title": "更新已就绪",
+        "update_installing_body": "新版本 {version} 已下载并校验，点击确定后应用将关闭。请重新启动应用进入新版本。",
     },
     "en": {
         "app_title": "UGREEN NAS Factory Test",
@@ -504,8 +504,8 @@ UI_TEXT = {
         "update_later_button": "Later",
         "update_progress_title": "Update progress",
         "update_failed_title": "Update failed",
-        "update_installing_title": "Installing update",
-        "update_installing_body": "Version {version} is ready; the app will exit and upgrade itself.",
+        "update_installing_title": "Update ready",
+        "update_installing_body": "Version {version} downloaded and verified. The app will close — please re-launch it to enter the new version.",
     },
     "es-MX": {
         "app_title": "Prueba de fábrica UGREEN NAS",
@@ -598,8 +598,8 @@ UI_TEXT = {
         "update_later_button": "Más tarde",
         "update_progress_title": "Progreso de la actualización",
         "update_failed_title": "Error de actualización",
-        "update_installing_title": "Instalando actualización",
-        "update_installing_body": "La versión {version} está lista; la app se cerrará y se actualizará sola.",
+        "update_installing_title": "Actualización lista",
+        "update_installing_body": "La versión {version} está descargada y verificada. La app se cerrará; por favor vuelve a abrirla para entrar a la nueva versión.",
     },
 }
 

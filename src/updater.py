@@ -258,11 +258,15 @@ class UpdateManager:
             "-LogFile",
             str(log_path),
         ]
-        flags = 0
+        # CREATE_NO_WINDOW keeps PowerShell out of any visible console (the
+        # GUI parent has none anyway). DETACHED_PROCESS would seem natural but
+        # actually breaks PowerShell's Add-Content / file I/O on Windows 10 —
+        # the swap script simply never runs. CREATE_NEW_PROCESS_GROUP lets the
+        # child outlive the parent exiting in a moment.
+        CREATE_NO_WINDOW = 0x08000000
+        flags = CREATE_NO_WINDOW
         if hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
             flags |= subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
-        if hasattr(subprocess, "DETACHED_PROCESS"):
-            flags |= subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
         subprocess.Popen(  # noqa: S603 — args are constructed locally, no shell
             cmd,
             creationflags=flags,

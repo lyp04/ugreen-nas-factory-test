@@ -78,7 +78,7 @@ GUI 启动时会按 `config/update-config.json` 的配置去 GitHub Releases 拉
 ```
 
 - 客户端 `src/version.py` 里的 `VERSION_CODE` 严格小于 `update.json.versionCode` 时才会触发更新提示。
-- 用户点 “下载并安装” 后，新 exe 会先校验 SHA-256，再由 `state/updates/updater.ps1` 等待当前进程退出后原地替换 exe 并重启。
+- 用户点 “下载并安装” 后，新 exe 会先校验 SHA-256，再由 `state/updates/updater.ps1` 等待当前进程退出后原地替换 exe。替换完应用退出，用户再双击启动进入新版本。
 - 发版动作只需要 `git tag vX.Y.Z && git push --tags`：CI 工作流会把 tag 名当 `versionName`，`git rev-list --count HEAD` 当 `versionCode`，自动 stamp 进 `src/version.py` 再打包。
 - 已部署的 v0.1.0 / v0.1.1 无法自动升级（早期 swap 脚本用 `Move-Item -Force` 会在某些环境下静默 no-op；v0.1.2 已改用 `[System.IO.File]::Move`）。首次需要把 v0.1.4 的 exe 手动拷到工厂电脑替换原 exe，之后才会正常自动更新。
 - v0.1.2 / v0.1.3 / v0.1.4 / v0.1.5 升级到下一版时，可能因为 Defender 首次执行扫描和自动重启之间的 race 看到 `python312.dll - 找不到指定的模块` 错误弹窗；v0.1.6 起 swap 完成后不再自动重启，弹窗会提示用户手动重新双击 exe（这时 Defender 已经扫描完，绝不会再触发错误）。

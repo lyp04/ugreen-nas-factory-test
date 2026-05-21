@@ -230,12 +230,24 @@ def is_unflashed_password_error(exc_or_message: object) -> bool:
 
 
 def failure_stage_for_error(exc_or_message: object) -> str:
-    if FAN_RPM_FAILURE_STAGE in str(exc_or_message):
+    message = str(exc_or_message)
+    if FAN_RPM_FAILURE_STAGE in message:
         return FAN_RPM_FAILURE_STAGE
     if is_pool_creation_timeout_error(exc_or_message):
         return POOL_CREATION_FAILURE_STAGE
     if is_unflashed_password_error(exc_or_message):
         return UNFLASHED_TITLE
+    capture_match = re.search(r"Capture failed at page '([A-Za-z0-9_]+)'", message)
+    if capture_match:
+        page_key = capture_match.group(1)
+        label = PAGE_LABELS.get(page_key, page_key.replace("_", " "))
+        speed_match = re.search(
+            r"(\d+(?:\.\d+)?)\s*MB/s\s*<\s*\d+(?:\.\d+)?\s*MB/s",
+            message,
+        )
+        if speed_match:
+            return f"{label} 失败：{speed_match.group(1)} MB/s"
+        return f"{label} 截图失败"
     return "测试失败"
 
 
@@ -718,9 +730,11 @@ def run_test(
                         progress.finish("cancelled", "用户中断", nas_ip=ip or nas_ip, error=str(exc))
                         raise TaskCancelled("Test cancelled by user") from exc
                     logger.error(f"Test failed: {exc}")
+                    failure_stage = failure_stage_for_error(exc)
                     report["status"] = "failed"
                     report["error"] = str(exc)
-                    progress.finish("failed", failure_stage_for_error(exc), nas_ip=ip or nas_ip, error=str(exc))
+                    report["current_stage"] = failure_stage
+                    progress.finish("failed", failure_stage, nas_ip=ip or nas_ip, error=str(exc))
                     capture_failure(page, sn, step="cli_top", dest_dir=dirs["screenshots"])
                     raise
                 finally:
@@ -738,9 +752,11 @@ def run_test(
             raise
         except Exception as exc:
             if report.get("status") == "running":
+                failure_stage = failure_stage_for_error(exc)
                 report["status"] = "failed"
                 report["error"] = str(exc)
-                progress.finish("failed", failure_stage_for_error(exc), nas_ip=ip or nas_ip, error=str(exc))
+                report["current_stage"] = failure_stage
+                progress.finish("failed", failure_stage, nas_ip=ip or nas_ip, error=str(exc))
                 report["finished_at"] = datetime.now().isoformat()
                 _write_json_atomic(dirs["base"] / "test_report.json", report)
             raise

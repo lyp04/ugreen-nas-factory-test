@@ -575,7 +575,8 @@ def test_transfer_capture_fails_when_all_attempts_are_below_threshold(tmp_path, 
         )
 
     assert attempts == [1, 2]
-    assert captured == {}
+    assert captured["ssd_write"]["rate_mbps"] == "180"
+    assert captured["ssd_write"]["speed_status"] == "below_threshold"
 
 
 def test_transfer_capture_fails_on_no_sample_instead_of_uploading_zero(tmp_path, monkeypatch) -> None:
@@ -619,7 +620,8 @@ def test_transfer_capture_fails_on_no_sample_instead_of_uploading_zero(tmp_path,
         )
 
     assert attempts == [1, 2]
-    assert captured == {}
+    assert captured["hdd_read"]["speed_status"] == "no_sample"
+    assert captured["hdd_read"]["rate_mbps"] == "0"
 
 
 def _patch_transfer_page_dependencies(monkeypatch, attempts: list[int], results: list[capture.TransferAttemptResult]) -> None:

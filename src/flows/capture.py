@@ -276,7 +276,7 @@ def run(
             except Exception as exc:
                 _emit_capture_event(progress_cb, "capture_page_failed", page_key=page_key, error=str(exc))
                 logger.error(f"Capture failed for '{page_key}': {exc}")
-                raise CaptureError(f"Capture failed at page '{page_key}'") from exc
+                raise CaptureError(f"Capture failed at page '{page_key}': {exc}") from exc
     finally:
         if transfer_slot_held and transfer_slot_context is not None:
             release_page_key, release_share, release_direction = transfer_slot_context
@@ -496,10 +496,10 @@ def _capture_transfer_page(
             for value_key, value in values.items():
                 logger.info(f"  {page_key}.{value_key}: {value}")
             shot_path = shot_path or best_result.shot_path
-            if not best_result.reached_threshold:
-                raise CaptureError(_transfer_threshold_error(page_key, values, threshold_mb_s, attempts_run))
             if capture_values is not None:
                 capture_values[page_key] = values
+            if not best_result.reached_threshold:
+                raise CaptureError(_transfer_threshold_error(page_key, values, threshold_mb_s, attempts_run))
     finally:
         if slot_acquired:
             try:

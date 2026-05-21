@@ -1098,9 +1098,7 @@ class FactoryTestGUI:
         if not sn:
             return None
         nas_ip = str(report.get("nas_ip") or "auto").strip() or "auto"
-        current_step = str(report.get("current_stage") or report.get("error") or "")
-        if not current_step:
-            current_step = "Restored from output report"
+        current_step = self._current_step_from_report(status, report)
         order_at = self._report_order_timestamp(report, sn_root)
         return {
             "task_id": f"{sn}-{index:03d}",
@@ -2118,6 +2116,18 @@ class FactoryTestGUI:
             return json.loads(report_path.read_text(encoding="utf-8-sig"))
         except Exception:
             return None
+
+    def _current_step_from_report(self, status: str, report: dict) -> str:
+        current_stage = str(report.get("current_stage") or "").strip()
+        error = str(report.get("error") or "").strip()
+        if status == "failed":
+            derived = failure_stage_for_error(error) if error else ""
+            if derived and derived != "测试失败":
+                return derived
+            if current_stage and "完成" not in current_stage:
+                return current_stage
+            return derived or error or current_stage or "Restored from output report"
+        return current_stage or error or "Restored from output report"
 
     def _play_completion_sound(self, success: bool) -> None:
         if not self.sound_enabled_var.get():

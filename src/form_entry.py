@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -219,6 +220,80 @@ def _run_autoupdate_bridge(payload: dict[str, Any]) -> dict[str, Any]:
         return json.loads(text)
     except json.JSONDecodeError as exc:
         raise FormEntryError(f"自动录表系统返回不可解析: {text}") from exc
+
+
+def sync_autoupdate_repo(project_root: Path | None = None) -> dict[str, Any]:
+    """Best-effort fast-forward of the autoupdate sibling repo from its remote.
+
+    The factory-test exe updater only swaps its own binary; persistent edits
+    that live in the autoupdate repo (e.g. ``materials.json`` opt-ins) used to
+    need a manual ``git pull`` on the factory machine. This function automates
+    that pull so a tag bump in factory-test is enough to bring the matching
+    autoupdate-repo change along with it.
+
+    Returns a small status dict; never raises. Silent no-op when:
+
+    - ``autoupdate_root`` is not configured / not present
+    - the directory is not a git work tree
+    - the ``git`` binary is not on PATH
+    - ``git fetch`` fails (offline, credential prompt, etc.)
+    - the local branch has diverged from the upstream (``--ff-only`` refuses)
+
+    ``--autostash`` is used so a working-tree dirty from a previous 内部系统 refresh
+    (``materials.json`` timestamps, etc.) does not block the fast-forward.
+    """
+    result: dict[str, Any] = {"status": "skipped", "reason": "", "before": "", "after": ""}
+
+    try:
+        root = autoupdate_root()
+    except FormEntryError as exc:
+        result["reason"] = f"autoupdate_root unresolved: {exc}"
+        return result
+
+    if not (root / ".git").exists():
+        result["reason"] = f"{root} is not a git work tree"
+        return result
+
+    git_path = shutil.which("git")
+    if not git_path:
+        result["reason"] = "git binary not on PATH"
+        return result
+
+    def run(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [git_path, *args],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+
+    try:
+        before = run("rev-parse", "HEAD")
+        if before.returncode != 0:
+            result["reason"] = f"rev-parse failed: {(before.stderr or before.stdout).strip()}"
+            return result
+        result["before"] = before.stdout.strip()
+
+        fetch = run("fetch", "--quiet")
+        if fetch.returncode != 0:
+            result["reason"] = f"git fetch failed: {(fetch.stderr or fetch.stdout).strip()}"
+            return result
+
+        merge = run("merge", "--ff-only", "--autostash", "--quiet", "@{upstream}")
+        if merge.returncode != 0:
+            result["reason"] = f"git merge failed: {(merge.stderr or merge.stdout).strip()}"
+            return result
+
+        after = run("rev-parse", "HEAD")
+        result["after"] = after.stdout.strip() if after.returncode == 0 else result["before"]
+        result["status"] = "updated" if result["after"] != result["before"] else "up_to_date"
+    except subprocess.TimeoutExpired:
+        result["reason"] = "git operation timed out"
+    except OSError as exc:
+        result["reason"] = f"git invocation failed: {exc}"
+
+    return result
 
 
 def refresh_form_materials(project_root: Path | None = None, account_name: str | None = None) -> dict[str, Any]:

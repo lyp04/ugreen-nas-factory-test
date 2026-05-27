@@ -3198,6 +3198,20 @@ class FactoryTestGUI:
         account_name = self.form_account_var.get().strip()
 
         def worker() -> None:
+            # Fast-forward the autoupdate sibling repo first so that any
+            # persistent config edits committed there (e.g. selected_material_codes)
+            # land before the 内部系统 refresh that builds on top of them. Silent
+            # no-op when autoupdate_root isn't a git work tree.
+            sync_status = form_entry.sync_autoupdate_repo(self.project_root)
+            if sync_status.get("status") == "updated":
+                before = (sync_status.get("before") or "")[:7]
+                after = (sync_status.get("after") or "")[:7]
+                self.ui_queue.put(
+                    {
+                        "type": "form_material_refresh",
+                        "message": f"{datetime.now().strftime('%H:%M:%S')}  已同步录表配置仓 {before} → {after}",
+                    }
+                )
             try:
                 result = form_entry.refresh_form_materials(self.project_root, account_name=account_name or None)
                 forms = result.get("forms") if isinstance(result, dict) else []

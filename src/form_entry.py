@@ -237,10 +237,17 @@ def sync_autoupdate_repo(project_root: Path | None = None) -> dict[str, Any]:
     - the directory is not a git work tree
     - the ``git`` binary is not on PATH
     - ``git fetch`` fails (offline, credential prompt, etc.)
-    - the local branch has diverged from the upstream (``--ff-only`` refuses)
+    - the local branch has diverged from the upstream (own commits ahead)
 
-    ``--autostash`` is used so a working-tree dirty from a previous 内部系统 refresh
-    (``materials.json`` timestamps, etc.) does not block the fast-forward.
+    Mechanics: fetch, then if the local branch is strictly behind upstream,
+    ``git reset --hard <upstream>``. The reset is intentional — the only
+    tracked file the factory machine touches between startups is
+    ``materials.json`` (re-written wholesale by the 内部系统 refresh that runs
+    right after this function), so blowing away its uncommitted edits is
+    cheaper than carrying a merge conflict forward. v0.1.14 used
+    ``merge --ff-only --autostash`` instead, which left the work tree in
+    a conflicted state when the upstream commit also touched
+    ``materials.json``.
     """
     result: dict[str, Any] = {"status": "skipped", "reason": "", "before": "", "after": ""}
 
@@ -274,20 +281,37 @@ def sync_autoupdate_repo(project_root: Path | None = None) -> dict[str, Any]:
             result["reason"] = f"rev-parse failed: {(before.stderr or before.stdout).strip()}"
             return result
         result["before"] = before.stdout.strip()
+        result["after"] = result["before"]  # default if we end up no-op
 
         fetch = run("fetch", "--quiet")
         if fetch.returncode != 0:
             result["reason"] = f"git fetch failed: {(fetch.stderr or fetch.stdout).strip()}"
             return result
 
-        merge = run("merge", "--ff-only", "--autostash", "--quiet", "@{upstream}")
-        if merge.returncode != 0:
-            result["reason"] = f"git merge failed: {(merge.stderr or merge.stdout).strip()}"
+        upstream = run("rev-parse", "@{upstream}")
+        if upstream.returncode != 0:
+            result["reason"] = f"no upstream configured: {(upstream.stderr or upstream.stdout).strip()}"
+            return result
+        upstream_sha = upstream.stdout.strip()
+
+        if upstream_sha == result["before"]:
+            result["status"] = "up_to_date"
             return result
 
-        after = run("rev-parse", "HEAD")
-        result["after"] = after.stdout.strip() if after.returncode == 0 else result["before"]
-        result["status"] = "updated" if result["after"] != result["before"] else "up_to_date"
+        # is HEAD an ancestor of upstream? if not, the local branch has its
+        # own commits and we must not clobber them.
+        is_ancestor = run("merge-base", "--is-ancestor", "HEAD", upstream_sha)
+        if is_ancestor.returncode != 0:
+            result["reason"] = "local branch has diverged from upstream — refusing to reset"
+            return result
+
+        reset = run("reset", "--hard", "--quiet", upstream_sha)
+        if reset.returncode != 0:
+            result["reason"] = f"git reset --hard failed: {(reset.stderr or reset.stdout).strip()}"
+            return result
+
+        result["after"] = upstream_sha
+        result["status"] = "updated"
     except subprocess.TimeoutExpired:
         result["reason"] = "git operation timed out"
     except OSError as exc:

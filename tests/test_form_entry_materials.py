@@ -153,9 +153,12 @@ def test_sync_autoupdate_repo_fast_forwards_when_upstream_ahead(monkeypatch, tmp
     assert (clone / "materials.json").read_text().strip() == '{"updated": true}'
 
 
-def test_sync_autoupdate_repo_autostash_keeps_local_edits(monkeypatch, tmp_path: Path) -> None:
-    """内部系统 refresh writes materials.json on every startup; the merge must not
-    abort on that uncommitted dirt."""
+def test_sync_autoupdate_repo_discards_dirty_materials_when_upstream_ahead(monkeypatch, tmp_path: Path) -> None:
+    """内部系统 refresh writes materials.json on every startup; upstream may also
+    advance materials.json (e.g. a new selected_material_codes opt-in). v0.1.14
+    tried --autostash which left the tree conflicted in that case. The new
+    behavior: discard the dirty edits with reset --hard, then let the 内部系统
+    refresh that runs immediately after rewrite materials.json cleanly."""
     _git_required()
     upstream = tmp_path / "upstream"
     clone = tmp_path / "clone"
@@ -169,20 +172,52 @@ def test_sync_autoupdate_repo_autostash_keeps_local_edits(monkeypatch, tmp_path:
     _git(clone, "config", "user.email", "test@example.com")
     _git(clone, "config", "user.name", "Test")
 
-    # Upstream advances README; clone has dirty materials.json the way a
-    # post-内部系统-refresh factory machine would.
+    # Upstream advances materials.json (the realistic overlap case).
     subprocess.run(["git", "remote", "add", "origin", str(bare)], cwd=upstream, check=True, capture_output=True)
-    (upstream / "README.md").write_text("new\n")
-    _git(upstream, "add", "README.md")
-    _git(upstream, "commit", "--quiet", "-m", "add readme")
+    (upstream / "materials.json").write_text('{"version": 2, "selected": ["NEW_CODE"]}\n')
+    _git(upstream, "add", "materials.json")
+    _git(upstream, "commit", "--quiet", "-m", "bump materials")
     _git(upstream, "push", "--quiet", "origin", "main")
 
+    # Clone has dirty materials.json (内部系统-refresh-style local writes).
     (clone / "materials.json").write_text('{"version": 1, "last_refreshed_at": "2026-05-27"}\n')
 
     monkeypatch.setattr(form_entry, "autoupdate_root", lambda: clone)
     result = form_entry.sync_autoupdate_repo()
     assert result["status"] == "updated", result
-    # Dirty edit survived the autostash round-trip.
-    assert "last_refreshed_at" in (clone / "materials.json").read_text()
-    # Upstream change is now present too.
-    assert (clone / "README.md").read_text() == "new\n"
+    # Working tree is clean — no merge markers, no stash debris.
+    status_proc = subprocess.run(["git", "status", "--porcelain"], cwd=clone, capture_output=True, text=True)
+    assert status_proc.stdout == "", f"work tree not clean after sync: {status_proc.stdout!r}"
+    # Upstream version present, local dirt is gone (内部系统 refresh will rewrite).
+    assert (clone / "materials.json").read_text().strip() == '{"version": 2, "selected": ["NEW_CODE"]}'
+
+
+def test_sync_autoupdate_repo_refuses_to_reset_when_local_ahead(monkeypatch, tmp_path: Path) -> None:
+    """If the local branch has its own commits not yet pushed, the function
+    must not reset them away — the operator presumably wants to keep them."""
+    _git_required()
+    upstream = tmp_path / "upstream"
+    clone = tmp_path / "clone"
+    _init_repo(upstream)
+    (upstream / "README.md").write_text("init\n")
+    _git(upstream, "add", "README.md")
+    _git(upstream, "commit", "--quiet", "-m", "init")
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "clone", "--bare", str(upstream), str(bare)], check=True, capture_output=True)
+    subprocess.run(["git", "clone", str(bare), str(clone)], check=True, capture_output=True)
+    _git(clone, "config", "user.email", "test@example.com")
+    _git(clone, "config", "user.name", "Test")
+
+    # Local commit not pushed to upstream — divergent.
+    (clone / "local.txt").write_text("local only\n")
+    _git(clone, "add", "local.txt")
+    _git(clone, "commit", "--quiet", "-m", "local-only")
+    before_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=clone, capture_output=True, text=True).stdout.strip()
+
+    monkeypatch.setattr(form_entry, "autoupdate_root", lambda: clone)
+    result = form_entry.sync_autoupdate_repo()
+    assert result["status"] == "skipped", result
+    assert "diverged" in result["reason"]
+    after_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=clone, capture_output=True, text=True).stdout.strip()
+    assert before_sha == after_sha  # untouched
+    assert (clone / "local.txt").exists()

@@ -14,6 +14,7 @@ from src.updater import (
     UpdateManager,
     _Config,
     _sha256,
+    _version_tuple,
     format_version,
 )
 from src.version import PACKAGE_NAME, VERSION_CODE, VERSION_NAME
@@ -137,6 +138,72 @@ def test_state_round_trip(tmp_path: Path) -> None:
 def test_format_version_matches_version_module() -> None:
     assert format_version() == f"{VERSION_NAME} ({VERSION_CODE})"
     assert PACKAGE_NAME  # exists
+
+
+def test_version_tuple_parses_dotted_numbers() -> None:
+    assert _version_tuple("0.1.12") == (0, 1, 12)
+    assert _version_tuple("v0.1.13") == (0, 1, 13)
+    assert _version_tuple("1.0") == (1, 0)
+    assert _version_tuple("") == ()
+    # Non-numeric segments fall back to empty so versionCode stays authoritative.
+    assert _version_tuple("0.1.13-beta") == ()
+
+
+def test_version_tuple_orders_patches_correctly() -> None:
+    assert _version_tuple("0.1.13") > _version_tuple("0.1.12")
+    assert _version_tuple("0.2.0") > _version_tuple("0.1.99")
+    assert not (_version_tuple("0.1.12") > _version_tuple("0.1.12"))  # equal — strict gt is False
+
+
+def test_find_update_treats_same_code_higher_name_as_newer(tmp_path: Path, monkeypatch) -> None:
+    # Repro for the bug where re-tagging the same commit (e.g. v0.1.11 → v0.1.12)
+    # produced an identical versionCode and the updater silently dropped the
+    # release. The fix: when versionCode ties, fall back to versionName.
+    mgr = _make_manager(tmp_path)
+    monkeypatch.setattr("src.updater.VERSION_CODE", 33)
+    monkeypatch.setattr("src.updater.VERSION_NAME", "0.1.11")
+    manifest = {
+        "packageName": PACKAGE_NAME,
+        "versionCode": 33,
+        "versionName": "0.1.13",
+        "exeAsset": "UGREEN-NAS-Test.exe",
+        "sha256": "deadbeef",
+    }
+    release = {"assets": [
+        {"name": "update.json", "url": "https://api.github.com/manifest"},
+        {"name": "UGREEN-NAS-Test.exe", "url": "https://api.github.com/exe"},
+    ]}
+    _install_fake_opener(mgr, monkeypatch, [
+        {"body": json.dumps(release).encode("utf-8")},
+        {"body": json.dumps(manifest).encode("utf-8")},
+    ])
+    cfg = _Config(True, "o", "r", "t", DEFAULT_MANIFEST_ASSET, "")
+    info = mgr._find_update(cfg)
+    assert info is not None
+    assert info.version_name == "0.1.13"
+    assert info.version_code == 33
+
+
+def test_find_update_skips_when_remote_name_not_newer(tmp_path: Path, monkeypatch) -> None:
+    mgr = _make_manager(tmp_path)
+    monkeypatch.setattr("src.updater.VERSION_CODE", 33)
+    monkeypatch.setattr("src.updater.VERSION_NAME", "0.1.13")
+    manifest = {
+        "packageName": PACKAGE_NAME,
+        "versionCode": 33,
+        "versionName": "0.1.13",
+        "exeAsset": "UGREEN-NAS-Test.exe",
+        "sha256": "deadbeef",
+    }
+    release = {"assets": [
+        {"name": "update.json", "url": "https://api.github.com/manifest"},
+    ]}
+    _install_fake_opener(mgr, monkeypatch, [
+        {"body": json.dumps(release).encode("utf-8")},
+        {"body": json.dumps(manifest).encode("utf-8")},
+    ])
+    cfg = _Config(True, "o", "r", "t", DEFAULT_MANIFEST_ASSET, "")
+    assert mgr._find_update(cfg) is None
 
 
 # --- _open redirect/auth handling -------------------------------------------

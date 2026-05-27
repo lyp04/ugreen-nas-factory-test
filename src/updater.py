@@ -153,7 +153,13 @@ class UpdateManager:
         if package_name and package_name != PACKAGE_NAME:
             raise RuntimeError(f"Update package mismatch: {package_name}")
         remote_version = int(manifest.get("versionCode", 0) or 0)
-        if remote_version <= VERSION_CODE:
+        remote_version_name = str(manifest.get("versionName", str(remote_version)))
+        # versionCode comes from `git rev-list --count HEAD` in CI, so two tags
+        # on the same commit produce identical versionCode. Compare versionName
+        # numerically as a tiebreaker so a re-tag still triggers an update.
+        if remote_version < VERSION_CODE:
+            return None
+        if remote_version == VERSION_CODE and _version_tuple(remote_version_name) <= _version_tuple(VERSION_NAME):
             return None
         exe_asset_name = str(manifest.get("exeAsset", "") or manifest.get("apkAsset", "")).strip()
         if not exe_asset_name:
@@ -164,7 +170,7 @@ class UpdateManager:
         return UpdateInfo(
             config=config,
             version_code=remote_version,
-            version_name=str(manifest.get("versionName", str(remote_version))),
+            version_name=remote_version_name,
             notes=str(manifest.get("notes", "")),
             exe_asset=exe_asset_name,
             exe_url=exe_asset["url"],
@@ -365,6 +371,16 @@ class _NoFollowRedirect(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
         return None
+
+
+def _version_tuple(name: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for chunk in str(name or "").lstrip("v").split("."):
+        try:
+            parts.append(int(chunk))
+        except ValueError:
+            return ()
+    return tuple(parts)
 
 
 def _sha256(path: Path) -> str:

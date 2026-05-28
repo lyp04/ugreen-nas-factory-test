@@ -289,8 +289,9 @@ def test_lookup_pn_returns_none_when_anything_missing() -> None:
     assert label_util.lookup_pn("2800", "C") is None
 
 
-def test_lookup_ean13_table_covers_known_us_refurb_skus() -> None:
-    # Verified against 内部 NAS SKU 汇总 海外 sheet column G (69 码).
+def test_lookup_ean13_table_covers_us_refurb_skus() -> None:
+    # 2800 supplied directly by factory; 4800 / 4800Plus from internal source.
+    assert label_util.lookup_ean13("2800", "A") == "6900000000000"
     assert label_util.lookup_ean13("2800", "B") == "6900000000001"
     assert label_util.lookup_ean13("4800", "A") == "6900000000002"
     assert label_util.lookup_ean13("4800", "B") == "6900000000003"
@@ -298,11 +299,11 @@ def test_lookup_ean13_table_covers_known_us_refurb_skus() -> None:
     assert label_util.lookup_ean13("4800Plus", "B") == "6900000000005"
 
 
-def test_lookup_ean13_returns_none_for_unsupplied_2800_a() -> None:
-    # Factory hasn't supplied this one yet; we must NOT silently fabricate.
-    assert label_util.lookup_ean13("2800", "A") is None
+def test_lookup_ean13_returns_none_for_unknown_inputs() -> None:
     assert label_util.lookup_ean13("9999", "B") is None
     assert label_util.lookup_ean13(None, "A") is None
+    assert label_util.lookup_ean13("2800", None) is None
+    assert label_util.lookup_ean13("2800", "C") is None
 
 
 def test_build_ean13_zpl_emits_native_ean_and_label_dims() -> None:

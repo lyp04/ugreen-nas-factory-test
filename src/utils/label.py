@@ -138,11 +138,11 @@ def lookup_pn(model_key: str | None, grade: str | None) -> str | None:
 
 
 # 13-digit EAN-13 (a.k.a. "69 码", as Chinese factory parlance reflects the
-# 690-699 country code prefix) for the same SKU lineup. Sourced from the
-# 海外 sheet column G. 2800 A still TBD — factory hasn't supplied it; print
-# will refuse until provided.
+# 690-699 country code prefix) for the same SKU lineup. 4800 / 4800Plus
+# sourced from the 海外 sheet column G; 2800 supplied directly by the
+# factory (not in the spreadsheet).
 NAMEPLATE_EAN13_TABLE: dict[tuple[str, str], str] = {
-    # ("2800", "A"): TBD, never silently default — factory must fill this in.
+    ("2800", "A"): "6900000000000",
     ("2800", "B"): "6900000000001",
     ("4800", "A"): "6900000000002",
     ("4800", "B"): "6900000000003",

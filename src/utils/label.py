@@ -81,6 +81,37 @@ NAMEPLATE_QR_URL_TEMPLATE = (
     'https://nas.ugreen.com/download?qr={{"t":1,"data":{{"sn":"{sn}"}}}}'
 )
 
+# ---------------------------------------------------------------------------
+# 模版五 EAN-13 / "69 码" label spec (carton + middle-box, 50×30mm)
+# ---------------------------------------------------------------------------
+EAN13_WIDTH_MM = 50.0
+EAN13_HEIGHT_MM = 30.0
+EAN13_DPI = 203  # Deli DL-888T thermal printer is 203 dpi.
+
+# Layout taken from "2800 69码 50x30mm用.ddl" (the supplier-shipped DLabel
+# template). Three drawobjs, top to bottom: bold header, regular subtitle,
+# EAN-13 barcode + human-readable interpretation line.
+EAN13_HEADER_TOP_LEFT_MM = (4.44, 4.56)
+EAN13_HEADER_SIZE_MM = (42.76, 3.60)
+EAN13_HEADER_FONT_PT = 7  # bold
+
+EAN13_SUBTITLE_TEXT = "NASync Network Attached Storage"
+EAN13_SUBTITLE_TOP_LEFT_MM = (7.71, 8.01)
+EAN13_SUBTITLE_SIZE_MM = (34.29, 2.96)
+EAN13_SUBTITLE_FONT_PT = 6  # regular, centered
+
+EAN13_BARCODE_TOP_LEFT_MM = (4.06, 11.61)
+EAN13_BARCODE_SIZE_MM = (38.00, 16.00)  # combined barcode + HRI line
+EAN13_BARCODE_BAR_HEIGHT_MM = 12.0     # bars only — HRI gets the remaining 4mm
+EAN13_BARCODE_HRI_FONT_PT = 8
+
+EAN13_HEADER_TEMPLATE = "Model: DXP {model_display} | P/N: {pn}"
+EAN13_MODEL_DISPLAY = {
+    "2800": "2800",
+    "4800": "4800",
+    "4800Plus": "4800 Plus",
+}
+
 # P/N lookup for the US-region refurbished SKU lineup (the only stock currently
 # in factory test). A class = refurb level L0, B class = L1.
 # 2800 is hardcoded — not in the 内部 NAS SKU 汇总 spreadsheet.
@@ -104,6 +135,26 @@ def lookup_pn(model_key: str | None, grade: str | None) -> str | None:
     if not model_key or not grade:
         return None
     return NAMEPLATE_PN_TABLE.get((str(model_key), str(grade).strip().upper()))
+
+
+# 13-digit EAN-13 (a.k.a. "69 码", as Chinese factory parlance reflects the
+# 690-699 country code prefix) for the same SKU lineup. Sourced from the
+# 海外 sheet column G. 2800 A still TBD — factory hasn't supplied it; print
+# will refuse until provided.
+NAMEPLATE_EAN13_TABLE: dict[tuple[str, str], str] = {
+    # ("2800", "A"): TBD, never silently default — factory must fill this in.
+    ("2800", "B"): "6900000000001",
+    ("4800", "A"): "6900000000002",
+    ("4800", "B"): "6900000000003",
+    ("4800Plus", "A"): "6900000000004",
+    ("4800Plus", "B"): "6900000000005",
+}
+
+
+def lookup_ean13(model_key: str | None, grade: str | None) -> str | None:
+    if not model_key or not grade:
+        return None
+    return NAMEPLATE_EAN13_TABLE.get((str(model_key), str(grade).strip().upper()))
 
 # Heuristic substrings to recognize a Zebra/ZPL printer queue name on Windows.
 _ZEBRA_NAME_HINTS = (
@@ -551,6 +602,89 @@ def build_nameplate_zpl(
     return ("\n".join(parts) + "\n").encode("utf-8")
 
 
+def build_ean13_zpl(
+    model_key: str,
+    pn: str,
+    ean13: str,
+    *,
+    dpi: int = EAN13_DPI,
+    quantity: int = 2,
+    darkness: int | None = None,
+) -> bytes:
+    """Generate ZPL for the 模版五 EAN-13 (69 码) carton/middle-box label.
+
+    50×30mm. Layout follows the supplier-shipped ``2800 69码 50x30mm用.ddl``
+    DLabel template: bold header line on top, regular subtitle below it, and
+    a Code EAN-13 barcode with HRI line at the bottom.
+    """
+    if not pn or not ean13:
+        raise ValueError("build_ean13_zpl requires both pn and ean13")
+    digits = "".join(ch for ch in str(ean13) if ch.isdigit())
+    if len(digits) not in (12, 13):
+        raise ValueError(
+            f"EAN-13 input must be 12 or 13 digits; got {len(digits)} from {ean13!r}"
+        )
+    # ZPL's ^BE will recompute the check digit; pass the leading 12 digits.
+    bar_data = digits[:12]
+    model_display = EAN13_MODEL_DISPLAY.get(str(model_key), str(model_key))
+    header_text = EAN13_HEADER_TEMPLATE.format(model_display=model_display, pn=pn)
+
+    label_w = _mm_to_dots(EAN13_WIDTH_MM, dpi)
+    label_h = _mm_to_dots(EAN13_HEIGHT_MM, dpi)
+
+    parts: list[str] = [
+        "^XA",
+        "^CI28",
+        f"^PW{label_w}",
+        f"^LL{label_h}",
+        "^LH0,0",
+        "^LS0",
+        "^PON",
+    ]
+    if darkness is not None:
+        parts.append(f"~SD{max(0, min(30, int(darkness))):02d}")
+
+    # Header — bold, left-aligned, rendered as a bitmap so the spec's bold
+    # weight survives on printers without an uploaded CJK/Latin bold font.
+    header_h_dots = max(_mm_to_dots(EAN13_HEADER_FONT_PT / 72 * 25.4 + 0.3, dpi), 12)
+    header_img = _render_text_image(header_text, header_h_dots, bold=True)
+    header_origin = (
+        _mm_to_dots(EAN13_HEADER_TOP_LEFT_MM[0], dpi),
+        _mm_to_dots(EAN13_HEADER_TOP_LEFT_MM[1], dpi),
+    )
+    parts.append(_image_to_gfa(header_img, header_origin[0], header_origin[1]))
+
+    # Subtitle — regular weight, horizontally centered within the spec box.
+    sub_h_dots = max(_mm_to_dots(EAN13_SUBTITLE_FONT_PT / 72 * 25.4 + 0.3, dpi), 10)
+    sub_img = _render_text_image(EAN13_SUBTITLE_TEXT, sub_h_dots, bold=False)
+    sub_box_left = _mm_to_dots(EAN13_SUBTITLE_TOP_LEFT_MM[0], dpi)
+    sub_box_top = _mm_to_dots(EAN13_SUBTITLE_TOP_LEFT_MM[1], dpi)
+    sub_box_w = _mm_to_dots(EAN13_SUBTITLE_SIZE_MM[0], dpi)
+    sub_x = sub_box_left + max(0, (sub_box_w - sub_img.width) // 2)
+    parts.append(_image_to_gfa(sub_img, sub_x, sub_box_top))
+
+    # EAN-13 barcode + interpretation line. Module width is auto-fit so the
+    # bars stay within the 38mm spec box. EAN-13 has a fixed 95 modules.
+    barcode_x = _mm_to_dots(EAN13_BARCODE_TOP_LEFT_MM[0], dpi)
+    barcode_y = _mm_to_dots(EAN13_BARCODE_TOP_LEFT_MM[1], dpi)
+    barcode_w_dots = _mm_to_dots(EAN13_BARCODE_SIZE_MM[0], dpi)
+    bar_h_dots = _mm_to_dots(EAN13_BARCODE_BAR_HEIGHT_MM, dpi)
+    module = max(1, barcode_w_dots // 113)  # 95 bars + 18-module quiet zones
+    parts.extend(
+        [
+            f"^FO{barcode_x},{barcode_y}",
+            f"^BY{module},3,{bar_h_dots}",
+            # ^BEorientation,height,print_interp_line,interp_line_above
+            f"^BEN,{bar_h_dots},Y,N",
+            f"^FD{bar_data}^FS",
+        ]
+    )
+
+    parts.append(f"^PQ{max(1, int(quantity))},0,1,Y")
+    parts.append("^XZ")
+    return ("\n".join(parts) + "\n").encode("utf-8")
+
+
 # ---------------------------------------------------------------------------
 # PNG preview (cross-platform, for off-printer verification)
 # ---------------------------------------------------------------------------
@@ -694,12 +828,16 @@ def list_windows_printers() -> list[dict]:
 def find_label_printer(preferred: str | None = None) -> str | None:
     """Resolve which printer queue to send to.
 
-    Resolution order:
-    1. ``preferred`` if it matches a queue name (case-insensitive substring).
-    2. First queue whose name/driver contains a known Zebra hint.
-    3. Windows default printer (only if its name looks Zebra-ish; we don't want
-       to silently print labels on the office laser).
-    4. ``None`` — caller should ask the user.
+    When ``preferred`` is supplied (i.e. the caller has a config-driven name),
+    the name is *strict*: we only return a queue whose name matches exactly
+    (case-insensitive). No substring matches, no Zebra-hint fallback. The
+    factory machine has multiple Zebra/Deli queues, including orphan ones,
+    and silently picking a different one shipped to the wrong printer once
+    already — config is law.
+
+    Only when ``preferred`` is empty/None do we fall back to the legacy
+    Zebra-hint heuristic, which exists for first-time setup before someone
+    has filled in ``<x>_printer.name`` in config.yml.
     """
     if not is_windows():
         return preferred
@@ -713,26 +851,22 @@ def find_label_printer(preferred: str | None = None) -> str | None:
         for p in printers:
             if p["name"].lower() == pref:
                 return p["name"]
-        for p in printers:
-            if pref in p["name"].lower():
-                return p["name"]
+        return None  # strict — no fuzzy fallback when config gave us a name
 
+    # Legacy first-run fallback only. Real factory configs should never
+    # land here because the *_printer.name keys are always set.
     for p in printers:
         bag = f"{p['name']} {p['driver']}".lower()
         if any(hint in bag for hint in _ZEBRA_NAME_HINTS):
             return p["name"]
-
     try:
         import win32print  # type: ignore[import-not-found]
 
         default_name = win32print.GetDefaultPrinter()
     except (ImportError, Exception):  # noqa: BLE001
         default_name = ""
-    if default_name:
-        low = default_name.lower()
-        if any(hint in low for hint in _ZEBRA_NAME_HINTS):
-            return default_name
-
+    if default_name and any(hint in default_name.lower() for hint in _ZEBRA_NAME_HINTS):
+        return default_name
     return None
 
 

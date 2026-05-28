@@ -217,6 +217,38 @@ def test_find_label_printer_returns_preferred_on_non_windows(monkeypatch) -> Non
     assert label_util.find_label_printer(None) is None
 
 
+def test_find_label_printer_strict_exact_match_when_preferred(monkeypatch) -> None:
+    monkeypatch.setattr(label_util, "is_windows", lambda: True)
+    queues = [
+        {"name": "ZDesigner ZD888-203dpi ZPL", "driver": "ZDesigner ZD888", "port": "USB002"},
+        {"name": "ZDesigner ZD888-203dpi ZPL (副本 1)", "driver": "ZDesigner ZD888", "port": "USB004"},
+        {"name": "DeliDL-888T", "driver": "Deli", "port": "USB003"},
+    ]
+    monkeypatch.setattr(label_util, "list_windows_printers", lambda: queues)
+    # Exact match wins, including the parenthesised副本 suffix that previously
+    # confused the substring heuristic.
+    assert (
+        label_util.find_label_printer("ZDesigner ZD888-203dpi ZPL (副本 1)")
+        == "ZDesigner ZD888-203dpi ZPL (副本 1)"
+    )
+    # No fuzzy match — wrong queue name returns None, never "close enough".
+    assert label_util.find_label_printer("ZDesigner ZD888") is None
+    assert label_util.find_label_printer("DeliDL-999X") is None
+    # Case-insensitive exact still OK.
+    assert label_util.find_label_printer("delidl-888t") == "DeliDL-888T"
+
+
+def test_find_label_printer_heuristic_only_when_preferred_is_empty(monkeypatch) -> None:
+    monkeypatch.setattr(label_util, "is_windows", lambda: True)
+    queues = [
+        {"name": "OneNote", "driver": "Microsoft", "port": "nul:"},
+        {"name": "ZDesigner ZT610-600dpi ZPL", "driver": "ZDesigner", "port": "USB001"},
+    ]
+    monkeypatch.setattr(label_util, "list_windows_printers", lambda: queues)
+    assert label_util.find_label_printer(None) == "ZDesigner ZT610-600dpi ZPL"
+    assert label_util.find_label_printer("") == "ZDesigner ZT610-600dpi ZPL"
+
+
 def test_send_to_windows_printer_refuses_on_non_windows(monkeypatch) -> None:
     monkeypatch.setattr(label_util, "is_windows", lambda: False)
     with pytest.raises(RuntimeError, match="requires Windows"):
@@ -255,6 +287,44 @@ def test_lookup_pn_returns_none_when_anything_missing() -> None:
     assert label_util.lookup_pn("2800", None) is None
     assert label_util.lookup_pn("9999", "A") is None
     assert label_util.lookup_pn("2800", "C") is None
+
+
+def test_lookup_ean13_table_covers_known_us_refurb_skus() -> None:
+    # Verified against 内部 NAS SKU 汇总 海外 sheet column G (69 码).
+    assert label_util.lookup_ean13("2800", "B") == "6900000000001"
+    assert label_util.lookup_ean13("4800", "A") == "6900000000002"
+    assert label_util.lookup_ean13("4800", "B") == "6900000000003"
+    assert label_util.lookup_ean13("4800Plus", "A") == "6900000000004"
+    assert label_util.lookup_ean13("4800Plus", "B") == "6900000000005"
+
+
+def test_lookup_ean13_returns_none_for_unsupplied_2800_a() -> None:
+    # Factory hasn't supplied this one yet; we must NOT silently fabricate.
+    assert label_util.lookup_ean13("2800", "A") is None
+    assert label_util.lookup_ean13("9999", "B") is None
+    assert label_util.lookup_ean13(None, "A") is None
+
+
+def test_build_ean13_zpl_emits_native_ean_and_label_dims() -> None:
+    zpl = label_util.build_ean13_zpl(
+        "4800Plus", "00004", "6900000000004", dpi=203, quantity=2
+    ).decode("utf-8")
+    # Canvas: 50×30mm at 203dpi → 400×240 dots
+    assert "^PW400" in zpl
+    assert "^LL240" in zpl
+    # Native ^BE barcode; ZPL recomputes the check digit so we strip the 13th.
+    assert "^BEN," in zpl
+    assert "^FD690000000000^FS" in zpl
+    # Two ^GFA bitmaps for the header + subtitle.
+    assert zpl.count("^GFA,") == 2
+    assert "^PQ2,0,1,Y" in zpl
+
+
+def test_build_ean13_zpl_rejects_bad_ean_length() -> None:
+    with pytest.raises(ValueError, match="12 or 13 digits"):
+        label_util.build_ean13_zpl("4800", "00002", "1234567")
+    with pytest.raises(ValueError, match="requires both pn and ean13"):
+        label_util.build_ean13_zpl("4800", "", "6900000000002")
 
 
 def test_build_nameplate_zpl_emits_qr_and_two_text_blocks() -> None:

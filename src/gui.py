@@ -2185,6 +2185,10 @@ class FactoryTestGUI:
                     self._submit_nameplate_print(task.sn, silent=True)
                 except Exception as exc:  # noqa: BLE001
                     logger.error(f"auto-print nameplate failed for SN={task.sn}: {exc}")
+                try:
+                    self._submit_ean13_print(task.sn, silent=True)
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(f"auto-print ean13 failed for SN={task.sn}: {exc}")
         if event.get("type") == "finished" and status_code == "failed":
             task.finished_monotonic = time.monotonic()
             self._show_failure_alert_if_needed(task, str(event.get("error") or ""))
@@ -2980,11 +2984,11 @@ class FactoryTestGUI:
             row=1, column=0, columnspan=2, sticky=tk.W, pady=(0, 10)
         )
 
-        # Checkbox state — default both implemented types to ticked so the
-        # common "print everything" case is one click.
+        # Checkbox state — default the three implemented types to ticked so
+        # the common "print everything" case is one click.
         nameplate_var = tk.BooleanVar(value=True)
         sn_var = tk.BooleanVar(value=True)
-        ean13_var = tk.BooleanVar(value=False)
+        ean13_var = tk.BooleanVar(value=True)
         shipping_var = tk.BooleanVar(value=False)
 
         ttk.Checkbutton(body, text=self._t("label_nameplate"), variable=nameplate_var).grid(
@@ -2993,9 +2997,9 @@ class FactoryTestGUI:
         ttk.Checkbutton(body, text=self._t("label_sn"), variable=sn_var).grid(
             row=2, column=1, sticky=tk.W, padx=4, pady=2
         )
-        ttk.Checkbutton(
-            body, text=self._t("label_ean13"), variable=ean13_var, state="disabled"
-        ).grid(row=3, column=0, sticky=tk.W, padx=4, pady=2)
+        ttk.Checkbutton(body, text=self._t("label_ean13"), variable=ean13_var).grid(
+            row=3, column=0, sticky=tk.W, padx=4, pady=2
+        )
         ttk.Checkbutton(
             body, text=self._t("label_shipping"), variable=shipping_var, state="disabled"
         ).grid(row=3, column=1, sticky=tk.W, padx=4, pady=2)
@@ -3010,6 +3014,7 @@ class FactoryTestGUI:
             picks = {
                 "nameplate": nameplate_var.get(),
                 "sn": sn_var.get(),
+                "ean13": ean13_var.get(),
             }
             if not any(picks.values()):
                 messagebox.showwarning(
@@ -3023,6 +3028,8 @@ class FactoryTestGUI:
                 _print_each(self._submit_nameplate_print)
             if picks["sn"]:
                 _print_each(self._submit_label_print)
+            if picks["ean13"]:
+                _print_each(self._submit_ean13_print)
 
         button_row = ttk.Frame(body)
         button_row.grid(row=4, column=0, columnspan=2, sticky=tk.E, pady=(12, 0))
@@ -3209,6 +3216,93 @@ class FactoryTestGUI:
         prefix = "自动" if silent else "已"
         self.status_var.set(
             f"{datetime.now().strftime('%H:%M:%S')}  {prefix}发送铭牌×{quantity} 到 {target}（SN={normalized} P/N={pn} {grade}类）"
+        )
+        return True
+
+    def _submit_ean13_print(self, sn: str, *, silent: bool) -> bool:
+        """Send N EAN-13 (69 码) carton labels (50×30mm) to the Deli DL-888T.
+
+        Resolves model from SN prefix, P/N + EAN-13 from (model, grade) lookup
+        tables. Skips with a warning if any of those can't be resolved (eg.
+        2800 A's EAN-13 hasn't been supplied yet); never silently substitutes.
+        """
+        normalized = normalize_sn(sn)
+        if not normalized or is_auto_sn_placeholder(normalized) or not is_full_sn_candidate(normalized):
+            return False
+
+        model_key = model_key_from_sn(normalized)
+        grade = (self.form_grade_var.get() or "").strip().upper() or None
+        pn = label_util.lookup_pn(model_key, grade)
+        ean13 = label_util.lookup_ean13(model_key, grade)
+        if not pn or not ean13:
+            msg = (
+                f"无法解析 69 码标签数据 (model={model_key!r} grade={grade!r}"
+                f" pn={pn!r} ean13={ean13!r})。"
+                "请确认 SN 对应的机型/等级在查表里。"
+            )
+            if silent:
+                logger.warning(f"auto-print ean13 skipped: {msg}")
+            else:
+                messagebox.showwarning("打印 69 码", msg)
+            return False
+
+        cfg = (self.config.get("ean13_printer") or {}) if isinstance(self.config, dict) else {}
+        printer_pref = str(cfg.get("name") or "").strip() or None
+        try:
+            dpi = int(cfg.get("dpi") or label_util.EAN13_DPI)
+        except (TypeError, ValueError):
+            dpi = label_util.EAN13_DPI
+        try:
+            quantity = max(1, int(cfg.get("quantity") or 2))
+        except (TypeError, ValueError):
+            quantity = 2
+
+        try:
+            zpl = label_util.build_ean13_zpl(model_key, pn, ean13, dpi=dpi, quantity=quantity)
+        except ValueError as exc:
+            if silent:
+                logger.error(f"auto-print ean13: build failed for SN={normalized}: {exc}")
+            else:
+                messagebox.showerror("打印 69 码", f"生成 ZPL 失败：{exc}")
+            return False
+
+        if not label_util.is_windows():
+            if not silent:
+                messagebox.showinfo(
+                    "打印 69 码",
+                    "非 Windows 主机不能直接发打印队列。"
+                    "用 `run-cli print-ean13 --zpl-out` 查看 ZPL。",
+                )
+            return False
+
+        target = label_util.find_label_printer(printer_pref)
+        if not target:
+            queues = label_util.list_windows_printers()
+            names = "\n".join(p["name"] for p in queues) or "(无)"
+            msg = (
+                f"找不到 69 码打印机 '{printer_pref}'（严格匹配）。\n"
+                "请在 config.yml 的 ean13_printer.name 里写准打印队列名。\n\n"
+                f"Windows 上已安装的队列：\n{names}"
+            )
+            if silent:
+                logger.error(f"auto-print ean13: {msg}")
+            else:
+                messagebox.showerror("打印 69 码", msg)
+            return False
+
+        try:
+            label_util.send_to_windows_printer(target, zpl, job_name=f"EAN-13 {ean13}")
+        except Exception as exc:  # noqa: BLE001
+            if silent:
+                logger.error(f"auto-print ean13: send to '{target}' failed: {exc}")
+            else:
+                messagebox.showerror("打印 69 码", f"发送到打印机失败：{exc}")
+            return False
+
+        prefix = "自动" if silent else "已"
+        self.status_var.set(
+            f"{datetime.now().strftime('%H:%M:%S')}  {prefix}发送 69 码×{quantity} 到 {target}"
+            f"（SN={normalized} P/N={pn} EAN={ean13} {grade}类）"
         )
         return True
 

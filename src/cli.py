@@ -1847,6 +1847,154 @@ def print_nameplate(
     )
 
 
+def _load_ean13_config() -> dict:
+    try:
+        config, _ = load_configs(PROJECT_ROOT)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"_load_ean13_config: config load failed ({exc}); using defaults")
+        return {}
+    section = config.get("ean13_printer") if isinstance(config, dict) else None
+    return section if isinstance(section, dict) else {}
+
+
+@cli.command("print-ean13")
+@click.option("--sn", help="Serial number — drives model lookup via SN prefix.")
+@click.option(
+    "--grade",
+    type=click.Choice(["A", "B"], case_sensitive=False),
+    default=None,
+    help="Refurb grade — drives P/N and EAN-13 lookup.",
+)
+@click.option(
+    "--model",
+    default=None,
+    help="Override model key (2800 / 4800 / 4800Plus). Default derived from --sn.",
+)
+@click.option(
+    "--pn",
+    default=None,
+    help="Override P/N. Default looked up from (model, grade) via lookup_pn().",
+)
+@click.option(
+    "--ean13",
+    default=None,
+    help="Override EAN-13 (12 or 13 digits). Default looked up via lookup_ean13().",
+)
+@click.option(
+    "--printer",
+    default=None,
+    help="Windows printer queue. Default reads ean13_printer.name from config.",
+)
+@click.option(
+    "--dpi",
+    type=click.IntRange(150, 600),
+    default=None,
+    help="Printer dpi. Default reads ean13_printer.dpi (203).",
+)
+@click.option(
+    "--quantity",
+    "-n",
+    type=click.IntRange(1, 20),
+    default=None,
+    help="Copies. Default reads ean13_printer.quantity (=2 per spec 2PCS).",
+)
+@click.option(
+    "--zpl-out",
+    "zpl_out_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Write raw ZPL to this file (skip printer send).",
+)
+@click.option(
+    "--no-print",
+    is_flag=True,
+    default=False,
+    help="Skip sending to printer (use with --zpl-out for dry runs).",
+)
+def print_ean13(
+    sn: str | None,
+    grade: str | None,
+    model: str | None,
+    pn: str | None,
+    ean13: str | None,
+    printer: str | None,
+    dpi: int | None,
+    quantity: int | None,
+    zpl_out_path: Path | None,
+    no_print: bool,
+) -> None:
+    """Print the 模版五 EAN-13 (69 码) carton + middle-box label.
+
+    Resolves model from SN prefix (HB→2800 / EC671→4800 / EC752→4800Plus),
+    then P/N via lookup_pn and EAN-13 via lookup_ean13. Each can be overridden
+    explicitly. Output is 50×30mm at 203 dpi, sent to the Deli DL-888T (or
+    whichever queue is configured under ``ean13_printer.name``).
+    """
+    cfg = _load_ean13_config()
+    if printer is None and cfg.get("name"):
+        printer = str(cfg["name"])
+    if dpi is None:
+        try:
+            dpi = int(cfg.get("dpi") or label_util.EAN13_DPI)
+        except (TypeError, ValueError):
+            dpi = label_util.EAN13_DPI
+    if quantity is None:
+        try:
+            quantity = max(1, int(cfg.get("quantity") or 2))
+        except (TypeError, ValueError):
+            quantity = 2
+
+    if not model and sn:
+        model = model_key_from_sn(sn)
+    if not model:
+        raise click.UsageError("Could not resolve model — pass --sn or --model.")
+    if not pn:
+        pn = label_util.lookup_pn(model, grade)
+    if not pn:
+        raise click.UsageError(
+            f"Could not resolve P/N for model={model!r} grade={grade!r}. "
+            "Pass --pn explicitly or specify --grade with a known SN."
+        )
+    if not ean13:
+        ean13 = label_util.lookup_ean13(model, grade)
+    if not ean13:
+        raise click.UsageError(
+            f"Could not resolve EAN-13 for model={model!r} grade={grade!r}. "
+            "Pass --ean13 explicitly — the factory hasn't supplied this SKU yet."
+        )
+
+    try:
+        zpl = label_util.build_ean13_zpl(model, pn, ean13, dpi=dpi, quantity=quantity)
+    except ValueError as exc:
+        raise click.ClickException(str(exc))
+
+    if zpl_out_path is not None:
+        out = label_util.write_zpl_file(zpl_out_path, zpl)
+        click.echo(f"ZPL written: {out}")
+
+    if no_print:
+        click.echo("(--no-print set; skipped sending to printer)")
+        return
+
+    if not label_util.is_windows():
+        click.echo(
+            "Non-Windows host: cannot send to printer queue directly. "
+            "Use --zpl-out to inspect, or run on the Windows factory machine."
+        )
+        return
+
+    target = label_util.find_label_printer(printer)
+    if not target:
+        hints = "\n  ".join(p["name"] for p in label_util.list_windows_printers()) or "(none)"
+        raise click.ClickException(
+            f"Printer '{printer}' not found (strict match). Installed queues:\n  " + hints
+        )
+    label_util.send_to_windows_printer(target, zpl, job_name=f"EAN-13 {ean13}")
+    click.echo(
+        f"Sent {quantity} EAN-13 label(s) for {model}/{grade} (P/N={pn}, EAN={ean13}) to '{target}'"
+    )
+
+
 def main() -> None:
     try:
         cli()

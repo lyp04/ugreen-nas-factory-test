@@ -2956,7 +2956,12 @@ class FactoryTestGUI:
         return [], "empty"
 
     def _show_print_chooser(self, sns: list[str]) -> None:
-        """Modal with 4 label-type buttons. Only 铭牌 / SN 标贴 are enabled today."""
+        """Modal with 4 label-type checkboxes + 打印 button.
+
+        Implemented types (铭牌 / SN 标贴) tick by default; not-yet-implemented
+        types (69 码 / 船运标签) are grayed out so the operator sees them but
+        can't accidentally select them.
+        """
         dlg = tk.Toplevel(self.root)
         dlg.title(self._t("print_chooser_title"))
         dlg.transient(self.root)
@@ -2966,48 +2971,68 @@ class FactoryTestGUI:
         body = ttk.Frame(dlg, padding=12)
         body.pack(fill=tk.BOTH, expand=True)
         ttk.Label(body, text=self._t("print_chooser_for", count=len(sns))).grid(
-            row=0, column=0, columnspan=4, sticky=tk.W, pady=(0, 4)
+            row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 4)
         )
-        # Show up to 6 SNs; truncate with "..." beyond that.
         preview = ", ".join(sns[:6])
         if len(sns) > 6:
             preview += f" … (+{len(sns) - 6})"
         ttk.Label(body, text=preview, foreground="#444").grid(
-            row=1, column=0, columnspan=4, sticky=tk.W, pady=(0, 10)
+            row=1, column=0, columnspan=2, sticky=tk.W, pady=(0, 10)
         )
 
-        def _close_and(fn) -> None:
-            dlg.destroy()
-            fn()
+        # Checkbox state — default both implemented types to ticked so the
+        # common "print everything" case is one click.
+        nameplate_var = tk.BooleanVar(value=True)
+        sn_var = tk.BooleanVar(value=True)
+        ean13_var = tk.BooleanVar(value=False)
+        shipping_var = tk.BooleanVar(value=False)
+
+        ttk.Checkbutton(body, text=self._t("label_nameplate"), variable=nameplate_var).grid(
+            row=2, column=0, sticky=tk.W, padx=4, pady=2
+        )
+        ttk.Checkbutton(body, text=self._t("label_sn"), variable=sn_var).grid(
+            row=2, column=1, sticky=tk.W, padx=4, pady=2
+        )
+        ttk.Checkbutton(
+            body, text=self._t("label_ean13"), variable=ean13_var, state="disabled"
+        ).grid(row=3, column=0, sticky=tk.W, padx=4, pady=2)
+        ttk.Checkbutton(
+            body, text=self._t("label_shipping"), variable=shipping_var, state="disabled"
+        ).grid(row=3, column=1, sticky=tk.W, padx=4, pady=2)
+        for col in range(2):
+            body.columnconfigure(col, weight=1, minsize=150)
 
         def _print_each(submit_fn) -> None:
             for sn in sns:
                 submit_fn(sn, silent=False)
 
-        ttk.Button(
-            body,
-            text=self._t("label_nameplate"),
-            command=lambda: _close_and(lambda: _print_each(self._submit_nameplate_print)),
-        ).grid(row=2, column=0, padx=4, pady=4, sticky=tk.EW)
-        ttk.Button(
-            body,
-            text=self._t("label_sn"),
-            command=lambda: _close_and(lambda: _print_each(self._submit_label_print)),
-        ).grid(row=2, column=1, padx=4, pady=4, sticky=tk.EW)
-        ttk.Button(body, text=self._t("label_ean13"), state="disabled").grid(
-            row=2, column=2, padx=4, pady=4, sticky=tk.EW
-        )
-        ttk.Button(body, text=self._t("label_shipping"), state="disabled").grid(
-            row=2, column=3, padx=4, pady=4, sticky=tk.EW
-        )
-        for col in range(4):
-            body.columnconfigure(col, weight=1, minsize=110)
+        def _on_confirm() -> None:
+            picks = {
+                "nameplate": nameplate_var.get(),
+                "sn": sn_var.get(),
+            }
+            if not any(picks.values()):
+                messagebox.showwarning(
+                    self._t("print_chooser_title"),
+                    "请至少勾选一项标签。",
+                    parent=dlg,
+                )
+                return
+            dlg.destroy()
+            if picks["nameplate"]:
+                _print_each(self._submit_nameplate_print)
+            if picks["sn"]:
+                _print_each(self._submit_label_print)
 
-        ttk.Button(body, text=self._t("cancel"), command=dlg.destroy).grid(
-            row=3, column=3, padx=4, pady=(10, 0), sticky=tk.E
+        button_row = ttk.Frame(body)
+        button_row.grid(row=4, column=0, columnspan=2, sticky=tk.E, pady=(12, 0))
+        ttk.Button(button_row, text=self._t("cancel"), command=dlg.destroy).pack(
+            side=tk.RIGHT, padx=(6, 0)
         )
+        ttk.Button(
+            button_row, text=self._t("print_label"), command=_on_confirm
+        ).pack(side=tk.RIGHT)
 
-        # Center over the main window.
         dlg.update_idletasks()
         x = self.root.winfo_rootx() + (self.root.winfo_width() - dlg.winfo_width()) // 2
         y = self.root.winfo_rooty() + (self.root.winfo_height() - dlg.winfo_height()) // 3

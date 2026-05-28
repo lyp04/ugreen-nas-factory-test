@@ -29,6 +29,7 @@ from .flows import system_update as system_update_flow
 from .utils.config_loader import load_configs
 from .utils.browser_control import close_managed_context, launch_managed_context
 from .utils.desktop import dismiss_desktop_overlays
+from .utils import label as label_util
 from .utils.logger import logger, setup_logger
 from .utils.screenshot import capture_failure, relocate_session_dirs, session_dirs
 from .utils.sn import (
@@ -1508,6 +1509,342 @@ def cleanup(sn: str, nas_ip: str) -> None:
 @click.option("--nas-ip", required=True, help="NAS IP to probe")
 def smoke(nas_ip: str) -> None:
     run_smoke(nas_ip)
+
+
+def _load_label_config() -> dict:
+    """Read `label_printer` section from config.yml, returning {} on any error."""
+    try:
+        config, _ = load_configs(PROJECT_ROOT)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"_load_label_config: config load failed ({exc}); using defaults")
+        return {}
+    section = config.get("label_printer") if isinstance(config, dict) else None
+    return section if isinstance(section, dict) else {}
+
+
+@cli.command("print-label")
+@click.option("--sn", help="Serial number to encode (Code 128).")
+@click.option(
+    "--printer",
+    default=None,
+    help="Windows printer queue name. If omitted, auto-detect a Zebra-like queue.",
+)
+@click.option(
+    "--preview",
+    "preview_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Also render a PNG preview to this path (cross-platform, no printer needed).",
+)
+@click.option(
+    "--zpl-out",
+    "zpl_out_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Write raw ZPL to this file (for hotfolder workflows or inspection).",
+)
+@click.option(
+    "--dpi",
+    type=click.IntRange(150, 600),
+    default=label_util.DEFAULT_DPI,
+    show_default=True,
+    help="Printer dpi (203 for Zebra ZD220/ZD420, 300 for ZD420-300dpi etc).",
+)
+@click.option(
+    "--quantity",
+    "-n",
+    type=click.IntRange(1, 50),
+    default=1,
+    show_default=True,
+    help="Number of copies to print.",
+)
+@click.option(
+    "--no-print",
+    is_flag=True,
+    default=False,
+    help="Skip sending to printer (use with --preview / --zpl-out for dry runs).",
+)
+@click.option(
+    "--list-printers",
+    is_flag=True,
+    default=False,
+    help="Print all installed Windows printer queues then exit.",
+)
+def print_label(
+    sn: str | None,
+    printer: str | None,
+    preview_path: Path | None,
+    zpl_out_path: Path | None,
+    dpi: int,
+    quantity: int,
+    no_print: bool,
+    list_printers: bool,
+) -> None:
+    cfg = _load_label_config()
+    if printer is None and cfg.get("name"):
+        printer = str(cfg["name"])
+    if dpi == label_util.DEFAULT_DPI and cfg.get("dpi"):
+        try:
+            dpi = int(cfg["dpi"])
+        except (TypeError, ValueError):
+            pass
+    if quantity == 1 and cfg.get("quantity"):
+        try:
+            quantity = max(1, int(cfg["quantity"]))
+        except (TypeError, ValueError):
+            pass
+    """Generate and print a Code 128 SN label (42×25mm, 模版二 spec).
+
+    Examples:
+
+    \b
+        # Manual: print one label
+        run-cli print-label --sn HB12345ABCD
+        # Dry run with PNG preview (works on macOS/Linux too)
+        run-cli print-label --sn HB12345ABCD --preview /tmp/label.png --no-print
+        # Inspect ZPL bytes
+        run-cli print-label --sn HB12345ABCD --zpl-out /tmp/label.zpl --no-print
+    """
+    if list_printers:
+        printers = label_util.list_windows_printers()
+        if not printers:
+            click.echo("(no printers found — non-Windows host or pywin32 missing)")
+        else:
+            for p in printers:
+                click.echo(f"{p['name']}\tdriver={p['driver']}\tport={p['port']}")
+        return
+
+    if not sn:
+        raise click.UsageError("--sn is required (unless using --list-printers)")
+
+    normalized = normalize_sn(sn)
+    if not normalized:
+        raise click.UsageError(f"SN normalizes to empty: {sn!r}")
+    if is_auto_sn_placeholder(normalized):
+        raise click.UsageError(f"Refusing to print AUTO placeholder SN: {normalized}")
+
+    zpl = label_util.build_zpl(normalized, dpi=dpi, quantity=quantity)
+
+    if zpl_out_path is not None:
+        out = label_util.write_zpl_file(zpl_out_path, zpl)
+        click.echo(f"ZPL written: {out}")
+
+    if preview_path is not None:
+        try:
+            out = label_util.render_preview_png(normalized, preview_path)
+            click.echo(f"Preview PNG written: {out}")
+        except ImportError as exc:
+            raise click.ClickException(str(exc))
+
+    if no_print:
+        click.echo("(--no-print set; skipped sending to printer)")
+        return
+
+    if not label_util.is_windows():
+        click.echo(
+            "Non-Windows host: cannot send to printer queue directly. "
+            "Use --preview / --zpl-out to inspect, or run on the Windows factory machine."
+        )
+        return
+
+    target = label_util.find_label_printer(printer)
+    if not target:
+        hints = "\n  ".join(p["name"] for p in label_util.list_windows_printers()) or "(none)"
+        raise click.ClickException(
+            "Could not auto-detect a Zebra printer. "
+            "Pass --printer explicitly. Installed queues:\n  " + hints
+        )
+    label_util.send_to_windows_printer(target, zpl, job_name=f"SN {normalized}")
+    click.echo(f"Sent {quantity} label(s) for SN={normalized} to '{target}'")
+
+
+def _load_nameplate_config() -> dict:
+    try:
+        config, _ = load_configs(PROJECT_ROOT)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"_load_nameplate_config: config load failed ({exc}); using defaults")
+        return {}
+    section = config.get("nameplate_printer") if isinstance(config, dict) else None
+    return section if isinstance(section, dict) else {}
+
+
+@cli.command("print-nameplate")
+@click.option("--sn", required=True, help="Serial number (drives barcode + QR + text).")
+@click.option(
+    "--pn",
+    default=None,
+    help="Part number override. If omitted, looked up from (SN-derived model, --grade) "
+    "via lookup_pn(); falls back to nameplate_printer.placeholder_pn from config.",
+)
+@click.option(
+    "--grade",
+    type=click.Choice(["A", "B"], case_sensitive=False),
+    default=None,
+    help="Refurb grade — drives P/N lookup. A = L0 refurb, B = L1.",
+)
+@click.option(
+    "--printer",
+    default=None,
+    help="Windows printer queue. Default reads nameplate_printer.name from config.",
+)
+@click.option(
+    "--dpi",
+    type=click.IntRange(150, 1200),
+    default=None,
+    help="Printer dpi (ZT610 = 600). Default reads nameplate_printer.dpi.",
+)
+@click.option(
+    "--quantity",
+    "-n",
+    type=click.IntRange(1, 20),
+    default=None,
+    help="Copies. Default reads nameplate_printer.quantity (=1 unless overridden).",
+)
+@click.option(
+    "--qr-x",
+    type=float,
+    default=None,
+    help="Override QR top-left x in mm (for layout iteration).",
+)
+@click.option(
+    "--qr-y",
+    type=float,
+    default=None,
+    help="Override QR top-left y in mm.",
+)
+@click.option(
+    "--strip-x",
+    type=float,
+    default=None,
+    help="Override barcode strip top-left x in mm.",
+)
+@click.option(
+    "--strip-y",
+    type=float,
+    default=None,
+    help="Override barcode strip top-left y in mm.",
+)
+@click.option(
+    "--zpl-out",
+    "zpl_out_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Write raw ZPL to this file (skip printer send).",
+)
+@click.option(
+    "--no-print",
+    is_flag=True,
+    default=False,
+    help="Skip sending to printer (use with --zpl-out for dry runs).",
+)
+def print_nameplate(
+    sn: str,
+    pn: str | None,
+    grade: str | None,
+    printer: str | None,
+    dpi: int | None,
+    quantity: int | None,
+    qr_x: float | None,
+    qr_y: float | None,
+    strip_x: float | None,
+    strip_y: float | None,
+    zpl_out_path: Path | None,
+    no_print: bool,
+) -> None:
+    """Print the 模版一 nameplate label (83.7×36.7mm) on the ZT610.
+
+    The nameplate stock is pre-printed by the supplier; we only fill the
+    QR (20×20mm) and the barcode+text strip (38×6mm) over the reserved
+    white regions.
+
+    Layout iteration:
+
+    \b
+        # first cut with config defaults
+        run-cli print-nameplate --sn HB670EE00000001A
+        # nudge QR 2mm right, strip 1mm down for layout testing
+        run-cli print-nameplate --sn HB670EE00000001A --qr-x 62 --strip-y 28
+    """
+    cfg = _load_nameplate_config()
+    if printer is None and cfg.get("name"):
+        printer = str(cfg["name"])
+    if dpi is None:
+        try:
+            dpi = int(cfg.get("dpi") or label_util.NAMEPLATE_DPI)
+        except (TypeError, ValueError):
+            dpi = label_util.NAMEPLATE_DPI
+    if quantity is None:
+        try:
+            quantity = max(1, int(cfg.get("quantity") or 1))
+        except (TypeError, ValueError):
+            quantity = 1
+    if pn is None:
+        model_key = model_key_from_sn(sn)
+        pn = label_util.lookup_pn(model_key, grade)
+        if not pn:
+            pn = str(cfg.get("placeholder_pn") or "").strip()
+        if not pn:
+            raise click.UsageError(
+                "Could not resolve P/N. Pass --pn explicitly, or pass --grade with a SN "
+                "whose model is in lookup_pn(), or set nameplate_printer.placeholder_pn."
+            )
+
+    qr_xy = list(cfg.get("qr_top_left_mm") or label_util.NAMEPLATE_QR_TOP_LEFT_MM)
+    strip_xy = list(cfg.get("strip_top_left_mm") or label_util.NAMEPLATE_STRIP_TOP_LEFT_MM)
+    if qr_x is not None:
+        qr_xy[0] = qr_x
+    if qr_y is not None:
+        qr_xy[1] = qr_y
+    if strip_x is not None:
+        strip_xy[0] = strip_x
+    if strip_y is not None:
+        strip_xy[1] = strip_y
+
+    normalized = normalize_sn(sn)
+    if not normalized:
+        raise click.UsageError(f"SN normalizes to empty: {sn!r}")
+    if is_auto_sn_placeholder(normalized):
+        raise click.UsageError(f"Refusing to print AUTO placeholder SN: {normalized}")
+
+    try:
+        zpl = label_util.build_nameplate_zpl(
+            normalized,
+            pn,
+            dpi=dpi,
+            quantity=quantity,
+            qr_top_left_mm=(float(qr_xy[0]), float(qr_xy[1])),
+            strip_top_left_mm=(float(strip_xy[0]), float(strip_xy[1])),
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc))
+
+    if zpl_out_path is not None:
+        out = label_util.write_zpl_file(zpl_out_path, zpl)
+        click.echo(f"ZPL written: {out}")
+
+    if no_print:
+        click.echo("(--no-print set; skipped sending to printer)")
+        return
+
+    if not label_util.is_windows():
+        click.echo(
+            "Non-Windows host: cannot send to printer queue directly. "
+            "Use --zpl-out to inspect, or run on the Windows factory machine."
+        )
+        return
+
+    target = label_util.find_label_printer(printer)
+    if not target:
+        hints = "\n  ".join(p["name"] for p in label_util.list_windows_printers()) or "(none)"
+        raise click.ClickException(
+            "Could not auto-detect a Zebra printer. "
+            "Pass --printer explicitly. Installed queues:\n  " + hints
+        )
+    label_util.send_to_windows_printer(target, zpl, job_name=f"Nameplate {normalized}")
+    click.echo(
+        f"Sent {quantity} nameplate(s) for SN={normalized} P/N={pn} to '{target}' "
+        f"(QR@{qr_xy[0]},{qr_xy[1]} strip@{strip_xy[0]},{strip_xy[1]})"
+    )
 
 
 def main() -> None:

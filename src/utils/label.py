@@ -1,0 +1,770 @@
+"""SN label generation for Zebra ZPL printers.
+
+Spec (from 绿联DXP2800 整机标贴通用模版 模版二):
+- Label: 42mm × 25mm, white background / black ink
+- Barcode print area: 38mm × 14mm
+- Margins: 2mm left/right, 5.5mm top, 4.5mm bottom
+- Barcode: Code 128, height 12mm
+- SN text: below barcode, ~5pt 汉仪康黑 (fallback to printer default font)
+
+Public API:
+- ``build_zpl(sn, dpi=203, ...) -> bytes``: pure ZPL II command bytes for raw send
+- ``render_preview_png(sn, output_path, ...) -> Path``: PNG preview via python-barcode+Pillow
+- ``list_windows_printers() -> list[dict]``: enumerate printer queues (Windows only)
+- ``find_label_printer(...) -> str | None``: pick a Zebra-ish printer heuristically
+- ``send_to_windows_printer(printer_name, data) -> None``: raw bytes to print queue
+"""
+
+from __future__ import annotations
+
+import io
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+from .logger import logger
+from .sn import normalize_sn
+
+
+# Label geometry (millimetres) — keep matching PDF spec 模版二.
+LABEL_WIDTH_MM = 42.0
+LABEL_HEIGHT_MM = 25.0
+PRINT_AREA_WIDTH_MM = 38.0
+PRINT_AREA_HEIGHT_MM = 14.0
+LEFT_MARGIN_MM = 2.0
+TOP_MARGIN_MM = 5.5
+BARCODE_HEIGHT_MM = 12.0
+TEXT_GAP_MM = 0.4  # gap between barcode bottom and SN text top
+# Spec says 5pt (~1.76mm). Per factory readability feedback we ship at ~7pt
+# (2.5mm em); the spec's 14mm "barcode print area" still holds for the bars,
+# and the larger text extends into the 5.5mm bottom margin (~4mm to spare).
+TEXT_HEIGHT_MM = 2.5
+# Extra dots inserted between glyphs to loosen the SN's character cadence
+# (~0.25mm at 203dpi). Purely a readability tweak.
+TEXT_LETTER_SPACING_MM = 0.25
+# Per spec sample (模版二): text below barcode is "SN：<sn value>".
+# Spec image uses a full-width colon (U+FF1A); we emit an ASCII colon + space
+# because the default Zebra A0 font cannot render CJK punctuation without
+# uploading a CJK font to the printer first (^DU/^DG/^CW). Visually identical
+# enough for the small printed size, and safe across all Zebra printers.
+TEXT_PREFIX = "SN: "
+
+DEFAULT_DPI = 203  # Most Zebra desktop printers (ZD220/ZD420/GK420t) are 203 dpi.
+
+# ---------------------------------------------------------------------------
+# 模版一 nameplate label spec (machine body sticker, 83.7×36.7mm)
+# ---------------------------------------------------------------------------
+NAMEPLATE_WIDTH_MM = 83.7
+NAMEPLATE_HEIGHT_MM = 36.7
+NAMEPLATE_DPI = 600  # Zebra ZT610 industrial 600dpi
+
+# Two factory-print regions on the pre-printed supplier nameplate:
+# - QR square: 22×22mm reserved with a 20×20mm dashed print area inside.
+# - Barcode strip: 41×8.5mm reserved with a 38×6mm dashed print area (Code 128
+#   barcode 4mm tall stacked on top of "P/N: ... SN: ..." text).
+NAMEPLATE_QR_BOX_MM = 20.0           # red-dashed inner box for the QR
+NAMEPLATE_STRIP_WIDTH_MM = 38.0      # red-dashed inner strip width
+NAMEPLATE_STRIP_HEIGHT_MM = 6.0      # red-dashed inner strip height
+NAMEPLATE_BARCODE_HEIGHT_MM = 4.0    # spec
+NAMEPLATE_TEXT_HEIGHT_MM = 1.76      # 5pt 汉仪旗黑-55S spec
+
+# Placement of the two reserved regions on the 83.7×36.7mm canvas.
+# Second ZT610 trial: QR overshot, pulled back; strip's Y was right, X
+# nudged right a touch; text moved to bold + 2.5mm em for legibility.
+NAMEPLATE_QR_TOP_LEFT_MM = (65.0, 5.0)     # (x, y) of QR box top-left
+NAMEPLATE_STRIP_TOP_LEFT_MM = (6.0, 25.0)  # (x, y) of strip top-left
+NAMEPLATE_TEXT_EM_MM = 2.0  # text em-height; 2.5 overran the 38mm strip width
+
+# QR payload template — SN gets substituted in. Spec sample literal:
+# https://nas.ugreen.com/download?qr={"t":1,"data":{"sn":"DB670JJ00000001A"}}
+NAMEPLATE_QR_URL_TEMPLATE = (
+    'https://nas.ugreen.com/download?qr={{"t":1,"data":{{"sn":"{sn}"}}}}'
+)
+
+# P/N lookup for the US-region refurbished SKU lineup (the only stock currently
+# in factory test). A class = refurb level L0, B class = L1.
+# 2800 is hardcoded — not in the 内部 NAS SKU 汇总 spreadsheet.
+# 4800 / 4800Plus values match rows 67/68/97/98 of the 海外 sheet.
+NAMEPLATE_PN_TABLE: dict[tuple[str, str], str] = {
+    ("2800", "A"): "00000",
+    ("2800", "B"): "00001",
+    ("4800", "A"): "00002",
+    ("4800", "B"): "00003",
+    ("4800Plus", "A"): "00004",
+    ("4800Plus", "B"): "00005",
+}
+
+
+def lookup_pn(model_key: str | None, grade: str | None) -> str | None:
+    """Return the US-region refurb P/N for (model_key, grade), or None.
+
+    ``model_key`` should be the value returned by ``model_key_from_sn``
+    (e.g. "2800", "4800", "4800Plus"). ``grade`` is "A" or "B".
+    """
+    if not model_key or not grade:
+        return None
+    return NAMEPLATE_PN_TABLE.get((str(model_key), str(grade).strip().upper()))
+
+# Heuristic substrings to recognize a Zebra/ZPL printer queue name on Windows.
+_ZEBRA_NAME_HINTS = (
+    "zebra",
+    "zdesigner",
+    "zpl",
+    "gk420",
+    "gx420",
+    "zd220",
+    "zd230",
+    "zd420",
+    "zd620",
+    "lp 2824",
+    "tlp 2824",
+    "gt800",
+    "gc420",
+)
+
+
+def _mm_to_dots(mm: float, dpi: int) -> int:
+    return round(mm * dpi / 25.4)
+
+
+def _fit_code128_module_width(sn_len: int, max_dots: int, prefer: int = 2) -> int:
+    """Pick the largest module width in dots so the Code 128 stays ≤ ``max_dots``.
+
+    Code 128 subset B encodes one character per 11 modules, plus start (11),
+    checksum (11) and stop (13) modules — 35 overhead total.
+    """
+    modules = max(11 * sn_len + 35, 1)
+    max_module = max_dots // modules
+    if max_module < 1:
+        logger.warning(
+            f"SN of {sn_len} chars overflows the 38mm print area even at "
+            f"1-dot modules; barcode will exceed spec width."
+        )
+        return 1
+    return max(1, min(prefer, max_module))
+
+
+def _render_code128_bitmap(sn: str, target_w: int, target_h: int):
+    """Return a 1-bit Pillow Image of Code 128 sized exactly target_w × target_h.
+
+    Crops out the padding rows python-barcode adds above/below the actual bars
+    before downscaling, so the resulting bitmap has no stray horizontal lines.
+    """
+    import barcode  # type: ignore[import-not-found]
+    from barcode.writer import ImageWriter  # type: ignore[import-not-found]
+    from PIL import Image, ImageChops  # type: ignore[import-not-found]
+
+    writer = ImageWriter()
+    code = barcode.get("code128", sn, writer=writer)
+    hi = code.render(
+        writer_options={
+            "module_height": 12.0,
+            "module_width": 0.5,
+            "quiet_zone": 0,
+            "write_text": False,
+            "background": "white",
+            "foreground": "black",
+            "dpi": 1200,
+        }
+    )
+    gray = hi.convert("L")
+    # Crop to the actual ink — ImageWriter still reserves header/footer
+    # padding for the (suppressed) human-readable line, which would show up
+    # as faint horizontal artifacts after threshold.
+    inverted = ImageChops.invert(gray)
+    bbox = inverted.getbbox()
+    if bbox:
+        gray = gray.crop(bbox)
+    resized = gray.resize((target_w, target_h), Image.LANCZOS)
+    return resized.point(lambda v: 0 if v < 128 else 255, mode="1")
+
+
+def _image_to_gfa(img, origin_x: int, origin_y: int) -> str:
+    """Encode a 1-bit Pillow Image as a Zebra ^GFA graphic field.
+
+    Pillow's mode "1" packs ``1`` for white pixels and ``0`` for black; Zebra
+    ^GFA does the opposite (``1`` prints a dot, ``0`` leaves the paper blank).
+    We invert the byte stream so the visual intent of the Pillow image matches
+    the printed result, then zero out the unused row-padding bits — otherwise
+    those bits flip to ``1`` and print as a thin black sliver at the right
+    edge of every row.
+    """
+    if img.mode != "1":
+        img = img.convert("1")
+    w, h = img.size
+    bytes_per_row = (w + 7) // 8
+    total = bytes_per_row * h
+    padding_bits = bytes_per_row * 8 - w
+    last_byte_mask = (0xFF << padding_bits) & 0xFF if padding_bits else 0xFF
+
+    inverted = bytearray(b ^ 0xFF for b in img.tobytes())
+    if padding_bits:
+        for row in range(h):
+            tail = (row + 1) * bytes_per_row - 1
+            inverted[tail] &= last_byte_mask
+
+    hex_data = bytes(inverted).hex().upper()
+    return (
+        f"^FO{origin_x},{origin_y}"
+        f"^GFA,{total},{total},{bytes_per_row},{hex_data}^FS"
+    )
+
+
+def _render_barcode_gfa(
+    sn: str,
+    *,
+    origin_x: int,
+    origin_y: int,
+    target_w_dots: int,
+    target_h_dots: int,
+) -> str:
+    """Render Code 128 as a Zebra ^GFA bitmap exactly target_w × target_h dots."""
+    try:
+        img = _render_code128_bitmap(sn, target_w_dots, target_h_dots)
+    except ImportError as exc:
+        raise ImportError(
+            "Spec-exact barcode (38mm fill) requires 'python-barcode' and "
+            "'Pillow'. Install with: pip install python-barcode Pillow"
+        ) from exc
+    return _image_to_gfa(img, origin_x, origin_y)
+
+
+def _render_text_gfa(
+    text: str,
+    *,
+    origin_x: int,
+    origin_y: int,
+    max_w_dots: int,
+    height_dots: int,
+    letter_spacing_dots: int = 0,
+    font_path: str | None = None,
+) -> str:
+    """Render bold SN text as a ^GFA bitmap using a bold TTF font."""
+    try:
+        from PIL import Image, ImageDraw  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise ImportError(
+            "Bold SN text requires 'Pillow'. Install with: pip install Pillow"
+        ) from exc
+
+    font = _load_bold_text_font(font_path, height_dots)
+    # Measure once on a throwaway canvas to size the final bitmap.
+    probe = Image.new("L", (max_w_dots, height_dots * 3), 255)
+    pdraw = ImageDraw.Draw(probe)
+    advances, ascent_offset, total_h = _measure_text_with_spacing(
+        pdraw, text, font, letter_spacing_dots
+    )
+    total_w = sum(advances) if advances else 1
+    canvas_w = min(max_w_dots, total_w + 2)
+    canvas_h = total_h + 2
+
+    img = Image.new("L", (canvas_w, canvas_h), 255)
+    draw = ImageDraw.Draw(img)
+    _draw_text_with_spacing(draw, text, font, advances, ascent_offset)
+    one_bit = img.point(lambda v: 0 if v < 200 else 255, mode="1")
+    return _image_to_gfa(one_bit, origin_x, origin_y)
+
+
+def _measure_text_with_spacing(draw, text, font, letter_spacing_dots: int):
+    """Return (per-glyph advance widths, top offset, total height).
+
+    Per-glyph advance includes the glyph's natural advance plus the configured
+    letter spacing. The top offset is the value we'll pass as ``-bbox[1]`` when
+    drawing so glyphs sit flush to the top of the canvas.
+    """
+    if not text:
+        return [], 0, 1
+    advances: list[int] = []
+    overall_top = None
+    overall_bottom = 0
+    for i, ch in enumerate(text):
+        bbox = draw.textbbox((0, 0), ch, font=font)
+        # bbox = (left, top, right, bottom); some glyphs have negative top.
+        adv = (bbox[2] - bbox[0]) if bbox[2] > bbox[0] else font.getlength(ch)
+        adv = int(round(adv)) + (letter_spacing_dots if i < len(text) - 1 else 0)
+        advances.append(max(1, adv))
+        overall_top = bbox[1] if overall_top is None else min(overall_top, bbox[1])
+        overall_bottom = max(overall_bottom, bbox[3])
+    ascent_offset = -(overall_top or 0)
+    total_h = max(1, overall_bottom - (overall_top or 0))
+    return advances, ascent_offset, total_h
+
+
+def _draw_text_with_spacing(draw, text, font, advances, ascent_offset) -> None:
+    x = 0
+    for ch, adv in zip(text, advances):
+        draw.text((x, ascent_offset), ch, fill=0, font=font)
+        x += adv
+
+
+def _load_bold_text_font(font_path: str | None, size_px: int, *, bold: bool = False):
+    """Load a TrueType font, optionally bold-weight, from cross-platform paths.
+
+    ``bold=False`` is the default and matches the SN sticker which the factory
+    found too heavy in bold. ``bold=True`` is used by the nameplate.
+    """
+    from PIL import ImageFont  # type: ignore[import-not-found]
+
+    candidates: list[str] = []
+    if font_path:
+        candidates.append(font_path)
+    if bold:
+        candidates.extend(
+            [
+                "HYKangHei45S-Bold.ttf",
+                "HanyiKangHei45S-Bold.ttf",
+                "C:/Windows/Fonts/msyhbd.ttc",  # Microsoft YaHei Bold
+                "C:/Windows/Fonts/msyhbd.ttf",
+                "C:/Windows/Fonts/simhei.ttf",
+                "C:/Windows/Fonts/arialbd.ttf",  # Arial Bold
+                "/System/Library/Fonts/PingFang.ttc",
+                "/System/Library/Fonts/Helvetica.ttc",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            ]
+        )
+    else:
+        candidates.extend(
+            [
+                "HYKangHei45S.ttf",
+                "HanyiKangHei45S.ttf",
+                "C:/Windows/Fonts/msyh.ttc",   # Microsoft YaHei Regular
+                "C:/Windows/Fonts/msyh.ttf",
+                "C:/Windows/Fonts/arial.ttf",  # Arial Regular
+                "/System/Library/Fonts/PingFang.ttc",
+                "/System/Library/Fonts/Helvetica.ttc",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            ]
+        )
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size_px)
+        except (OSError, ValueError):
+            continue
+    return ImageFont.load_default()
+
+
+def _render_text_image(
+    text: str,
+    height_dots: int,
+    *,
+    bold: bool = False,
+    letter_spacing_dots: int = 0,
+    font_path: str | None = None,
+):
+    """Render ``text`` as a 1-bit Pillow Image. Caller positions it on the canvas."""
+    from PIL import Image, ImageDraw  # type: ignore[import-not-found]
+
+    font = _load_bold_text_font(font_path, height_dots, bold=bold)
+    probe = Image.new("L", (max(4096, height_dots * len(text) * 2), height_dots * 3), 255)
+    pdraw = ImageDraw.Draw(probe)
+    advances, ascent_offset, total_h = _measure_text_with_spacing(
+        pdraw, text, font, letter_spacing_dots
+    )
+    total_w = sum(advances) if advances else 1
+    canvas_w = total_w + 2
+    canvas_h = total_h + 2
+
+    img = Image.new("L", (canvas_w, canvas_h), 255)
+    draw = ImageDraw.Draw(img)
+    _draw_text_with_spacing(draw, text, font, advances, ascent_offset)
+    return img.point(lambda v: 0 if v < 200 else 255, mode="1")
+
+
+def build_zpl(
+    sn: str,
+    dpi: int = DEFAULT_DPI,
+    *,
+    quantity: int = 1,
+    darkness: int | None = None,
+    text_height_mm: float = TEXT_HEIGHT_MM,
+) -> bytes:
+    """Generate ZPL II command bytes for one SN label.
+
+    ``darkness`` (~MD) is optional override; leave ``None`` to use printer's
+    configured default. ``quantity`` controls ^PQ copies.
+    ``text_height_mm`` overrides the SN text em-height (default ~5pt).
+    """
+    normalized = normalize_sn(sn)
+    if not normalized:
+        raise ValueError(f"SN is empty after normalization: {sn!r}")
+    if len(normalized) > 80:
+        raise ValueError(f"SN too long for Code 128 label: {normalized!r}")
+
+    label_w = _mm_to_dots(LABEL_WIDTH_MM, dpi)
+    label_h = _mm_to_dots(LABEL_HEIGHT_MM, dpi)
+    left = _mm_to_dots(LEFT_MARGIN_MM, dpi)
+    top = _mm_to_dots(TOP_MARGIN_MM, dpi)
+    bar_h = _mm_to_dots(BARCODE_HEIGHT_MM, dpi)
+    text_y = top + bar_h + _mm_to_dots(TEXT_GAP_MM, dpi)
+    text_h = max(_mm_to_dots(text_height_mm, dpi), 10)  # font dot height
+    text_w = max(round(text_h * 0.55), 6)
+    print_area_w = _mm_to_dots(PRINT_AREA_WIDTH_MM, dpi)
+
+    parts: list[str] = [
+        "^XA",
+        "^CI28",  # UTF-8 encoding (future-proof, no-op for ASCII SN)
+        f"^PW{label_w}",
+        f"^LL{label_h}",
+        "^LH0,0",
+        "^LS0",
+        "^PON",
+    ]
+    if darkness is not None:
+        parts.append(f"~SD{max(0, min(30, int(darkness))):02d}")
+
+    # Per 模版二 spec: barcode + SN row must fill exactly 38mm × 14mm.
+    # Native ZPL ^BC at integer module width cannot hit 38mm for typical
+    # 16-char SNs at 203 dpi (jumps from 26.4mm @ module=1 to 52.8mm @ module=2).
+    # We render Code 128 as a high-resolution bitmap, downscale to exactly the
+    # spec dimensions, and embed via ^GFA.
+    parts.append(
+        _render_barcode_gfa(
+            normalized,
+            origin_x=left,
+            origin_y=top,
+            target_w_dots=print_area_w,
+            target_h_dots=bar_h,
+        )
+    )
+    # SN text under the barcode. Per spec sample: "SN：<sn>", left-aligned,
+    # inside the 38mm print area. We render via Pillow with a bold TTF font
+    # so the stroke weight matches 汉仪康黑 45S better than ZPL's default A0.
+    sn_text = f"{TEXT_PREFIX}{normalized}"
+    parts.append(
+        _render_text_gfa(
+            sn_text,
+            origin_x=left,
+            origin_y=text_y,
+            max_w_dots=print_area_w,
+            height_dots=text_h,
+            letter_spacing_dots=_mm_to_dots(TEXT_LETTER_SPACING_MM, dpi),
+        )
+    )
+    parts.append(f"^PQ{max(1, int(quantity))},0,1,Y")
+    parts.append("^XZ")
+
+    return ("\n".join(parts) + "\n").encode("utf-8")
+
+
+def build_nameplate_zpl(
+    sn: str,
+    pn: str,
+    *,
+    dpi: int = NAMEPLATE_DPI,
+    quantity: int = 1,
+    darkness: int | None = None,
+    qr_top_left_mm: tuple[float, float] = NAMEPLATE_QR_TOP_LEFT_MM,
+    strip_top_left_mm: tuple[float, float] = NAMEPLATE_STRIP_TOP_LEFT_MM,
+) -> bytes:
+    """Generate ZPL for the 模版一 nameplate (machine body sticker).
+
+    The nameplate stock is pre-printed by the supplier with the UGREEN logo,
+    compliance text, FCC/TUV/HDMI marks and two reserved white regions. We
+    only fill those two regions:
+
+    - QR code in a 22×22mm reserved square (20×20mm inner print area),
+      payload: ``https://nas.ugreen.com/download?qr={"t":1,"data":{"sn":"<SN>"}}``
+    - Code 128 barcode (height 4mm, encodes SN only) + text line
+      ``P/N: <pn>    SN: <sn>`` in a 41×8.5mm reserved strip (38×6mm inner).
+
+    ``qr_top_left_mm`` and ``strip_top_left_mm`` let callers nudge each
+    region's position without recompiling; useful for matching different
+    supplier stock revisions.
+    """
+    normalized = normalize_sn(sn)
+    if not normalized:
+        raise ValueError(f"SN is empty after normalization: {sn!r}")
+    if len(normalized) > 80:
+        raise ValueError(f"SN too long for Code 128 label: {normalized!r}")
+
+    pn_clean = (pn or "").strip()
+    if not pn_clean:
+        raise ValueError("P/N must be supplied (use a placeholder for layout tests)")
+
+    label_w = _mm_to_dots(NAMEPLATE_WIDTH_MM, dpi)
+    label_h = _mm_to_dots(NAMEPLATE_HEIGHT_MM, dpi)
+
+    parts: list[str] = [
+        "^XA",
+        "^CI28",
+        f"^PW{label_w}",
+        f"^LL{label_h}",
+        "^LH0,0",
+        "^LS0",
+        "^PON",
+    ]
+    if darkness is not None:
+        parts.append(f"~SD{max(0, min(30, int(darkness))):02d}")
+
+    # --- QR code in the 20×20mm inner print area --------------------------
+    qr_x_mm, qr_y_mm = qr_top_left_mm
+    qr_payload = NAMEPLATE_QR_URL_TEMPLATE.format(sn=normalized)
+    qr_box_dots = _mm_to_dots(NAMEPLATE_QR_BOX_MM, dpi)
+    # Estimate QR module count for our URL length: 71-ish chars in byte mode
+    # → version 4 (33×33). Magnification = floor(box_dots / 33).
+    qr_modules = 33
+    qr_mag = max(1, min(10, qr_box_dots // qr_modules))
+    parts.extend(
+        [
+            f"^FO{_mm_to_dots(qr_x_mm, dpi)},{_mm_to_dots(qr_y_mm, dpi)}",
+            # ^BQa,b,c,d,e: orientation N, model 2, magnification, error Q, mask 7
+            f"^BQN,2,{qr_mag},Q,7",
+            # ^FDQA,<text>  Q = error correction Q, A = automatic encoding mode
+            f"^FDQA,{qr_payload}^FS",
+        ]
+    )
+
+    # --- Barcode + P/N+SN text strip in the 38×6mm inner area --------------
+    strip_x_mm, strip_y_mm = strip_top_left_mm
+    strip_x_dots = _mm_to_dots(strip_x_mm, dpi)
+    strip_y_dots = _mm_to_dots(strip_y_mm, dpi)
+    strip_w_dots = _mm_to_dots(NAMEPLATE_STRIP_WIDTH_MM, dpi)
+    bar_h_dots = _mm_to_dots(NAMEPLATE_BARCODE_HEIGHT_MM, dpi)
+    text_h_dots = max(_mm_to_dots(NAMEPLATE_TEXT_EM_MM, dpi), 12)
+
+    # Code 128 barcode (encodes SN only).
+    parts.append(
+        _render_barcode_gfa(
+            normalized,
+            origin_x=strip_x_dots,
+            origin_y=strip_y_dots,
+            target_w_dots=strip_w_dots,
+            target_h_dots=bar_h_dots,
+        )
+    )
+    # Bold P/N flush left + SN flush right, rendered as bitmaps so we control
+    # font weight/spacing precisely. Spec font 汉仪旗黑-55S isn't on the printer
+    # so we fall back to MS YaHei Bold on Windows.
+    text_y_dots = strip_y_dots + bar_h_dots + _mm_to_dots(0.3, dpi)
+    pn_text = f"P/N: {pn_clean}"
+    sn_text = f"SN: {normalized}"
+    pn_img = _render_text_image(pn_text, text_h_dots, bold=True)
+    sn_img = _render_text_image(sn_text, text_h_dots, bold=True)
+    parts.append(_image_to_gfa(pn_img, strip_x_dots, text_y_dots))
+    sn_right_edge = strip_x_dots + strip_w_dots
+    sn_x_dots = max(strip_x_dots, sn_right_edge - sn_img.width)
+    parts.append(_image_to_gfa(sn_img, sn_x_dots, text_y_dots))
+
+    parts.append(f"^PQ{max(1, int(quantity))},0,1,Y")
+    parts.append("^XZ")
+
+    return ("\n".join(parts) + "\n").encode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# PNG preview (cross-platform, for off-printer verification)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class PreviewOptions:
+    dpi: int = 300  # screen-friendly preview dpi, independent of printer dpi
+    background: str = "white"
+    foreground: str = "black"
+    font_path: str | None = None
+    text_height_mm: float = TEXT_HEIGHT_MM
+
+
+def render_preview_png(
+    sn: str,
+    output_path: str | Path,
+    options: PreviewOptions | None = None,
+) -> Path:
+    """Render a 42×25mm preview PNG of the label using python-barcode + Pillow.
+
+    Raises ``ImportError`` if python-barcode / Pillow are not installed.
+    """
+    try:
+        import barcode  # type: ignore[import-not-found]
+        from barcode.writer import ImageWriter  # type: ignore[import-not-found]
+        from PIL import Image, ImageDraw, ImageFont  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise ImportError(
+            "Preview requires 'python-barcode' and 'Pillow'. "
+            "Install via: pip install python-barcode Pillow"
+        ) from exc
+
+    opts = options or PreviewOptions()
+    normalized = normalize_sn(sn)
+    if not normalized:
+        raise ValueError(f"SN is empty after normalization: {sn!r}")
+
+    dpi = opts.dpi
+    px = lambda mm: max(1, round(mm * dpi / 25.4))  # noqa: E731
+
+    canvas_w = px(LABEL_WIDTH_MM)
+    canvas_h = px(LABEL_HEIGHT_MM)
+    canvas = Image.new("RGB", (canvas_w, canvas_h), opts.background)
+    draw = ImageDraw.Draw(canvas)
+
+    # Mirror ZPL: bitmap-rendered barcode at exactly 38mm × 12mm, with the
+    # surrounding bbox cropped so no padding lines appear above/below.
+    print_area_w_px = px(PRINT_AREA_WIDTH_MM)
+    bar_h_px = px(BARCODE_HEIGHT_MM)
+    bw_barcode = _render_code128_bitmap(normalized, print_area_w_px, bar_h_px)
+    barcode_img = bw_barcode.convert("RGB")
+    bar_x = px(LEFT_MARGIN_MM)
+    bar_y = px(TOP_MARGIN_MM)
+    canvas.paste(barcode_img, (bar_x, bar_y))
+
+    # Mirror ZPL: bold SN text, left-aligned within the 38mm print area,
+    # with the same per-glyph letter-spacing as the printed bitmap.
+    font = _load_bold_text_font(opts.font_path, px(opts.text_height_mm))
+    text_y = bar_y + bar_h_px + px(TEXT_GAP_MM)
+    sn_text = f"{TEXT_PREFIX}{normalized}"
+    text_x = px(LEFT_MARGIN_MM)
+    advances, ascent_offset, _ = _measure_text_with_spacing(
+        draw, sn_text, font, px(TEXT_LETTER_SPACING_MM)
+    )
+    cur_x = text_x
+    for ch, adv in zip(sn_text, advances):
+        draw.text((cur_x, text_y + ascent_offset), ch, fill=opts.foreground, font=font)
+        cur_x += adv
+
+    out_path = Path(output_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(out_path, format="PNG", dpi=(dpi, dpi))
+    return out_path
+
+
+def _load_preview_font(font_path: str | None, size_px: int):
+    from PIL import ImageFont  # type: ignore[import-not-found]
+
+    candidates: list[str] = []
+    if font_path:
+        candidates.append(font_path)
+    # Spec font + reasonable fallbacks across macOS / Windows / Linux.
+    candidates.extend(
+        [
+            "HYKangHei45S.ttf",
+            "HanyiKangHei45S.ttf",
+            "C:/Windows/Fonts/msyh.ttc",  # Microsoft YaHei
+            "C:/Windows/Fonts/simhei.ttf",
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/Supplemental/Songti.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ]
+    )
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size_px)
+        except (OSError, ValueError):
+            continue
+    return ImageFont.load_default()
+
+
+# ---------------------------------------------------------------------------
+# Windows raw printing
+# ---------------------------------------------------------------------------
+
+
+def is_windows() -> bool:
+    return sys.platform.startswith("win")
+
+
+def list_windows_printers() -> list[dict]:
+    """List installed printer queues on Windows. Returns [] on non-Windows."""
+    if not is_windows():
+        return []
+    try:
+        import win32print  # type: ignore[import-not-found]
+    except ImportError:
+        logger.warning("pywin32 is not installed; cannot enumerate printers")
+        return []
+
+    flags = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
+    rows = win32print.EnumPrinters(flags, None, 2)
+    out: list[dict] = []
+    for row in rows:
+        # Level-2 PRINTER_INFO_2 rows are dict-like in pywin32.
+        if isinstance(row, dict):
+            name = str(row.get("pPrinterName") or "")
+            port = str(row.get("pPortName") or "")
+            driver = str(row.get("pDriverName") or "")
+        else:
+            # Level-1 fallback: (flags, description, name, comment)
+            name = str(row[2]) if len(row) > 2 else ""
+            port = ""
+            driver = str(row[1]) if len(row) > 1 else ""
+        if name:
+            out.append({"name": name, "port": port, "driver": driver})
+    return out
+
+
+def find_label_printer(preferred: str | None = None) -> str | None:
+    """Resolve which printer queue to send to.
+
+    Resolution order:
+    1. ``preferred`` if it matches a queue name (case-insensitive substring).
+    2. First queue whose name/driver contains a known Zebra hint.
+    3. Windows default printer (only if its name looks Zebra-ish; we don't want
+       to silently print labels on the office laser).
+    4. ``None`` — caller should ask the user.
+    """
+    if not is_windows():
+        return preferred
+
+    printers = list_windows_printers()
+    if not printers:
+        return None
+
+    if preferred:
+        pref = preferred.lower()
+        for p in printers:
+            if p["name"].lower() == pref:
+                return p["name"]
+        for p in printers:
+            if pref in p["name"].lower():
+                return p["name"]
+
+    for p in printers:
+        bag = f"{p['name']} {p['driver']}".lower()
+        if any(hint in bag for hint in _ZEBRA_NAME_HINTS):
+            return p["name"]
+
+    try:
+        import win32print  # type: ignore[import-not-found]
+
+        default_name = win32print.GetDefaultPrinter()
+    except (ImportError, Exception):  # noqa: BLE001
+        default_name = ""
+    if default_name:
+        low = default_name.lower()
+        if any(hint in low for hint in _ZEBRA_NAME_HINTS):
+            return default_name
+
+    return None
+
+
+def send_to_windows_printer(printer_name: str, data: bytes, *, job_name: str = "SN Label") -> None:
+    """Send ``data`` (raw ZPL bytes) directly to the named printer queue."""
+    if not is_windows():
+        raise RuntimeError("send_to_windows_printer requires Windows")
+    try:
+        import win32print  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise RuntimeError(
+            "pywin32 is not installed. Run: pip install pywin32"
+        ) from exc
+
+    handle = win32print.OpenPrinter(printer_name)
+    try:
+        job = win32print.StartDocPrinter(handle, 1, (job_name, None, "RAW"))
+        try:
+            win32print.StartPagePrinter(handle)
+            win32print.WritePrinter(handle, data)
+            win32print.EndPagePrinter(handle)
+        finally:
+            win32print.EndDocPrinter(handle)
+        logger.info(f"Submitted label job '{job_name}' to printer '{printer_name}' (id={job})")
+    finally:
+        win32print.ClosePrinter(handle)
+
+
+def write_zpl_file(path: str | Path, data: bytes) -> Path:
+    """Write ZPL bytes to a file (for inspection or for printers that read from
+    a hotfolder). Returns the resolved path."""
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(data)
+    return out

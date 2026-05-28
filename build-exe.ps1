@@ -36,6 +36,13 @@ Write-Host "== 构建 EXE ==" -ForegroundColor Cyan
     --windowed `
     --collect-all playwright `
     --collect-all zeroconf `
+    --collect-all barcode `
+    --hidden-import "PIL" `
+    --hidden-import "PIL.Image" `
+    --hidden-import "PIL.ImageDraw" `
+    --hidden-import "PIL.ImageFont" `
+    --hidden-import "PIL.ImageChops" `
+    --hidden-import "win32print" `
     --hidden-import "src.cli" `
     --hidden-import "src.gui" `
     --hidden-import "src.updater" `
@@ -51,6 +58,7 @@ Write-Host "== 构建 EXE ==" -ForegroundColor Cyan
     --hidden-import "src.discovery.mdns_scanner" `
     --hidden-import "src.discovery.port_scanner" `
     --hidden-import "src.discovery.ugreen_broadcast" `
+    --hidden-import "src.utils.label" `
     .\src\gui.py
 
 if (-not $?) { Write-Error "PyInstaller 构建失败" }

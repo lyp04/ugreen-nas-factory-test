@@ -41,6 +41,7 @@ if __package__ in {None, ""}:
     from src.updater import UpdateInfo, UpdateManager, format_version
     from src.utils.browser_control import show_browser_windows, terminate_browser_process
     from src.utils.config_loader import load_configs
+    from src.utils import label as label_util
     from src.utils.logger import remove_default_sinks
     from src.utils.sn import (
         is_auto_sn_placeholder,
@@ -67,6 +68,7 @@ else:
     from .updater import UpdateInfo, UpdateManager, format_version
     from .utils.browser_control import show_browser_windows, terminate_browser_process
     from .utils.config_loader import load_configs
+    from .utils import label as label_util
     from .utils.logger import remove_default_sinks
     from .utils.sn import (
         is_auto_sn_placeholder,
@@ -337,6 +339,7 @@ UI_TEXT = {
         "cleanup_pools": "清理存储池",
         "factory_reset": "恢复出厂设置",
         "auto_form_entry": "自动录表",
+        "auto_print_label": "自动打印标签",
         "form_settings": "录表配置:",
         "model_auto": "机型按 SN 自动识别",
         "grade": "等级",
@@ -346,6 +349,7 @@ UI_TEXT = {
         "delete_account": "删除账号",
         "auto_seed_previous": "缺第一步时自动补录",
         "add_to_queue": "添加到队列",
+        "print_label": "打印标签",
         "open_screenshot_dir": "打开截图目录",
         "remove_finished": "移除本台",
         "show_browser": "显示浏览器",
@@ -431,6 +435,7 @@ UI_TEXT = {
         "cleanup_pools": "Clean storage pools",
         "factory_reset": "Factory reset",
         "auto_form_entry": "Auto form entry",
+        "auto_print_label": "Auto print label",
         "form_settings": "Form settings:",
         "model_auto": "Model auto-detected by SN",
         "grade": "Grade",
@@ -440,6 +445,7 @@ UI_TEXT = {
         "delete_account": "Delete account",
         "auto_seed_previous": "Auto-fill step 1 if missing",
         "add_to_queue": "Add to queue",
+        "print_label": "Print label",
         "open_screenshot_dir": "Open screenshot folder",
         "remove_finished": "Remove this device",
         "show_browser": "Show browser",
@@ -525,6 +531,7 @@ UI_TEXT = {
         "cleanup_pools": "Limpiar pools de almacenamiento",
         "factory_reset": "Restablecer de fábrica",
         "auto_form_entry": "Captura automática",
+        "auto_print_label": "Imprimir etiqueta auto",
         "form_settings": "Configuración de captura:",
         "model_auto": "Modelo detectado por SN",
         "grade": "Grado",
@@ -534,6 +541,7 @@ UI_TEXT = {
         "delete_account": "Eliminar cuenta",
         "auto_seed_previous": "Rellenar paso 1 si falta",
         "add_to_queue": "Añadir a la cola",
+        "print_label": "Imprimir etiqueta",
         "open_screenshot_dir": "Abrir carpeta de capturas",
         "remove_finished": "Quitar este equipo",
         "show_browser": "Mostrar navegador",
@@ -685,6 +693,8 @@ class FactoryTestGUI:
         self.cleanup_before_finish_var = tk.BooleanVar(value=True)
         self.factory_reset_before_finish_var = tk.BooleanVar(value=True)
         self.auto_form_entry_var = tk.BooleanVar(value=FORM_ENTRY_ENABLED)
+        _label_cfg = (self.config.get("label_printer") or {}) if isinstance(self.config, dict) else {}
+        self.auto_print_label_var = tk.BooleanVar(value=bool(_label_cfg.get("auto_print_on_pass", False)))
         self.auto_seed_previous_step_var = tk.BooleanVar(value=False)
         self.form_grade_var = tk.StringVar(value="")
         self.form_account_var = tk.StringVar()
@@ -705,6 +715,7 @@ class FactoryTestGUI:
         self.cleanup_check: ttk.Checkbutton | None = None
         self.factory_reset_check: ttk.Checkbutton | None = None
         self.auto_form_entry_check: ttk.Checkbutton | None = None
+        self.auto_print_label_check: ttk.Checkbutton | None = None
         self.auto_seed_previous_step_check: ttk.Checkbutton | None = None
         self.sound_check: ttk.Checkbutton | None = None
         self.language_combo: ttk.Combobox | None = None
@@ -1459,7 +1470,14 @@ class FactoryTestGUI:
             command=self._on_auto_form_entry_toggle,
         )
         self._register_text("auto_form_entry", self.auto_form_entry_check)
-        self.auto_form_entry_check.pack(side=tk.LEFT)
+        self.auto_form_entry_check.pack(side=tk.LEFT, padx=(0, 12))
+        self.auto_print_label_check = ttk.Checkbutton(
+            option_frame,
+            text=self._t("auto_print_label"),
+            variable=self.auto_print_label_var,
+        )
+        self._register_text("auto_print_label", self.auto_print_label_check)
+        self.auto_print_label_check.pack(side=tk.LEFT)
 
         form_config_label = self._register_text("form_settings", ttk.Label(controls, text=self._t("form_settings")))
         form_config_label.grid(row=2, column=0, sticky=tk.W, pady=4)
@@ -1530,7 +1548,10 @@ class FactoryTestGUI:
         self.show_browser_btn.pack(side=tk.LEFT, padx=(0, 6))
         self.cancel_btn = ttk.Button(btn_frame, text=self._t("cancel_task"), command=self._on_cancel_task)
         self._register_text("cancel_task", self.cancel_btn)
-        self.cancel_btn.pack(side=tk.LEFT)
+        self.cancel_btn.pack(side=tk.LEFT, padx=(0, 6))
+        self.print_label_btn = ttk.Button(btn_frame, text=self._t("print_label"), command=self._on_print_label)
+        self._register_text("print_label", self.print_label_btn)
+        self.print_label_btn.pack(side=tk.LEFT)
 
         timing_frame = self._register_text(
             "timing_analysis",
@@ -2028,6 +2049,15 @@ class FactoryTestGUI:
             task.progress = 100
             task.finished_monotonic = time.monotonic()
             self._play_completion_sound(success=True)
+            if self.auto_print_label_var.get() and task.sn:
+                try:
+                    self._submit_label_print(task.sn, silent=True)
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(f"auto-print SN sticker failed for SN={task.sn}: {exc}")
+                try:
+                    self._submit_nameplate_print(task.sn, silent=True)
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(f"auto-print nameplate failed for SN={task.sn}: {exc}")
         if event.get("type") == "finished" and status_code == "failed":
             task.finished_monotonic = time.monotonic()
             self._show_failure_alert_if_needed(task, str(event.get("error") or ""))
@@ -2742,6 +2772,235 @@ class FactoryTestGUI:
             os.startfile(str(output_dir))
         else:
             subprocess.Popen(["xdg-open", str(output_dir)])
+
+    def _on_print_label(self) -> None:
+        """Print a Code 128 SN label (42x25mm, 模版二).
+
+        Priority: if a queue device is selected and has a full SN, use that.
+        Otherwise fall back to the manual SN input field. This lets the
+        operator print for any device already in the queue without re-typing.
+        """
+        normalized, source = self._resolve_print_label_sn()
+        if not normalized:
+            if source == "queue_selected_no_sn":
+                messagebox.showwarning(
+                    "打印标签",
+                    "当前选中的设备还没有可打印的完整 SN。\n"
+                    "请等待 SN 解析完成，或在上方 SN 框里手动填入后再打印。",
+                )
+            else:
+                messagebox.showwarning(
+                    "打印标签",
+                    "未选中队列中的设备，且 SN 输入框为空。\n"
+                    "请先在队列中选一台设备，或在上方 SN 框填入 SN。",
+                )
+            return
+        if is_auto_sn_placeholder(normalized):
+            messagebox.showwarning("打印标签", f"占位 SN 不能打印：{normalized}")
+            return
+        if not is_full_sn_candidate(normalized):
+            if not messagebox.askyesno(
+                "打印标签",
+                f"识别到的不是完整 SN（看起来是后 4 位之类的）：{normalized}\n"
+                "确认要按此内容打印吗？",
+            ):
+                return
+        # Manual click prints the full set: SN sticker (qty 2) + nameplate (qty 1).
+        # Nameplate is best-effort — it skips with a warning if grade/model
+        # don't resolve to a P/N, but the SN sticker still goes out.
+        self._submit_label_print(normalized, silent=False)
+        self._submit_nameplate_print(normalized, silent=False)
+
+    def _resolve_print_label_sn(self) -> tuple[str, str]:
+        """Pick the SN to print and a short tag describing where it came from.
+
+        Returns (sn, source) where source is one of: ``queue``, ``entry``,
+        ``queue_selected_no_sn``, ``empty``.
+        """
+        if self.selected_task_id:
+            task = self.devices.get(self.selected_task_id)
+            if task is not None:
+                queue_sn = normalize_sn(task.sn or "")
+                if queue_sn and not is_auto_sn_placeholder(queue_sn):
+                    return queue_sn, "queue"
+                return "", "queue_selected_no_sn"
+        raw = self.sn_var.get().strip() if self.sn_entry is not None else ""
+        normalized = normalize_sn(raw)
+        if normalized:
+            return normalized, "entry"
+        return "", "empty"
+
+    def _submit_label_print(self, sn: str, *, silent: bool) -> bool:
+        """Shared print path used by the manual button and auto-print hook.
+
+        ``silent=True`` suppresses dialogs and just logs / updates the status
+        bar — used after a successful auto test.
+        """
+        normalized = normalize_sn(sn)
+        if not normalized or is_auto_sn_placeholder(normalized) or not is_full_sn_candidate(normalized):
+            if not silent:
+                messagebox.showwarning("打印标签", f"SN 不可用于打印：{normalized or sn!r}")
+            return False
+
+        cfg = (self.config.get("label_printer") or {}) if isinstance(self.config, dict) else {}
+        printer_pref = str(cfg.get("name") or "").strip() or None
+        try:
+            dpi = int(cfg.get("dpi") or label_util.DEFAULT_DPI)
+        except (TypeError, ValueError):
+            dpi = label_util.DEFAULT_DPI
+        try:
+            quantity = max(1, int(cfg.get("quantity") or 2))
+        except (TypeError, ValueError):
+            quantity = 2
+
+        try:
+            zpl = label_util.build_zpl(normalized, dpi=dpi, quantity=quantity)
+        except ValueError as exc:
+            if silent:
+                logger.error(f"auto-print: build_zpl failed for SN={normalized}: {exc}")
+            else:
+                messagebox.showerror("打印标签", f"生成 ZPL 失败：{exc}")
+            return False
+
+        if not label_util.is_windows():
+            preview_path = self._output_root() / f"label_{normalized}.png"
+            try:
+                label_util.render_preview_png(normalized, preview_path)
+            except ImportError as exc:
+                if not silent:
+                    messagebox.showinfo(
+                        "打印标签",
+                        f"当前不是 Windows，无法发送到打印机。\n\n"
+                        f"需要装 python-barcode + Pillow 才能在本机生成预览：\n{exc}",
+                    )
+                return False
+            if not silent:
+                messagebox.showinfo(
+                    "打印标签（非 Windows 预览）",
+                    f"非 Windows 主机不能直接发打印队列。\n已生成预览 PNG：\n{preview_path}",
+                )
+            return False
+
+        target = label_util.find_label_printer(printer_pref)
+        if not target:
+            queues = label_util.list_windows_printers()
+            names = "\n".join(p["name"] for p in queues) or "(无)"
+            if silent:
+                logger.error(f"auto-print: no Zebra printer found. Queues: {names}")
+            else:
+                messagebox.showerror(
+                    "打印标签",
+                    "未找到 Zebra 打印机。\n"
+                    "请在 config.yml 的 label_printer.name 里写明打印队列名。\n\n"
+                    f"当前 Windows 上已安装的队列：\n{names}",
+                )
+            return False
+
+        try:
+            label_util.send_to_windows_printer(target, zpl, job_name=f"SN {normalized}")
+        except Exception as exc:  # noqa: BLE001
+            if silent:
+                logger.error(f"auto-print: send to '{target}' failed: {exc}")
+            else:
+                messagebox.showerror("打印标签", f"发送到打印机失败：{exc}")
+            return False
+
+        prefix = "自动" if silent else "已"
+        self.status_var.set(
+            f"{datetime.now().strftime('%H:%M:%S')}  {prefix}发送 {quantity} 张标签到 {target}（SN={normalized}）"
+        )
+        return True
+
+    def _submit_nameplate_print(self, sn: str, *, silent: bool) -> bool:
+        """Send one nameplate (83.7×36.7mm) to the ZT610 with auto P/N lookup.
+
+        Returns False if P/N can't be resolved (model unknown or grade not
+        selected) — caller should treat that as a soft skip, not a hard fail.
+        """
+        normalized = normalize_sn(sn)
+        if not normalized or is_auto_sn_placeholder(normalized) or not is_full_sn_candidate(normalized):
+            return False
+
+        model_key = model_key_from_sn(normalized)
+        grade = (self.form_grade_var.get() or "").strip().upper() or None
+        pn = label_util.lookup_pn(model_key, grade)
+        if not pn:
+            msg = (
+                f"无法解析铭牌 P/N (model={model_key!r} grade={grade!r})。"
+                "请先在「等级」里选 A 或 B，并确认 SN 对应的机型在查表里。"
+            )
+            if silent:
+                logger.warning(f"auto-print nameplate skipped: {msg}")
+            else:
+                messagebox.showwarning("打印铭牌", msg)
+            return False
+
+        cfg = (self.config.get("nameplate_printer") or {}) if isinstance(self.config, dict) else {}
+        printer_pref = str(cfg.get("name") or "").strip() or None
+        try:
+            dpi = int(cfg.get("dpi") or label_util.NAMEPLATE_DPI)
+        except (TypeError, ValueError):
+            dpi = label_util.NAMEPLATE_DPI
+        try:
+            quantity = max(1, int(cfg.get("quantity") or 1))
+        except (TypeError, ValueError):
+            quantity = 1
+        qr_xy = list(cfg.get("qr_top_left_mm") or label_util.NAMEPLATE_QR_TOP_LEFT_MM)
+        strip_xy = list(cfg.get("strip_top_left_mm") or label_util.NAMEPLATE_STRIP_TOP_LEFT_MM)
+
+        try:
+            zpl = label_util.build_nameplate_zpl(
+                normalized,
+                pn,
+                dpi=dpi,
+                quantity=quantity,
+                qr_top_left_mm=(float(qr_xy[0]), float(qr_xy[1])),
+                strip_top_left_mm=(float(strip_xy[0]), float(strip_xy[1])),
+            )
+        except ValueError as exc:
+            if silent:
+                logger.error(f"auto-print nameplate: build failed for SN={normalized}: {exc}")
+            else:
+                messagebox.showerror("打印铭牌", f"生成 ZPL 失败：{exc}")
+            return False
+
+        if not label_util.is_windows():
+            if not silent:
+                messagebox.showinfo(
+                    "打印铭牌",
+                    "非 Windows 主机不能直接发打印队列。CLI dry-run 用 `run-cli print-nameplate --zpl-out` 查看 ZPL。",
+                )
+            return False
+
+        target = label_util.find_label_printer(printer_pref)
+        if not target:
+            queues = label_util.list_windows_printers()
+            names = "\n".join(p["name"] for p in queues) or "(无)"
+            msg = (
+                "未找到铭牌打印机。"
+                "请在 config.yml 的 nameplate_printer.name 里写明打印队列名。\n\n"
+                f"当前 Windows 上已安装的队列：\n{names}"
+            )
+            if silent:
+                logger.error(f"auto-print nameplate: {msg}")
+            else:
+                messagebox.showerror("打印铭牌", msg)
+            return False
+
+        try:
+            label_util.send_to_windows_printer(target, zpl, job_name=f"Nameplate {normalized}")
+        except Exception as exc:  # noqa: BLE001
+            if silent:
+                logger.error(f"auto-print nameplate: send to '{target}' failed: {exc}")
+            else:
+                messagebox.showerror("打印铭牌", f"发送到打印机失败：{exc}")
+            return False
+
+        prefix = "自动" if silent else "已"
+        self.status_var.set(
+            f"{datetime.now().strftime('%H:%M:%S')}  {prefix}发送铭牌×{quantity} 到 {target}（SN={normalized} P/N={pn} {grade}类）"
+        )
+        return True
 
     def _nas_ip(self) -> str:
         ip = self.manual_ip_var.get().strip()

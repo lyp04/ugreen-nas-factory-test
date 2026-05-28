@@ -2914,12 +2914,10 @@ class FactoryTestGUI:
                     "当前选中的设备还没有可打印的完整 SN。\n"
                     "请等待 SN 解析完成，或聚焦上方 SN 框（会取消队列选中）后手动填入。",
                 )
-            else:
-                messagebox.showwarning(
-                    "打印标签",
-                    "未选中队列中的设备，且 SN 输入框为空。\n"
-                    "请先在队列中选一台（可 Shift / Ctrl 多选），或在 SN 框填入 SN。",
-                )
+                return
+            # No queue selected and SN entry empty:铭牌/SN 标贴都依赖 SN，无法打印；
+            # 但 69 码只需机型+等级，弹出 6 变体选择器供操作员手动补打。
+            self._show_ean13_variant_chooser()
             return
         # Confirm non-full SNs once before opening the chooser.
         for sn in sns:
@@ -3219,26 +3217,30 @@ class FactoryTestGUI:
         )
         return True
 
-    def _submit_ean13_print(self, sn: str, *, silent: bool) -> bool:
-        """Send N EAN-13 (69 码) carton labels (50×30mm) to the Deli DL-888T.
+    def _do_ean13_print(
+        self,
+        model_key: str | None,
+        grade: str | None,
+        *,
+        quantity: int | None = None,
+        silent: bool,
+        sn_note: str | None = None,
+    ) -> bool:
+        """Build + send N EAN-13 (69 码) labels (50×30mm) to the Deli DL-888T.
 
-        Resolves model from SN prefix, P/N + EAN-13 from (model, grade) lookup
-        tables. Skips with a warning if any of those can't be resolved (eg.
-        2800 A's EAN-13 hasn't been supplied yet); never silently substitutes.
+        Shared by the SN-driven path (``_submit_ean13_print``) and the manual
+        6-variant chooser. P/N and EAN-13 are always looked up together from the
+        same (model_key, grade) key so the header P/N, the barcode and the model
+        name can never drift apart. ``quantity=None`` falls back to the configured
+        default; ``sn_note`` only decorates the status line.
         """
-        normalized = normalize_sn(sn)
-        if not normalized or is_auto_sn_placeholder(normalized) or not is_full_sn_candidate(normalized):
-            return False
-
-        model_key = model_key_from_sn(normalized)
-        grade = (self.form_grade_var.get() or "").strip().upper() or None
         pn = label_util.lookup_pn(model_key, grade)
         ean13 = label_util.lookup_ean13(model_key, grade)
         if not pn or not ean13:
             msg = (
                 f"无法解析 69 码标签数据 (model={model_key!r} grade={grade!r}"
                 f" pn={pn!r} ean13={ean13!r})。"
-                "请确认 SN 对应的机型/等级在查表里。"
+                "请确认机型/等级在查表里。"
             )
             if silent:
                 logger.warning(f"auto-print ean13 skipped: {msg}")
@@ -3252,18 +3254,21 @@ class FactoryTestGUI:
             dpi = int(cfg.get("dpi") or label_util.EAN13_DPI)
         except (TypeError, ValueError):
             dpi = label_util.EAN13_DPI
-        try:
-            quantity = max(1, int(cfg.get("quantity") or 2))
-        except (TypeError, ValueError):
-            quantity = 2
+        if quantity is None:
+            try:
+                quantity = max(1, int(cfg.get("quantity") or 2))
+            except (TypeError, ValueError):
+                quantity = 2
+        else:
+            quantity = max(1, int(quantity))
 
         try:
-            zpl = label_util.build_ean13_zpl(model_key, pn, ean13, dpi=dpi, quantity=quantity)
+            data = label_util.build_ean13_tspl(model_key, pn, ean13, dpi=dpi, quantity=quantity)
         except ValueError as exc:
             if silent:
-                logger.error(f"auto-print ean13: build failed for SN={normalized}: {exc}")
+                logger.error(f"auto-print ean13: build failed (model={model_key} grade={grade}): {exc}")
             else:
-                messagebox.showerror("打印 69 码", f"生成 ZPL 失败：{exc}")
+                messagebox.showerror("打印 69 码", f"生成 TSPL 失败：{exc}")
             return False
 
         if not label_util.is_windows():
@@ -3271,7 +3276,7 @@ class FactoryTestGUI:
                 messagebox.showinfo(
                     "打印 69 码",
                     "非 Windows 主机不能直接发打印队列。"
-                    "用 `run-cli print-ean13 --zpl-out` 查看 ZPL。",
+                    "用 `run-cli print-ean13 --zpl-out` 查看内容。",
                 )
             return False
 
@@ -3291,7 +3296,7 @@ class FactoryTestGUI:
             return False
 
         try:
-            label_util.send_to_windows_printer(target, zpl, job_name=f"EAN-13 {ean13}")
+            label_util.send_to_windows_printer(target, data, job_name=f"EAN-13 {ean13}")
         except Exception as exc:  # noqa: BLE001
             if silent:
                 logger.error(f"auto-print ean13: send to '{target}' failed: {exc}")
@@ -3300,11 +3305,110 @@ class FactoryTestGUI:
             return False
 
         prefix = "自动" if silent else "已"
+        src = f"SN={sn_note} " if sn_note else ""
         self.status_var.set(
             f"{datetime.now().strftime('%H:%M:%S')}  {prefix}发送 69 码×{quantity} 到 {target}"
-            f"（SN={normalized} P/N={pn} EAN={ean13} {grade}类）"
+            f"（{src}P/N={pn} EAN={ean13} {grade}类）"
         )
         return True
+
+    def _submit_ean13_print(self, sn: str, *, silent: bool) -> bool:
+        """Send N EAN-13 (69 码) labels for an SN.
+
+        Model comes from the SN prefix, grade from the form selection; quantity
+        falls back to the configured default. Thin wrapper over
+        ``_do_ean13_print``. Used by the print chooser and the auto-print hook.
+        """
+        normalized = normalize_sn(sn)
+        if not normalized or is_auto_sn_placeholder(normalized) or not is_full_sn_candidate(normalized):
+            return False
+        model_key = model_key_from_sn(normalized)
+        grade = (self.form_grade_var.get() or "").strip().upper() or None
+        return self._do_ean13_print(
+            model_key, grade, quantity=None, silent=silent, sn_note=normalized
+        )
+
+    def _show_ean13_variant_chooser(self) -> None:
+        """Manual 69 码 picker for when no queue is selected and SN is empty.
+
+        Shows all six (model, grade) variants as buttons plus a quantity spinbox
+        (+/- arrows and free typing). Clicking a button prints that many copies of
+        that variant. Stays open so the operator can print several in a row.
+        """
+        combos = [
+            ("2800", "A"), ("2800", "B"),
+            ("4800", "A"), ("4800", "B"),
+            ("4800Plus", "A"), ("4800Plus", "B"),
+        ]
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("打印 69 码")
+        dlg.transient(self.root)
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        body = ttk.Frame(dlg, padding=12)
+        body.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(
+            body,
+            text="未选队列、SN 也为空 —— 手动选择要打印的 69 码（点按钮即打印）：",
+        ).grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+
+        cfg = (self.config.get("ean13_printer") or {}) if isinstance(self.config, dict) else {}
+        try:
+            default_qty = max(1, int(cfg.get("quantity") or 2))
+        except (TypeError, ValueError):
+            default_qty = 2
+        qty_var = tk.StringVar(value=str(default_qty))
+
+        def _read_qty() -> int | None:
+            raw = (qty_var.get() or "").strip()
+            try:
+                q = int(raw)
+            except ValueError:
+                messagebox.showwarning("打印 69 码", f"数量必须是整数：{raw!r}", parent=dlg)
+                return None
+            if q < 1 or q > 999:
+                messagebox.showwarning("打印 69 码", "数量需在 1–999 之间。", parent=dlg)
+                return None
+            return q
+
+        def _make_handler(mk: str, gr: str):
+            def _handler() -> None:
+                q = _read_qty()
+                if q is None:
+                    return
+                self._do_ean13_print(mk, gr, quantity=q, silent=False)
+            return _handler
+
+        for i, (mk, gr) in enumerate(combos):
+            r, c = divmod(i, 2)
+            disp = label_util.EAN13_MODEL_DISPLAY.get(mk, mk)
+            pn = label_util.lookup_pn(mk, gr)
+            txt = f"{disp} {gr}\nP/N {pn}" if pn else f"{disp} {gr}\n(无数据)"
+            btn = ttk.Button(body, text=txt, width=18, command=_make_handler(mk, gr))
+            if not pn or not label_util.lookup_ean13(mk, gr):
+                btn.state(["disabled"])
+            btn.grid(row=1 + r, column=c, sticky=tk.EW, padx=4, pady=3, ipady=4)
+        for col in range(2):
+            body.columnconfigure(col, weight=1, minsize=160)
+
+        qrow = ttk.Frame(body)
+        qrow.grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(10, 0))
+        ttk.Label(qrow, text="数量：").pack(side=tk.LEFT)
+        ttk.Spinbox(qrow, from_=1, to=999, textvariable=qty_var, width=6).pack(side=tk.LEFT)
+        ttk.Label(qrow, text="（点 +/- 或直接输入）", foreground="#666").pack(side=tk.LEFT, padx=(8, 0))
+
+        close_row = ttk.Frame(body)
+        close_row.grid(row=5, column=0, columnspan=2, sticky=tk.E, pady=(12, 0))
+        ttk.Button(close_row, text="关闭", command=dlg.destroy).pack(side=tk.RIGHT)
+
+        dlg.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - dlg.winfo_width()) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - dlg.winfo_height()) // 3
+        dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
+        dlg.lift()
+        dlg.focus_set()
 
     def _nas_ip(self) -> str:
         ip = self.manual_ip_var.get().strip()

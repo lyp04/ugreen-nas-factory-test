@@ -686,6 +686,302 @@ def build_ean13_zpl(
 
 
 # ---------------------------------------------------------------------------
+# 模版五 EAN-13 (69 码) — Deli DL-888T (TSC engine, native TSPL, NOT ZPL)
+# ---------------------------------------------------------------------------
+# The Deli DL-888T uses Seagull's TSC driver; its firmware speaks TSPL, so raw
+# ZPL (build_ean13_zpl) does not print on it. We drive it with TSPL instead:
+# native ``BARCODE EAN13`` for scannable bars, and PIL-rendered ``BITMAP`` text
+# for the header / subtitle / human-readable line — which lets us hit arbitrary
+# font sizes and true bold (the built-in TSPL bitmap fonts can do neither).
+#
+# Tuned on a real Deli DL-888T @203dpi against factory feedback: header bigger +
+# bold, subtitle slightly bigger, HRI digits bold, all horizontally centered.
+EAN13_TSPL_TOP_MARGIN_MM = 2.7
+EAN13_TSPL_HEADER_H_MM = 2.7        # bold
+EAN13_TSPL_HEADER_SUB_GAP_MM = 0.8
+EAN13_TSPL_SUBTITLE_H_MM = 2.0      # regular
+EAN13_TSPL_SUB_BAR_GAP_MM = 1.3
+EAN13_TSPL_BAR_H_MM = 11.3          # data-bar height (guards protrude below this)
+EAN13_TSPL_HRI_H_MM = 2.5           # bold HRI digits, nestled under the guards
+EAN13_TSPL_GUARD_EXT_EXTRA_MM = 0.4 # guard protrusion beyond the HRI digits
+EAN13_TSPL_MODULE_MM = 0.375        # EAN-13 narrow module width
+
+# EAN-13 quiet zones (in narrow modules); the left zone holds the first HRI digit.
+EAN13_QUIET_LEFT_MODULES = 11
+EAN13_QUIET_RIGHT_MODULES = 7
+
+# TSPL ``BITMAP`` polarity is the OPPOSITE of ZPL ^GF: a 0 bit prints black, a 1
+# bit leaves the paper white. Pillow mode "1" already packs 0=black/1=white, so
+# bytes map directly (no inversion). Flip this only if a print comes out
+# inverted (white-on-black).
+_TSPL_BITMAP_BLACK_IS_ZERO = True
+
+
+def _ean13_check_digit(digits12: str) -> str:
+    """Standard EAN-13 modulo-10 check digit for the leading 12 digits."""
+    total = sum((3 if i % 2 else 1) * int(c) for i, c in enumerate(digits12))
+    return str((10 - total % 10) % 10)
+
+
+# EAN-13 module encoding (95 modules total). The first digit is never drawn as
+# bars; it selects the L/G parity pattern of the six left-hand digits. Right-hand
+# digits always use the R (C) set. The three guard patterns (start 101, center
+# 0 1010, end 101) are printed taller so they protrude below the data bars and
+# frame the human-readable digits — the classic retail look.
+_EAN13_L = {
+    "0": "0001101", "1": "0011001", "2": "0010011", "3": "0111101", "4": "0100011",
+    "5": "0110001", "6": "0101111", "7": "0111011", "8": "0110111", "9": "0001011",
+}
+_EAN13_G = {
+    "0": "0100111", "1": "0110011", "2": "0011011", "3": "0100001", "4": "0011101",
+    "5": "0111001", "6": "0000101", "7": "0010001", "8": "0001001", "9": "0010111",
+}
+_EAN13_R = {
+    "0": "1110010", "1": "1100110", "2": "1101100", "3": "1000010", "4": "1011100",
+    "5": "1001110", "6": "1010000", "7": "1000100", "8": "1001000", "9": "1110100",
+}
+_EAN13_PARITY = {
+    "0": "LLLLLL", "1": "LLGLGG", "2": "LLGGLG", "3": "LLGGGL", "4": "LGLLGG",
+    "5": "LGGLLG", "6": "LGGGLL", "7": "LGLGLG", "8": "LGLGGL", "9": "LGGLGL",
+}
+# Module index ranges occupied by the start/center/end guard bars.
+_EAN13_GUARD_MODULES = set(range(0, 3)) | set(range(45, 50)) | set(range(92, 95))
+
+
+def _ean13_binary(full13: str) -> str:
+    """Return the 95-module 0/1 string for a full 13-digit EAN-13 number."""
+    parity = _EAN13_PARITY[full13[0]]
+    bits = "101"  # start guard
+    for i, ch in enumerate(full13[1:7]):
+        bits += (_EAN13_L if parity[i] == "L" else _EAN13_G)[ch]
+    bits += "01010"  # center guard
+    for ch in full13[7:13]:
+        bits += _EAN13_R[ch]
+    bits += "101"  # end guard
+    return bits
+
+
+def _render_ean13_full_bitmap(
+    full13: str,
+    narrow: int,
+    bar_h: int,
+    hri_h: int,
+    guard_ext: int,
+    *,
+    font_path: str | None = None,
+):
+    """Render a complete EAN-13 symbol as a 1-bit Pillow Image.
+
+    Drawn at exactly ``narrow`` device dots per module with no resampling, so the
+    bars stay crisp and scannable. Includes the protruding start/center/end guard
+    bars and the bold human-readable digits in the standard retail 1 + 6 + 6
+    layout, plus the left (11-module) and right (7-module) quiet zones.
+    Pillow mode "1": ``1`` = white, ``0`` = black.
+    """
+    from PIL import Image, ImageDraw  # type: ignore[import-not-found]
+
+    bits = _ean13_binary(full13)
+    ql, qr = EAN13_QUIET_LEFT_MODULES, EAN13_QUIET_RIGHT_MODULES
+    width = (ql + 95 + qr) * narrow
+    height = bar_h + guard_ext
+    img = Image.new("1", (width, height), 1)  # white background
+    draw = ImageDraw.Draw(img)
+
+    x0 = ql * narrow  # x of module 0 (first bar)
+    for m, bit in enumerate(bits):
+        if bit == "1":
+            x = x0 + m * narrow
+            blen = (bar_h + guard_ext) if m in _EAN13_GUARD_MODULES else bar_h
+            draw.rectangle([x, 0, x + narrow - 1, blen - 1], fill=0)  # black bar
+
+    font = _load_bold_text_font(font_path, hri_h, bold=True)
+
+    def place(ch: str, center_x: float) -> None:
+        bbox = draw.textbbox((0, 0), ch, font=font)
+        gw, gh = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        tx = center_x - gw / 2 - bbox[0]
+        ty = bar_h + (guard_ext - gh) / 2 - bbox[1]  # centered in the protrusion band
+        draw.text((tx, ty), ch, font=font, fill=0)
+
+    # First digit sits in the left quiet zone, just left of the start guard.
+    fb = draw.textbbox((0, 0), full13[0], font=font)
+    fx = max(0, x0 - narrow - (fb[2] - fb[0]) - fb[0])
+    fy = bar_h + (guard_ext - (fb[3] - fb[1])) / 2 - fb[1]
+    draw.text((fx, fy), full13[0], font=font, fill=0)
+
+    # Left group between start/center guards; right group between center/end
+    # guards. Each digit centered in its 7-module cell.
+    for i, ch in enumerate(full13[1:7]):
+        place(ch, x0 + (3 + i * 7 + 3.5) * narrow)
+    for i, ch in enumerate(full13[7:13]):
+        place(ch, x0 + (50 + i * 7 + 3.5) * narrow)
+
+    return img
+
+
+def _image_to_tspl_bitmap(img, origin_x: int, origin_y: int, *, mode: int = 0) -> bytes:
+    """Encode a 1-bit Pillow Image as a TSPL ``BITMAP`` command (header + binary).
+
+    Returns raw bytes (ASCII command prefix + packed bitmap + CRLF) ready to be
+    concatenated into a TSPL job. ``mode`` 0 = OVERWRITE.
+    """
+    if img.mode != "1":
+        img = img.convert("1")
+    w, h = img.size
+    bytes_per_row = (w + 7) // 8
+    padding_bits = bytes_per_row * 8 - w
+    data = bytearray(img.tobytes())  # Pillow "1": 1=white, 0=black, MSB-first
+
+    if _TSPL_BITMAP_BLACK_IS_ZERO:
+        # Already matches TSPL (0=black). Pad bits are the LOW bits of the last
+        # byte of each row; Pillow leaves them 0 (=black) so force them to 1
+        # (=white) or they print a black sliver down the right edge.
+        if padding_bits:
+            pad_low = (1 << padding_bits) - 1
+            for row in range(h):
+                data[(row + 1) * bytes_per_row - 1] |= pad_low
+    else:
+        data = bytearray(b ^ 0xFF for b in data)
+        if padding_bits:
+            keep = (0xFF << padding_bits) & 0xFF
+            for row in range(h):
+                data[(row + 1) * bytes_per_row - 1] &= keep
+
+    prefix = f"BITMAP {origin_x},{origin_y},{bytes_per_row},{h},{mode},".encode("ascii")
+    return prefix + bytes(data) + b"\r\n"
+
+
+def _ean13_layout(model_key: str, pn: str, ean13: str, dpi: int) -> dict:
+    """Shared geometry + rendered text bitmaps for the EAN-13 label.
+
+    Used by both ``build_ean13_tspl`` (print) and ``render_ean13_preview_png``
+    (off-printer verification) so the two never drift.
+    """
+    if not pn or not ean13:
+        raise ValueError("EAN-13 label requires both pn and ean13")
+    digits = "".join(c for c in str(ean13) if c.isdigit())
+    if len(digits) not in (12, 13):
+        raise ValueError(
+            f"EAN-13 input must be 12 or 13 digits; got {len(digits)} from {ean13!r}"
+        )
+    d12 = digits[:12]
+    full13 = d12 + _ean13_check_digit(d12)
+    model_display = EAN13_MODEL_DISPLAY.get(str(model_key), str(model_key))
+    header_text = EAN13_HEADER_TEMPLATE.format(model_display=model_display, pn=pn)
+
+    label_w = _mm_to_dots(EAN13_WIDTH_MM, dpi)
+    label_h = _mm_to_dots(EAN13_HEIGHT_MM, dpi)
+    header_h = max(_mm_to_dots(EAN13_TSPL_HEADER_H_MM, dpi), 12)
+    sub_h = max(_mm_to_dots(EAN13_TSPL_SUBTITLE_H_MM, dpi), 10)
+    hri_h = max(_mm_to_dots(EAN13_TSPL_HRI_H_MM, dpi), 12)
+    bar_h = _mm_to_dots(EAN13_TSPL_BAR_H_MM, dpi)
+    narrow = max(2, _mm_to_dots(EAN13_TSPL_MODULE_MM, dpi))
+    guard_ext = hri_h + _mm_to_dots(EAN13_TSPL_GUARD_EXT_EXTRA_MM, dpi)
+
+    header_img = _render_text_image(header_text, header_h, bold=True)
+    sub_img = _render_text_image(EAN13_SUBTITLE_TEXT, sub_h, bold=False)
+    barcode_img = _render_ean13_full_bitmap(full13, narrow, bar_h, hri_h, guard_ext)
+
+    header_y = _mm_to_dots(EAN13_TSPL_TOP_MARGIN_MM, dpi)
+    sub_y = header_y + header_h + _mm_to_dots(EAN13_TSPL_HEADER_SUB_GAP_MM, dpi)
+    bar_y = sub_y + sub_h + _mm_to_dots(EAN13_TSPL_SUB_BAR_GAP_MM, dpi)
+
+    center = lambda iw: max(0, (label_w - iw) // 2)  # noqa: E731
+    # Center the bar region (ignoring the asymmetric quiet zones) so the bars sit
+    # under the centered header/subtitle exactly as before.
+    bar_region_w = 95 * narrow
+    barcode_x = max(0, (label_w - bar_region_w) // 2 - EAN13_QUIET_LEFT_MODULES * narrow)
+
+    return {
+        "full13": full13,
+        "label_w": label_w,
+        "label_h": label_h,
+        "header_img": header_img,
+        "sub_img": sub_img,
+        "barcode_img": barcode_img,
+        "header_xy": (center(header_img.width), header_y),
+        "sub_xy": (center(sub_img.width), sub_y),
+        "barcode_xy": (barcode_x, bar_y),
+    }
+
+
+def build_ean13_tspl(
+    model_key: str,
+    pn: str,
+    ean13: str,
+    *,
+    dpi: int = EAN13_DPI,
+    quantity: int = 2,
+    density: int | None = None,
+    speed: int | None = None,
+) -> bytes:
+    """Generate TSPL command bytes for the 模版五 EAN-13 (69 码) label.
+
+    Targets the Deli DL-888T (TSC engine). 50×30mm. Three PIL-rendered ``BITMAP``
+    blocks: bold header, regular subtitle, and the complete EAN-13 symbol (bars
+    with protruding guard bars + bold human-readable digits). The barcode is
+    rendered as a bitmap rather than via the native ``BARCODE`` command so the
+    guard extensions and bold digits are fully under our control.
+
+    ``density`` (0-15) and ``speed`` (inches/sec) override print darkness; leave
+    both ``None`` to use the printer's own configured defaults (same as the SN
+    label, which does not force darkness).
+    """
+    lay = _ean13_layout(model_key, pn, ean13, dpi)
+
+    out = bytearray()
+
+    def cmd(s: str) -> None:
+        out.extend(s.encode("ascii"))
+        out.extend(b"\r\n")
+
+    cmd(f"SIZE {EAN13_WIDTH_MM:g} mm,{EAN13_HEIGHT_MM:g} mm")
+    cmd("GAP 2 mm,0 mm")
+    if speed is not None:
+        cmd(f"SPEED {int(speed)}")
+    if density is not None:
+        cmd(f"DENSITY {int(density)}")
+    cmd("DIRECTION 1")
+    cmd("REFERENCE 0,0")
+    cmd("CLS")
+    out.extend(_image_to_tspl_bitmap(lay["header_img"], *lay["header_xy"]))
+    out.extend(_image_to_tspl_bitmap(lay["sub_img"], *lay["sub_xy"]))
+    out.extend(_image_to_tspl_bitmap(lay["barcode_img"], *lay["barcode_xy"]))
+    cmd(f"PRINT 1,{max(1, int(quantity))}")
+    return bytes(out)
+
+
+def render_ean13_preview_png(
+    model_key: str,
+    pn: str,
+    ean13: str,
+    output_path: str | Path,
+    *,
+    dpi: int = EAN13_DPI,
+    scale: int = 4,
+) -> Path:
+    """Compose the EAN-13 label exactly as ``build_ean13_tspl`` lays it out and
+    save it as a (scaled-up) PNG for visual review without a printer.
+
+    Uses the very same ``_ean13_layout`` bitmaps that get sent to the printer, so
+    the preview is pixel-identical to the printed label.
+    """
+    from PIL import Image  # type: ignore[import-not-found]
+
+    lay = _ean13_layout(model_key, pn, ean13, dpi)
+    canvas = Image.new("1", (lay["label_w"], lay["label_h"]), 1)  # 1 = white
+    canvas.paste(lay["header_img"], lay["header_xy"])
+    canvas.paste(lay["sub_img"], lay["sub_xy"])
+    canvas.paste(lay["barcode_img"], lay["barcode_xy"])
+
+    big = canvas.resize((lay["label_w"] * scale, lay["label_h"] * scale), Image.NEAREST)
+    out_path = Path(output_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    big.convert("RGB").save(out_path, format="PNG")
+    return out_path
+
+
+# ---------------------------------------------------------------------------
 # PNG preview (cross-platform, for off-printer verification)
 # ---------------------------------------------------------------------------
 

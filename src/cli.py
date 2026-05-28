@@ -1964,13 +1964,13 @@ def print_ean13(
         )
 
     try:
-        zpl = label_util.build_ean13_zpl(model, pn, ean13, dpi=dpi, quantity=quantity)
+        data = label_util.build_ean13_tspl(model, pn, ean13, dpi=dpi, quantity=quantity)
     except ValueError as exc:
         raise click.ClickException(str(exc))
 
     if zpl_out_path is not None:
-        out = label_util.write_zpl_file(zpl_out_path, zpl)
-        click.echo(f"ZPL written: {out}")
+        out = label_util.write_zpl_file(zpl_out_path, data)
+        click.echo(f"Label data written: {out}")
 
     if no_print:
         click.echo("(--no-print set; skipped sending to printer)")
@@ -1989,7 +1989,7 @@ def print_ean13(
         raise click.ClickException(
             f"Printer '{printer}' not found (strict match). Installed queues:\n  " + hints
         )
-    label_util.send_to_windows_printer(target, zpl, job_name=f"EAN-13 {ean13}")
+    label_util.send_to_windows_printer(target, data, job_name=f"EAN-13 {ean13}")
     click.echo(
         f"Sent {quantity} EAN-13 label(s) for {model}/{grade} (P/N={pn}, EAN={ean13}) to '{target}'"
     )

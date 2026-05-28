@@ -2856,9 +2856,9 @@ class FactoryTestGUI:
 
     def _show_print_chooser(self, sns: list[str]) -> None:
         """Modal with 4 label-type buttons. Only 铭牌 / SN 标贴 are enabled today."""
-        dlg = tk.Toplevel(self)
+        dlg = tk.Toplevel(self.root)
         dlg.title(self._t("print_chooser_title"))
-        dlg.transient(self)
+        dlg.transient(self.root)
         dlg.resizable(False, False)
         dlg.grab_set()
 
@@ -2908,9 +2908,11 @@ class FactoryTestGUI:
 
         # Center over the main window.
         dlg.update_idletasks()
-        x = self.winfo_rootx() + (self.winfo_width() - dlg.winfo_width()) // 2
-        y = self.winfo_rooty() + (self.winfo_height() - dlg.winfo_height()) // 3
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - dlg.winfo_width()) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - dlg.winfo_height()) // 3
         dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
+        dlg.lift()
+        dlg.focus_set()
 
     def _submit_label_print(self, sn: str, *, silent: bool) -> bool:
         """Shared print path used by the manual button and auto-print hook.

@@ -350,6 +350,13 @@ UI_TEXT = {
         "auto_seed_previous": "缺第一步时自动补录",
         "add_to_queue": "添加到队列",
         "print_label": "打印标签",
+        "label_nameplate": "铭牌标签",
+        "label_sn": "SN 标签",
+        "label_ean13": "69 码",
+        "label_shipping": "船运标签",
+        "print_chooser_title": "选择要打印的标签",
+        "print_chooser_for": "将为 {count} 个 SN 打印：",
+        "cancel": "取消",
         "open_screenshot_dir": "打开截图目录",
         "remove_finished": "移除本台",
         "show_browser": "显示浏览器",
@@ -446,6 +453,13 @@ UI_TEXT = {
         "auto_seed_previous": "Auto-fill step 1 if missing",
         "add_to_queue": "Add to queue",
         "print_label": "Print label",
+        "label_nameplate": "Nameplate",
+        "label_sn": "SN sticker",
+        "label_ean13": "EAN-13 (69)",
+        "label_shipping": "Shipping label",
+        "print_chooser_title": "Choose label to print",
+        "print_chooser_for": "Printing for {count} SN(s):",
+        "cancel": "Cancel",
         "open_screenshot_dir": "Open screenshot folder",
         "remove_finished": "Remove this device",
         "show_browser": "Show browser",
@@ -542,6 +556,13 @@ UI_TEXT = {
         "auto_seed_previous": "Rellenar paso 1 si falta",
         "add_to_queue": "Añadir a la cola",
         "print_label": "Imprimir etiqueta",
+        "label_nameplate": "Placa",
+        "label_sn": "Etiqueta SN",
+        "label_ean13": "EAN-13 (69)",
+        "label_shipping": "Etiqueta de envío",
+        "print_chooser_title": "Elegir etiqueta a imprimir",
+        "print_chooser_for": "Imprimiendo para {count} SN(s):",
+        "cancel": "Cancelar",
         "open_screenshot_dir": "Abrir carpeta de capturas",
         "remove_finished": "Quitar este equipo",
         "show_browser": "Mostrar navegador",
@@ -684,6 +705,7 @@ class FactoryTestGUI:
         self.smoke_worker: threading.Thread | None = None
         self.task_counter = 0
         self.selected_task_id: str | None = None
+        self.selected_task_ids: list[str] = []
         self.daily_stats_date, self.daily_stats_devices = self._load_daily_stats()
 
         self.sn_var = tk.StringVar()
@@ -1433,6 +1455,10 @@ class FactoryTestGUI:
         self.sn_entry = ttk.Entry(input_frame, textvariable=self.sn_var, width=22)
         self.sn_entry.grid(row=0, column=2, sticky=tk.W)
         self.sn_entry.bind("<Return>", self._on_sn_enter)
+        # Focusing the SN box means the operator is about to type/scan a SN
+        # they want to print individually — clear any queue selection so the
+        # print button uses the entry value, not the highlighted device.
+        self.sn_entry.bind("<FocusIn>", self._on_sn_entry_focus)
         self.sn_entry.focus()
         self._register_text("or_label", ttk.Label(input_frame, text=self._t("or_label"))).grid(
             row=0, column=3, sticky=tk.W, padx=10
@@ -1577,7 +1603,7 @@ class FactoryTestGUI:
         ttk.Label(queue_frame, textvariable=self.queue_summary_var).grid(row=0, column=0, sticky=tk.W, pady=(0, 8))
 
         columns = ("sn", "ip", "status", "elapsed", "progress", "step")
-        self.device_tree = ttk.Treeview(queue_frame, columns=columns, show="headings", selectmode="browse")
+        self.device_tree = ttk.Treeview(queue_frame, columns=columns, show="headings", selectmode="extended")
         self.device_tree.tag_configure(
             self.ROW_SUCCESS_TAG,
             foreground=self.ROW_SUCCESS_FG,
@@ -2774,61 +2800,117 @@ class FactoryTestGUI:
             subprocess.Popen(["xdg-open", str(output_dir)])
 
     def _on_print_label(self) -> None:
-        """Print a Code 128 SN label (42x25mm, 模版二).
-
-        Priority: if a queue device is selected and has a full SN, use that.
-        Otherwise fall back to the manual SN input field. This lets the
-        operator print for any device already in the queue without re-typing.
-        """
-        normalized, source = self._resolve_print_label_sn()
-        if not normalized:
+        """Open the label-type chooser for the current SN(s)."""
+        sns, source = self._resolve_print_label_sns()
+        if not sns:
             if source == "queue_selected_no_sn":
                 messagebox.showwarning(
                     "打印标签",
                     "当前选中的设备还没有可打印的完整 SN。\n"
-                    "请等待 SN 解析完成，或在上方 SN 框里手动填入后再打印。",
+                    "请等待 SN 解析完成，或聚焦上方 SN 框（会取消队列选中）后手动填入。",
                 )
             else:
                 messagebox.showwarning(
                     "打印标签",
                     "未选中队列中的设备，且 SN 输入框为空。\n"
-                    "请先在队列中选一台设备，或在上方 SN 框填入 SN。",
+                    "请先在队列中选一台（可 Shift / Ctrl 多选），或在 SN 框填入 SN。",
                 )
             return
-        if is_auto_sn_placeholder(normalized):
-            messagebox.showwarning("打印标签", f"占位 SN 不能打印：{normalized}")
-            return
-        if not is_full_sn_candidate(normalized):
-            if not messagebox.askyesno(
-                "打印标签",
-                f"识别到的不是完整 SN（看起来是后 4 位之类的）：{normalized}\n"
-                "确认要按此内容打印吗？",
-            ):
-                return
-        # Manual click prints the full set: SN sticker (qty 2) + nameplate (qty 1).
-        # Nameplate is best-effort — it skips with a warning if grade/model
-        # don't resolve to a P/N, but the SN sticker still goes out.
-        self._submit_label_print(normalized, silent=False)
-        self._submit_nameplate_print(normalized, silent=False)
+        # Confirm non-full SNs once before opening the chooser.
+        for sn in sns:
+            if not is_full_sn_candidate(sn):
+                if not messagebox.askyesno(
+                    "打印标签",
+                    f"识别到的不是完整 SN（看起来是后 4 位之类的）：{sn}\n"
+                    "确认要按此内容打印吗？",
+                ):
+                    return
+        self._show_print_chooser(sns)
 
-    def _resolve_print_label_sn(self) -> tuple[str, str]:
-        """Pick the SN to print and a short tag describing where it came from.
+    def _resolve_print_label_sns(self) -> tuple[list[str], str]:
+        """Pick the SN(s) to print and a short tag describing where they came from.
 
-        Returns (sn, source) where source is one of: ``queue``, ``entry``,
-        ``queue_selected_no_sn``, ``empty``.
+        Returns (sns, source) where source is one of:
+        ``queue`` (one or more selected with real SNs),
+        ``queue_selected_no_sn`` (everything selected lacks a real SN yet),
+        ``entry`` (no queue selection, SN entry used), or ``empty``.
         """
-        if self.selected_task_id:
-            task = self.devices.get(self.selected_task_id)
-            if task is not None:
+        ids = list(self.selected_task_ids or ([self.selected_task_id] if self.selected_task_id else []))
+        if ids:
+            sns: list[str] = []
+            for tid in ids:
+                task = self.devices.get(tid)
+                if task is None:
+                    continue
                 queue_sn = normalize_sn(task.sn or "")
-                if queue_sn and not is_auto_sn_placeholder(queue_sn):
-                    return queue_sn, "queue"
-                return "", "queue_selected_no_sn"
+                if queue_sn and not is_auto_sn_placeholder(queue_sn) and queue_sn not in sns:
+                    sns.append(queue_sn)
+            if sns:
+                return sns, "queue"
+            return [], "queue_selected_no_sn"
         raw = self.sn_var.get().strip() if self.sn_entry is not None else ""
         normalized = normalize_sn(raw)
         if normalized:
-            return normalized, "entry"
-        return "", "empty"
+            return [normalized], "entry"
+        return [], "empty"
+
+    def _show_print_chooser(self, sns: list[str]) -> None:
+        """Modal with 4 label-type buttons. Only 铭牌 / SN 标贴 are enabled today."""
+        dlg = tk.Toplevel(self)
+        dlg.title(self._t("print_chooser_title"))
+        dlg.transient(self)
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        body = ttk.Frame(dlg, padding=12)
+        body.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(body, text=self._t("print_chooser_for", count=len(sns))).grid(
+            row=0, column=0, columnspan=4, sticky=tk.W, pady=(0, 4)
+        )
+        # Show up to 6 SNs; truncate with "..." beyond that.
+        preview = ", ".join(sns[:6])
+        if len(sns) > 6:
+            preview += f" … (+{len(sns) - 6})"
+        ttk.Label(body, text=preview, foreground="#444").grid(
+            row=1, column=0, columnspan=4, sticky=tk.W, pady=(0, 10)
+        )
+
+        def _close_and(fn) -> None:
+            dlg.destroy()
+            fn()
+
+        def _print_each(submit_fn) -> None:
+            for sn in sns:
+                submit_fn(sn, silent=False)
+
+        ttk.Button(
+            body,
+            text=self._t("label_nameplate"),
+            command=lambda: _close_and(lambda: _print_each(self._submit_nameplate_print)),
+        ).grid(row=2, column=0, padx=4, pady=4, sticky=tk.EW)
+        ttk.Button(
+            body,
+            text=self._t("label_sn"),
+            command=lambda: _close_and(lambda: _print_each(self._submit_label_print)),
+        ).grid(row=2, column=1, padx=4, pady=4, sticky=tk.EW)
+        ttk.Button(body, text=self._t("label_ean13"), state="disabled").grid(
+            row=2, column=2, padx=4, pady=4, sticky=tk.EW
+        )
+        ttk.Button(body, text=self._t("label_shipping"), state="disabled").grid(
+            row=2, column=3, padx=4, pady=4, sticky=tk.EW
+        )
+        for col in range(4):
+            body.columnconfigure(col, weight=1, minsize=110)
+
+        ttk.Button(body, text=self._t("cancel"), command=dlg.destroy).grid(
+            row=3, column=3, padx=4, pady=(10, 0), sticky=tk.E
+        )
+
+        # Center over the main window.
+        dlg.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() - dlg.winfo_width()) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - dlg.winfo_height()) // 3
+        dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
 
     def _submit_label_print(self, sn: str, *, silent: bool) -> bool:
         """Shared print path used by the manual button and auto-print hook.
@@ -3434,6 +3516,17 @@ class FactoryTestGUI:
 
     def _on_sn_enter(self, _event) -> None:
         self._on_start_test()
+
+    def _on_sn_entry_focus(self, _event) -> None:
+        """Clear queue selection so the manual SN-print path uses the entry box."""
+        if self.device_tree is None:
+            return
+        current = self.device_tree.selection()
+        if current:
+            self.device_tree.selection_remove(*current)
+        self.selected_task_ids = []
+        self.selected_task_id = None
+        self._refresh_action_states()
 
     def _refresh_form_accounts(self) -> None:
         if not self.form_entry_enabled:
@@ -4098,6 +4191,9 @@ class FactoryTestGUI:
         if self.device_tree is None:
             return
         selection = self.device_tree.selection()
+        # Multi-select (Shift / Ctrl-click) is supported; detail panes follow
+        # the first item so they keep showing one device at a time.
+        self.selected_task_ids = list(selection)
         self.selected_task_id = selection[0] if selection else None
         self._refresh_action_states()
         if self.selected_task_id is None:

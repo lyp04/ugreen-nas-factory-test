@@ -904,12 +904,18 @@ def _capture_fan_mode(
     try:
         _arrange_fan_capture_windows(page)
         page.wait_for_timeout(FAN_POST_LAYOUT_WAIT_MS)
-        values = _log_key_values(monitor_frame, monitor_spec, page_key)
-        if capture_values is not None and values:
-            capture_values[page_key] = values
         dismiss_desktop_overlays(page, max_rounds=2, completion_wait_ms=0)
         page.wait_for_timeout(SHORT_UI_WAIT_MS)
-        return capture_page(page, sn, page_key, screenshots_dir)
+        # Read the RPM back-to-back with the screenshot. The fan is still
+        # ramping after a mode switch, and dismissing overlays / grabbing the
+        # screenshot spikes the CPU (and fan), so any gap between the read and
+        # the shot makes the reported RPM diverge from the number frozen in the
+        # screenshot (observed 508 reported vs 1044 on screen).
+        values = _log_key_values(monitor_frame, monitor_spec, page_key)
+        shot = capture_page(page, sn, page_key, screenshots_dir)
+        if capture_values is not None and values:
+            capture_values[page_key] = values
+        return shot
     finally:
         _restore_window_layout(page, "ctlmgr", fan_layout)
         _restore_window_layout(page, "taskmgr", monitor_layout)

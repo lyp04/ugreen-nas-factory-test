@@ -340,6 +340,10 @@ UI_TEXT = {
         "factory_reset": "恢复出厂设置",
         "auto_form_entry": "自动录表",
         "auto_print_label": "自动打印标签",
+        "grade_prompt_title": "请选择等级",
+        "grade_prompt_body": "检测到设备就绪，需要选择测试等级才能继续：",
+        "grade_a_button": "A 类（L0 翻新）",
+        "grade_b_button": "B 类（L1 翻新）",
         "form_settings": "录表配置:",
         "model_auto": "机型按 SN 自动识别",
         "grade": "等级",
@@ -443,6 +447,10 @@ UI_TEXT = {
         "factory_reset": "Factory reset",
         "auto_form_entry": "Auto form entry",
         "auto_print_label": "Auto print label",
+        "grade_prompt_title": "Choose grade",
+        "grade_prompt_body": "A device is ready for test. Select a grade to continue:",
+        "grade_a_button": "Grade A (L0 refurb)",
+        "grade_b_button": "Grade B (L1 refurb)",
         "form_settings": "Form settings:",
         "model_auto": "Model auto-detected by SN",
         "grade": "Grade",
@@ -546,6 +554,10 @@ UI_TEXT = {
         "factory_reset": "Restablecer de fábrica",
         "auto_form_entry": "Captura automática",
         "auto_print_label": "Imprimir etiqueta auto",
+        "grade_prompt_title": "Elegir grado",
+        "grade_prompt_body": "Dispositivo listo para pruebas. Elige el grado para continuar:",
+        "grade_a_button": "Grado A (refurb L0)",
+        "grade_b_button": "Grado B (refurb L1)",
         "form_settings": "Configuración de captura:",
         "model_auto": "Modelo detectado por SN",
         "grade": "Grado",
@@ -1869,6 +1881,8 @@ class FactoryTestGUI:
             self._handle_confirm_disk_shortage(event)
         elif event_type == "resolve_form_grade":
             self._handle_resolve_form_grade(event)
+        elif event_type == "refresh_task_settings":
+            self._handle_refresh_task_settings(event)
         elif event_type == "update_available":
             self._handle_update_available(event)
         elif event_type == "update_progress":
@@ -1971,16 +1985,103 @@ class FactoryTestGUI:
         reply = event.get("reply")
         done = event.get("done")
         task = self.devices.get(str(event.get("task_id")))
-        fallback = str(event.get("grade") or (task.form_grade if task is not None else "A") or "A").strip().upper()
-        grade = str(self.form_grade_var.get() or fallback).strip().upper()
+        prompted_sn = str(event.get("sn") or (task.sn if task is not None else ""))
+        # Live-read the current selector before anything else — this is the
+        # whole reason the worker calls us instead of trusting task.form_grade.
+        grade = str(self.form_grade_var.get() or "").strip().upper()
         if grade not in {"A", "B"}:
-            grade = fallback if fallback in {"A", "B"} else "A"
+            # Fall back to whatever the task was queued with, then prompt the
+            # operator if we still don't have a real choice. Never silently
+            # default to "A" — earlier behaviour did, and it shipped wrong
+            # P/Ns when the operator forgot to pick a grade.
+            queued = str((task.form_grade if task is not None else "") or "").strip().upper()
+            if queued in {"A", "B"}:
+                grade = queued
+            else:
+                grade = self._ensure_grade_selected(reason_sn=prompted_sn) or ""
+        if grade not in {"A", "B"}:
+            grade = "A"  # last-resort safety — never crash the test
         if task is not None:
             task.form_grade = grade
         if isinstance(reply, dict):
             reply["grade"] = grade
         if done is not None:
             done.set()
+
+    def _handle_refresh_task_settings(self, event: dict) -> None:
+        """Update a queued task's auto-form / grade / account from current GUI vars.
+
+        Called from the worker thread (via the ui_queue + done event pattern)
+        right before ``run_test`` so toggles the operator made after queuing
+        actually take effect.
+        """
+        reply = event.get("reply")
+        done = event.get("done")
+        task = self.devices.get(str(event.get("task_id")))
+        if task is None:
+            if done is not None:
+                done.set()
+            return
+        live_auto = bool(self.form_entry_enabled and self.auto_form_entry_var.get())
+        live_grade = self._form_grade_choice()
+        live_account = self.form_account_var.get().strip()
+        if isinstance(reply, dict):
+            reply["auto_form_entry"] = live_auto
+            reply["form_grade"] = live_grade
+            reply["form_account_name"] = live_account
+        if done is not None:
+            done.set()
+
+    def _ensure_grade_selected(self, *, reason_sn: str = "") -> str | None:
+        """Make sure form_grade_var holds A or B. Pops a modal if it doesn't.
+
+        Returns "A"/"B" on success, or None if the operator cancels. Already-
+        selected grades are returned without prompting. Safe to call from the
+        main thread only — uses ``wait_window``.
+        """
+        current = self._form_grade_choice()
+        if current in {"A", "B"}:
+            return current
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title(self._t("grade_prompt_title"))
+        dlg.transient(self.root)
+        dlg.resizable(False, False)
+        dlg.grab_set()
+        # Make the dialog refuse to be dismissed by the X — operator must pick.
+        dlg.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        body = ttk.Frame(dlg, padding=16)
+        body.pack()
+        msg = self._t("grade_prompt_body")
+        if reason_sn:
+            msg = f"{msg}\nSN: {reason_sn}"
+        ttk.Label(body, text=msg, justify=tk.LEFT).grid(
+            row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 12)
+        )
+
+        picked = {"grade": None}
+
+        def _choose(grade: str) -> None:
+            picked["grade"] = grade
+            self.form_grade_var.set(grade)
+            dlg.destroy()
+
+        ttk.Button(
+            body, text=self._t("grade_a_button"), width=20, command=lambda: _choose("A")
+        ).grid(row=1, column=0, padx=4, pady=4)
+        ttk.Button(
+            body, text=self._t("grade_b_button"), width=20, command=lambda: _choose("B")
+        ).grid(row=1, column=1, padx=4, pady=4)
+
+        dlg.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - dlg.winfo_width()) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - dlg.winfo_height()) // 3
+        dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
+        dlg.lift()
+        dlg.focus_set()
+        self.root.wait_window(dlg)
+        return picked["grade"]
 
     def _handle_confirm_disk_shortage(self, event: dict) -> None:
         reply = event.get("reply")
@@ -3462,6 +3563,16 @@ class FactoryTestGUI:
             if not self._auto_scan_ready(show_warning=False):
                 self._refresh_action_states()
                 return
+            # If auto-form is on but the operator never picked a grade, block
+            # right here with a modal — same as the manual flow's validation
+            # popup — so we never silently default to A on a freshly-detected
+            # device. Re-read live each time so toggling auto-form-entry off
+            # mid-scan correctly skips the prompt.
+            if self.form_entry_enabled and self.auto_form_entry_var.get():
+                if self._ensure_grade_selected() is None:
+                    self.status_var.set(self._timestamped("auto_scan_waiting_form_grade"))
+                    self._refresh_action_states()
+                    return
             network = self.config.get("network") or {}
             allowed_network = self._auto_scan_network(str(network.get("subnet") or "192.168.0.0/24"))
             for device in event.get("devices") or []:
@@ -3881,6 +3992,11 @@ class FactoryTestGUI:
                         final_event_sent = True
                     self.ui_queue.put(event)
 
+                # Re-read auto-form / grade / account from the GUI just before
+                # we hand off to run_test. The task may have been queued
+                # minutes ago with a stale snapshot — the operator might have
+                # toggled the checkbox or switched grade since.
+                self._sync_task_with_live_settings(task)
                 try:
                     run_test(
                         task.sn,
@@ -4022,6 +4138,27 @@ class FactoryTestGUI:
         )
         done.wait()
         return bool(reply.get("answer"))
+
+    def _sync_task_with_live_settings(self, task: DeviceTask) -> None:
+        """From the worker thread: pull current auto-form / grade / account
+        from the GUI into ``task`` so a mid-queue toggle takes effect."""
+        reply: dict[str, object] = {}
+        done = threading.Event()
+        self.ui_queue.put(
+            {
+                "type": "refresh_task_settings",
+                "task_id": task.task_id,
+                "reply": reply,
+                "done": done,
+            }
+        )
+        done.wait()
+        if "auto_form_entry" in reply:
+            task.auto_form_entry = bool(reply["auto_form_entry"])
+        if reply.get("form_grade"):
+            task.form_grade = str(reply["form_grade"])
+        if reply.get("form_account_name"):
+            task.form_account_name = str(reply["form_account_name"])
 
     def _resolve_current_form_grade(self, task: DeviceTask, prompt: dict | None = None) -> str:
         prompt = prompt or {}

@@ -382,23 +382,21 @@ def test_upload_capture_waits_for_seed_after_speed_sample_window(tmp_path, monke
     assert result.values["speed_status"] == "ok"
 
 
-def test_transfer_capture_reports_highest_stable_threshold_sample(tmp_path, monkeypatch) -> None:
+def test_transfer_capture_records_bracketed_stable_rate(tmp_path, monkeypatch) -> None:
+    # A capture is only accepted when a read immediately before AND immediately
+    # after the screenshot are identical (the display held steady across the shot),
+    # so the recorded value equals the number frozen in the image.
     shot = tmp_path / "speed.png"
     shot.write_bytes(b"png")
-    # Each accepted threshold capture re-reads the rate right after the screenshot
-    # (the "screenshot-moment" read), so two extra readings are needed vs. the
-    # number of loop iterations.
     texts = iter(
         [
-            f"{READ_MARKER} 320 MB/s {WRITE_MARKER} 0 B/s",
-            f"{READ_MARKER} 320 MB/s {WRITE_MARKER} 0 B/s",
-            f"{READ_MARKER} 320 MB/s {WRITE_MARKER} 0 B/s",
-            f"{READ_MARKER} 560 MB/s {WRITE_MARKER} 0 B/s",
-            f"{READ_MARKER} 560 MB/s {WRITE_MARKER} 0 B/s",
-            f"{READ_MARKER} 560 MB/s {WRITE_MARKER} 0 B/s",
+            f"{READ_MARKER} 560 MB/s {WRITE_MARKER} 0 B/s",  # iter1 loop-top sample
+            f"{READ_MARKER} 560 MB/s {WRITE_MARKER} 0 B/s",  # iter2 loop-top sample
+            f"{READ_MARKER} 560 MB/s {WRITE_MARKER} 0 B/s",  # iter2 pre-screenshot read
+            f"{READ_MARKER} 560 MB/s {WRITE_MARKER} 0 B/s",  # iter2 post-screenshot read (== pre -> accept)
         ]
     )
-    process_checks = iter([False, False, False, True])
+    process_checks = iter([False, True])
     cfg = SmbTransferConfig(unc_share=r"\\192.168.0.168\hdd", local_dir=tmp_path)
 
     class FakePage:
@@ -430,26 +428,28 @@ def test_transfer_capture_reports_highest_stable_threshold_sample(tmp_path, monk
     assert result.values["speed_status"] == "ok"
 
 
-def test_transfer_capture_rejects_trough_screenshot_and_matches_value(tmp_path, monkeypatch) -> None:
-    # The screen rate is bursty: the peak (560) that triggers a capture has fallen
-    # to a trough (26.4) by the time the screenshot is grabbed. That screenshot must
-    # be rejected, and the reported value must equal the rate frozen in the screenshot
-    # that is finally kept (never the pre-screenshot peak).
+def test_transfer_capture_rejects_unstable_screenshot(tmp_path, monkeypatch) -> None:
+    # If the displayed rate moved across the screenshot window (a bursty M.2 write:
+    # 180 just before, 560 just after), that screenshot is ambiguous and must be
+    # rejected. A later steady window is accepted, and the recorded value equals the
+    # rate frozen in the kept screenshot (never the pre-screenshot peak/trough).
     best_shot = tmp_path / "best.png"
-    trough_shot = tmp_path / "trough.png"
-    peak_shot = tmp_path / "peak.png"
-    for path in (best_shot, trough_shot, peak_shot):
+    reject_shot = tmp_path / "reject.png"
+    accept_shot = tmp_path / "accept.png"
+    for path in (best_shot, reject_shot, accept_shot):
         path.write_bytes(b"png")
 
     texts = iter(
         [
-            f"{READ_MARKER} 560 MB/s {WRITE_MARKER} 0 B/s",   # iter1 top: peak triggers capture
-            f"{READ_MARKER} 26.4 MB/s {WRITE_MARKER} 0 B/s",  # iter1 screenshot-moment: trough -> reject
-            f"{READ_MARKER} 560 MB/s {WRITE_MARKER} 0 B/s",   # iter2 top: peak triggers capture
-            f"{READ_MARKER} 560 MB/s {WRITE_MARKER} 0 B/s",   # iter2 screenshot-moment: peak -> accept
+            f"{READ_MARKER} 560 MB/s {WRITE_MARKER} 0 B/s",   # iter1 loop-top
+            f"{READ_MARKER} 180 MB/s {WRITE_MARKER} 0 B/s",   # iter1 pre-screenshot
+            f"{READ_MARKER} 560 MB/s {WRITE_MARKER} 0 B/s",   # iter1 post (!= pre -> reject)
+            f"{READ_MARKER} 560 MB/s {WRITE_MARKER} 0 B/s",   # iter2 loop-top
+            f"{READ_MARKER} 560 MB/s {WRITE_MARKER} 0 B/s",   # iter2 pre-screenshot
+            f"{READ_MARKER} 560 MB/s {WRITE_MARKER} 0 B/s",   # iter2 post (== pre -> accept)
         ]
     )
-    shots = iter([best_shot, trough_shot, peak_shot])
+    shots = iter([best_shot, reject_shot, accept_shot])
     process_checks = iter([False, True])
     cfg = SmbTransferConfig(unc_share=r"\\192.168.0.168\hdd", local_dir=tmp_path)
 
@@ -478,8 +478,8 @@ def test_transfer_capture_rejects_trough_screenshot_and_matches_value(tmp_path, 
     )
 
     assert result.reached_threshold is True
-    assert result.values["rate_mbps"] == "560"   # screenshot-moment value, not the discarded peak/trough
-    assert result.shot_path == peak_shot          # trough screenshot was rejected
+    assert result.values["rate_mbps"] == "560"
+    assert result.shot_path == accept_shot
 
 
 def test_existing_transfer_capture_requires_reported_rate_above_threshold(tmp_path) -> None:

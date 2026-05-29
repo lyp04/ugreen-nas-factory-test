@@ -637,25 +637,29 @@ def _capture_transfer_attempt(
                 if stable_samples >= stable_target and (
                     threshold_sample is None or sample.rate_bytes > threshold_sample.rate_bytes
                 ):
-                    # Disk transfer rates are bursty: the value parsed before the
-                    # screenshot can be a peak while the screenshot itself is grabbed
-                    # a refresh later in a trough (observed 344.8 recorded vs 26.4
-                    # shown). Take the screenshot first, then re-read the rate from
-                    # that same display state, and only accept it when the rate frozen
-                    # in the screenshot is itself >= threshold. The reported value is
-                    # the re-read rate, so it always equals the number in the image.
+                    # Disk transfer rates are bursty, so a single read taken just
+                    # before or after the screenshot can differ from the number
+                    # actually frozen in the image (M.2 writes flush in bursts: a
+                    # screenshot caught a 180 MB/s trough while the read a beat later
+                    # saw a 285 MB/s burst). Bracket the screenshot with a read
+                    # immediately before and after; accept only when the displayed
+                    # rate held identical across the capture window — then the number
+                    # in the image equals what we record — and is itself >= threshold.
                     dismiss_desktop_overlays(page, max_rounds=2, completion_wait_ms=0)
+                    pre_shot = _transfer_speed_sample(_frame_text(frame), share, direction)
                     shot = capture_page(page, sn, page_key, screenshots_dir)
-                    shot_sample = _transfer_speed_sample(_frame_text(frame), share, direction)
+                    post_shot = _transfer_speed_sample(_frame_text(frame), share, direction)
                     if (
-                        shot_sample is not None
-                        and shot_sample.rate_bytes >= threshold_bytes
+                        pre_shot is not None
+                        and post_shot is not None
+                        and pre_shot.rate_bytes == post_shot.rate_bytes
+                        and post_shot.rate_bytes >= threshold_bytes
                         and (
                             threshold_sample is None
-                            or shot_sample.rate_bytes > threshold_sample.rate_bytes
+                            or post_shot.rate_bytes > threshold_sample.rate_bytes
                         )
                     ):
-                        threshold_sample = shot_sample
+                        threshold_sample = post_shot
                         threshold_sample_shot = shot
                     else:
                         stable_samples = 0

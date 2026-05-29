@@ -1050,22 +1050,11 @@ class FactoryTestGUI:
         return self._merge_queue_records_with_output(records, today)
 
     def _queue_record_in_window(self, record: dict, cutoff: datetime, file_date_is_today: bool) -> bool:
+        # File dated today means rollover/in-day save already filtered, so trust every record (lets 在网 devices kept overnight survive restart).
+        if file_date_is_today:
+            return True
         ctime = self._sn_folder_ctime(normalize_sn(str(record.get("sn") or "")))
-        if ctime is not None:
-            return datetime.fromtimestamp(ctime) >= cutoff
-        has_any_timestamp = False
-        for key in ("queue_added_at", "queue_order_at", "started_at", "finished_at"):
-            raw = str(record.get(key) or "").strip()
-            if not raw:
-                continue
-            try:
-                ts = datetime.fromisoformat(raw)
-            except ValueError:
-                continue
-            has_any_timestamp = True
-            if ts >= cutoff:
-                return True
-        return file_date_is_today and not has_any_timestamp
+        return ctime is not None and datetime.fromtimestamp(ctime) >= cutoff
 
     def _sn_folder_ctime(self, sn: str) -> float | None:
         if not sn:

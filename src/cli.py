@@ -74,6 +74,9 @@ PAGE_LABELS = {
 FORM_MISSING_ACCESSORY_STAGE = "未上传：缺少配件照片"
 FAN_RPM_FAILURE_STAGE = "风扇转速异常"
 FAN_RPM_KEYS = ("resource_monitor", "fan_normal", "fan_silent", "fan_full_speed")
+CPU_TEMP_FAILURE_STAGE = "CPU 温度过高"
+CPU_TEMP_KEYS = ("resource_monitor", "fan_normal", "fan_silent", "fan_full_speed")
+DEFAULT_CPU_TEMP_MAX_C = 60.0
 NUMBER_RE = re.compile(r"[-+]?(?:\d+(?:,\d{3})+|\d+)(?:\.\d+)?")
 POOL_CREATION_ERROR_MARKERS = (
     "Storage pool summary did not appear in time after creation",
@@ -201,10 +204,30 @@ def _fan_rpm_failures(captured_values: dict) -> list[str]:
     return failures
 
 
-def _validate_captured_measurements(captured_values: dict) -> None:
+def _cpu_temp_failures(captured_values: dict, max_c: float) -> list[str]:
+    failures: list[str] = []
+    for page_key in CPU_TEMP_KEYS:
+        values = captured_values.get(page_key)
+        if not isinstance(values, dict):
+            continue
+        raw = values.get("cpu_temp")
+        if raw is None:
+            continue
+        temp = _first_number(raw)
+        if temp is None:
+            continue
+        if temp > max_c:
+            failures.append(f"{_page_label(page_key)} CPU 温度 {temp:g}℃ > {max_c:g}℃")
+    return failures
+
+
+def _validate_captured_measurements(captured_values: dict, cpu_temp_max_c: float = DEFAULT_CPU_TEMP_MAX_C) -> None:
     failures = _fan_rpm_failures(captured_values)
     if failures:
         raise RuntimeError(f"{FAN_RPM_FAILURE_STAGE}: {'；'.join(failures)}")
+    temp_failures = _cpu_temp_failures(captured_values, cpu_temp_max_c)
+    if temp_failures:
+        raise RuntimeError(f"{CPU_TEMP_FAILURE_STAGE}: {'；'.join(temp_failures)}")
 
 
 def _write_report_checkpoint(dirs: dict[str, Path], report: dict, stage: str | None = None) -> None:
@@ -234,6 +257,11 @@ def failure_stage_for_error(exc_or_message: object) -> str:
     message = str(exc_or_message)
     if FAN_RPM_FAILURE_STAGE in message:
         return FAN_RPM_FAILURE_STAGE
+    if CPU_TEMP_FAILURE_STAGE in message:
+        temp_match = re.search(r"(\d+(?:\.\d+)?)\s*℃\s*>\s*(\d+(?:\.\d+)?)\s*℃", message)
+        if temp_match:
+            return f"{CPU_TEMP_FAILURE_STAGE}：{temp_match.group(1)}℃ > {temp_match.group(2)}℃"
+        return CPU_TEMP_FAILURE_STAGE
     if is_pool_creation_timeout_error(exc_or_message):
         return _pool_failure_stage(message)
     if is_unflashed_password_error(exc_or_message):
@@ -678,7 +706,12 @@ def run_test(
                     )
                     report["captured"] = saved
                     report["captured_values"] = captured_values
-                    _validate_captured_measurements(captured_values)
+                    _validate_captured_measurements(
+                        captured_values,
+                        cpu_temp_max_c=float(
+                            (config.get("validation") or {}).get("cpu_temp_max_c", DEFAULT_CPU_TEMP_MAX_C)
+                        ),
+                    )
                     checkpoint("截图完成")
 
                     if auto_form_entry:

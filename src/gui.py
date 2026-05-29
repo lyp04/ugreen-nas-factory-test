@@ -358,6 +358,7 @@ UI_TEXT = {
         "label_sn": "SN 标签",
         "label_ean13": "69 码",
         "label_shipping": "船运标签",
+        "label_carton": "周转箱标签",
         "print_chooser_title": "选择要打印的标签",
         "print_chooser_for": "将为 {count} 个 SN 打印：",
         "cancel": "取消",
@@ -465,6 +466,7 @@ UI_TEXT = {
         "label_sn": "SN sticker",
         "label_ean13": "EAN-13 (69)",
         "label_shipping": "Shipping label",
+        "label_carton": "Turnover-box label",
         "print_chooser_title": "Choose label to print",
         "print_chooser_for": "Printing for {count} SN(s):",
         "cancel": "Cancel",
@@ -572,6 +574,7 @@ UI_TEXT = {
         "label_sn": "Etiqueta SN",
         "label_ean13": "EAN-13 (69)",
         "label_shipping": "Etiqueta de envío",
+        "label_carton": "Etiqueta de caja",
         "print_chooser_title": "Elegir etiqueta a imprimir",
         "print_chooser_for": "Imprimiendo para {count} SN(s):",
         "cancel": "Cancelar",
@@ -2952,17 +2955,20 @@ class FactoryTestGUI:
                 return sns, "queue"
             return [], "queue_selected_no_sn"
         raw = self.sn_var.get().strip() if self.sn_entry is not None else ""
-        normalized = normalize_sn(raw)
-        if normalized:
-            return [normalized], "entry"
+        # The SN box accepts several SNs separated by EN/CN comma/semicolon or
+        # whitespace (needed for the 4-SN turnover-box label); a single SN still
+        # yields a one-element list.
+        entry_sns = label_util.split_carton_sns(raw)
+        if entry_sns:
+            return entry_sns, "entry"
         return [], "empty"
 
     def _show_print_chooser(self, sns: list[str]) -> None:
         """Modal with 4 label-type checkboxes + 打印 button.
 
-        Implemented types (铭牌 / SN 标贴) tick by default; not-yet-implemented
-        types (69 码 / 船运标签) are grayed out so the operator sees them but
-        can't accidentally select them.
+        铭牌 / SN 标贴 / 69 码 are per-SN (printed once for each SN). 周转箱
+        (turnover box) is a single box-level label for exactly 4 same-model SNs,
+        so its checkbox is enabled only then; otherwise it's grayed out.
         """
         dlg = tk.Toplevel(self.root)
         dlg.title(self._t("print_chooser_title"))
@@ -2982,12 +2988,15 @@ class FactoryTestGUI:
             row=1, column=0, columnspan=2, sticky=tk.W, pady=(0, 10)
         )
 
-        # Checkbox state — default the three implemented types to ticked so
-        # the common "print everything" case is one click.
+        # Checkbox state — default the per-SN types to ticked so the common
+        # "print everything" case is one click.
         nameplate_var = tk.BooleanVar(value=True)
         sn_var = tk.BooleanVar(value=True)
         ean13_var = tk.BooleanVar(value=True)
-        shipping_var = tk.BooleanVar(value=False)
+        # 周转箱: one label per box of exactly 4 same-model SNs. Default it on
+        # only when eligible; otherwise it's grayed out with a reason.
+        carton_ok, carton_reason = self._carton_eligibility(sns)
+        carton_var = tk.BooleanVar(value=carton_ok)
 
         ttk.Checkbutton(body, text=self._t("label_nameplate"), variable=nameplate_var).grid(
             row=2, column=0, sticky=tk.W, padx=4, pady=2
@@ -2999,8 +3008,13 @@ class FactoryTestGUI:
             row=3, column=0, sticky=tk.W, padx=4, pady=2
         )
         ttk.Checkbutton(
-            body, text=self._t("label_shipping"), variable=shipping_var, state="disabled"
+            body, text=self._t("label_carton"), variable=carton_var,
+            state=("normal" if carton_ok else "disabled"),
         ).grid(row=3, column=1, sticky=tk.W, padx=4, pady=2)
+        if not carton_ok:
+            ttk.Label(body, text=f"周转箱：{carton_reason}", foreground="#a00").grid(
+                row=4, column=0, columnspan=2, sticky=tk.W, padx=4, pady=(0, 2)
+            )
         for col in range(2):
             body.columnconfigure(col, weight=1, minsize=150)
 
@@ -3013,6 +3027,7 @@ class FactoryTestGUI:
                 "nameplate": nameplate_var.get(),
                 "sn": sn_var.get(),
                 "ean13": ean13_var.get(),
+                "carton": carton_var.get(),
             }
             if not any(picks.values()):
                 messagebox.showwarning(
@@ -3028,9 +3043,11 @@ class FactoryTestGUI:
                 _print_each(self._submit_label_print)
             if picks["ean13"]:
                 _print_each(self._submit_ean13_print)
+            if picks["carton"]:
+                self._submit_turnover_print(sns, silent=False)
 
         button_row = ttk.Frame(body)
-        button_row.grid(row=4, column=0, columnspan=2, sticky=tk.E, pady=(12, 0))
+        button_row.grid(row=5, column=0, columnspan=2, sticky=tk.E, pady=(12, 0))
         ttk.Button(button_row, text=self._t("cancel"), command=dlg.destroy).pack(
             side=tk.RIGHT, padx=(6, 0)
         )
@@ -3327,6 +3344,107 @@ class FactoryTestGUI:
         return self._do_ean13_print(
             model_key, grade, quantity=None, silent=silent, sn_note=normalized
         )
+
+    def _carton_eligibility(self, sns: list[str]) -> tuple[bool, str]:
+        """Whether ``sns`` can make a 周转箱 label: exactly 4, all same model."""
+        n = label_util.CARTON_SN_COUNT
+        if len(sns) != n:
+            return False, f"需正好 {n} 个 SN（当前 {len(sns)} 个）"
+        models = {model_key_from_sn(s) for s in sns}
+        if None in models or len(models) != 1:
+            return False, f"{n} 个 SN 必须同机型"
+        return True, ""
+
+    def _submit_turnover_print(self, sns: list[str], *, silent: bool) -> bool:
+        """Print ONE 周转箱 (turnover-box) label for a box of exactly 4 SNs.
+
+        Model comes from the (identical) SN prefixes, grade from the form, PID
+        from ``lookup_pn``. The day's running seq is stamped into the QR and the
+        box is appended to the local台账 — but the seq is only committed after a
+        successful print, so failures don't burn a number.
+        """
+        clean = [normalize_sn(s) for s in (sns or []) if normalize_sn(s)]
+        ok, reason = self._carton_eligibility(clean)
+        if not ok:
+            if not silent:
+                messagebox.showwarning("打印周转箱", reason)
+            return False
+        model_key = model_key_from_sn(clean[0])
+        grade = (self.form_grade_var.get() or "").strip().upper() or None
+        pn = label_util.lookup_pn(model_key, grade)
+        if not pn:
+            if not silent:
+                messagebox.showwarning(
+                    "打印周转箱",
+                    f"无法解析 PID/PN (model={model_key!r} grade={grade!r})。"
+                    "请确认机型/等级在查表里。",
+                )
+            return False
+
+        cfg = (self.config.get("carton_printer") or {}) if isinstance(self.config, dict) else {}
+        printer_pref = str(cfg.get("name") or "").strip() or None
+        try:
+            dpi = int(cfg.get("dpi") or label_util.CARTON_DPI)
+        except (TypeError, ValueError):
+            dpi = label_util.CARTON_DPI
+        try:
+            quantity = max(1, int(cfg.get("quantity") or 2))
+        except (TypeError, ValueError):
+            quantity = 2
+        po = str(cfg.get("po_default") or label_util.CARTON_PO_DEFAULT)
+        warehouse = str(cfg.get("warehouse") or label_util.CARTON_WAREHOUSE_DEFAULT)
+
+        if not label_util.is_windows():
+            if not silent:
+                messagebox.showinfo("打印周转箱", "非 Windows 主机不能直接发打印队列。")
+            return False
+        target = label_util.find_label_printer(printer_pref)
+        if not target:
+            queues = label_util.list_windows_printers()
+            names = "\n".join(p["name"] for p in queues) or "(无)"
+            msg = (
+                f"找不到周转箱打印机 '{printer_pref}'（严格匹配）。\n"
+                "请在 config.yml 的 carton_printer.name 里写准打印队列名。\n\n"
+                f"Windows 上已安装的队列：\n{names}"
+            )
+            if silent:
+                logger.error(f"carton: {msg}")
+            else:
+                messagebox.showerror("打印周转箱", msg)
+            return False
+
+        data_dir = self._output_root()
+        seq = label_util.peek_carton_seq(data_dir)
+        try:
+            zpl = label_util.build_turnover_box_zpl(
+                model_key, grade, clean,
+                seq=seq, pid=pn, po=po, warehouse=warehouse, dpi=dpi, quantity=quantity,
+            )
+        except ValueError as exc:
+            if not silent:
+                messagebox.showerror("打印周转箱", f"生成 ZPL 失败：{exc}")
+            return False
+        try:
+            label_util.send_to_windows_printer(
+                target, zpl, job_name=f"Carton {model_key}{grade or ''} #{seq:03d}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            if silent:
+                logger.error(f"carton: send to '{target}' failed: {exc}")
+            else:
+                messagebox.showerror("打印周转箱", f"发送到打印机失败：{exc}")
+            return False
+
+        committed = label_util.commit_carton_print(
+            data_dir,
+            {"model": model_key, "grade": grade, "pid": pn, "po": po,
+             "sns": clean, "printer": target, "copies": quantity},
+        )
+        self.status_var.set(
+            f"{datetime.now().strftime('%H:%M:%S')}  已发送 周转箱×{quantity} 到 {target}"
+            f"（PID={pn} 流水号#{committed:03d} {len(clean)}台 {grade or '?'}类）"
+        )
+        return True
 
     def _show_ean13_variant_chooser(self) -> None:
         """Manual 69 码 picker for when no queue is selected and SN is empty.

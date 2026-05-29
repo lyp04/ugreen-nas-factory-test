@@ -1995,6 +1995,159 @@ def print_ean13(
     )
 
 
+def _load_carton_config() -> dict:
+    try:
+        config, _ = load_configs(PROJECT_ROOT)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"_load_carton_config: config load failed ({exc}); using defaults")
+        return {}
+    section = config.get("carton_printer") if isinstance(config, dict) else None
+    return section if isinstance(section, dict) else {}
+
+
+def _carton_data_dir() -> Path:
+    """Where the per-day turnover seq counter + 台账 live (config output_dir)."""
+    try:
+        config, _ = load_configs(PROJECT_ROOT)
+        out = config.get("output_dir") if isinstance(config, dict) else None
+    except Exception:  # noqa: BLE001
+        out = None
+    return (PROJECT_ROOT / str(out)).resolve() if out else PROJECT_ROOT
+
+
+@cli.command("print-carton")
+@click.option("--sns", "sns_raw", default=None, help="The 4 box SNs, separated by comma/semicolon/space.")
+@click.option("--sn", "sn_list", multiple=True, help="A box SN (repeat for each); alternative to --sns.")
+@click.option(
+    "--grade",
+    type=click.Choice(["A", "B"], case_sensitive=False),
+    default=None,
+    help="Refurb grade — drives PID lookup.",
+)
+@click.option("--model", default=None, help="Override model key (else inferred from the SNs).")
+@click.option("--pid", default=None, help="Override PID/P/N (else lookup_pn(model, grade)).")
+@click.option("--po", default=None, help="PO (else carton_printer.po_default).")
+@click.option("--date", "prod_date", default=None, help="Production date YYYY-MM-DD (else today).")
+@click.option("--warehouse", default=None, help="Receiving warehouse (else carton_printer.warehouse).")
+@click.option("--seq", type=int, default=None, help="Override the daily seq (else next from local counter).")
+@click.option("--printer", default=None, help="Windows queue (else carton_printer.name).")
+@click.option("--dpi", type=click.IntRange(150, 600), default=None, help="Printer dpi (else carton_printer.dpi).")
+@click.option("--quantity", "-n", type=click.IntRange(1, 20), default=None, help="Copies (else carton_printer.quantity).")
+@click.option(
+    "--zpl-out",
+    "zpl_out_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Write raw ZPL to this file (skip printer send).",
+)
+@click.option("--no-print", is_flag=True, default=False, help="Skip sending + seq commit (use with --zpl-out).")
+def print_carton(
+    sns_raw: str | None,
+    sn_list: tuple[str, ...],
+    grade: str | None,
+    model: str | None,
+    pid: str | None,
+    po: str | None,
+    prod_date: str | None,
+    warehouse: str | None,
+    seq: int | None,
+    printer: str | None,
+    dpi: int | None,
+    quantity: int | None,
+    zpl_out_path: Path | None,
+    no_print: bool,
+) -> None:
+    """Print the 模版六 周转箱 (turnover-box) label — 102×152mm, ZD888 ZPL.
+
+    Needs exactly 4 same-model SNs (one box). PID = lookup_pn(model, grade); the
+    QR encodes ``SN*PID*QTY*PO*DATE*seq`` with a per-day running seq kept under
+    output_dir. The seq is committed (and the box appended to the台账) only on a
+    successful print.
+    """
+    cfg = _load_carton_config()
+    if printer is None and cfg.get("name"):
+        printer = str(cfg["name"])
+    if dpi is None:
+        try:
+            dpi = int(cfg.get("dpi") or label_util.CARTON_DPI)
+        except (TypeError, ValueError):
+            dpi = label_util.CARTON_DPI
+    if quantity is None:
+        try:
+            quantity = max(1, int(cfg.get("quantity") or 2))
+        except (TypeError, ValueError):
+            quantity = 2
+    if po is None:
+        po = str(cfg.get("po_default") or label_util.CARTON_PO_DEFAULT)
+    if warehouse is None:
+        warehouse = str(cfg.get("warehouse") or label_util.CARTON_WAREHOUSE_DEFAULT)
+
+    if sns_raw:
+        sns = label_util.split_carton_sns(sns_raw)
+    elif sn_list:
+        sns = label_util.split_carton_sns(",".join(sn_list))
+    else:
+        sns = []
+    if len(sns) != label_util.CARTON_SN_COUNT:
+        raise click.UsageError(
+            f"need exactly {label_util.CARTON_SN_COUNT} SNs; got {len(sns)} "
+            "(use --sns 'a,b,c,d' or repeat --sn)"
+        )
+    if not model:
+        models = {model_key_from_sn(s) for s in sns}
+        if None in models or len(models) != 1:
+            raise click.UsageError("the 4 SNs must be the same model — or pass --model.")
+        model = next(iter(models))
+    if not pid:
+        pid = label_util.lookup_pn(model, grade)
+    if not pid:
+        raise click.UsageError(
+            f"Could not resolve PID for model={model!r} grade={grade!r}. Pass --pid or --grade."
+        )
+
+    data_dir = _carton_data_dir()
+    if seq is None:
+        seq = label_util.peek_carton_seq(data_dir)
+
+    try:
+        data = label_util.build_turnover_box_zpl(
+            model, grade, sns,
+            seq=seq, pid=pid, po=po, prod_date=prod_date,
+            warehouse=warehouse, dpi=dpi, quantity=quantity,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc))
+
+    if zpl_out_path is not None:
+        out = label_util.write_zpl_file(zpl_out_path, data)
+        click.echo(f"Label data written: {out}")
+
+    if no_print:
+        click.echo("(--no-print set; skipped sending to printer and seq commit)")
+        return
+
+    if not label_util.is_windows():
+        click.echo("Non-Windows host: cannot send to printer queue directly. Use --zpl-out.")
+        return
+
+    target = label_util.find_label_printer(printer)
+    if not target:
+        hints = "\n  ".join(p["name"] for p in label_util.list_windows_printers()) or "(none)"
+        raise click.ClickException(
+            f"Printer '{printer}' not found (strict match). Installed queues:\n  " + hints
+        )
+    label_util.send_to_windows_printer(target, data, job_name=f"Carton {model}{grade or ''} #{seq:03d}")
+    committed = label_util.commit_carton_print(
+        data_dir,
+        {"model": model, "grade": grade, "pid": pid, "po": po,
+         "sns": sns, "printer": target, "copies": quantity},
+    )
+    click.echo(
+        f"Sent {quantity} carton label(s) for {model}/{grade} "
+        f"(PID={pid}, seq#{committed:03d}, {len(sns)} SNs) to '{target}'"
+    )
+
+
 def main() -> None:
     try:
         cli()

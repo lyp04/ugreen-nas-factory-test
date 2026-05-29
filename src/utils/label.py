@@ -368,6 +368,10 @@ def _load_bold_text_font(font_path: str | None, size_px: int, *, bold: bool = Fa
                 "C:/Windows/Fonts/msyhbd.ttf",
                 "C:/Windows/Fonts/simhei.ttf",
                 "C:/Windows/Fonts/arialbd.ttf",  # Arial Bold
+                # macOS CJK — PIL can't open PingFang.ttc, so prefer these for
+                # Chinese glyphs (warehouse name etc.) in off-printer previews.
+                "/System/Library/Fonts/STHeiti Medium.ttc",
+                "/System/Library/Fonts/Hiragino Sans GB.ttc",
                 "/System/Library/Fonts/PingFang.ttc",
                 "/System/Library/Fonts/Helvetica.ttc",
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -381,6 +385,8 @@ def _load_bold_text_font(font_path: str | None, size_px: int, *, bold: bool = Fa
                 "C:/Windows/Fonts/msyh.ttc",   # Microsoft YaHei Regular
                 "C:/Windows/Fonts/msyh.ttf",
                 "C:/Windows/Fonts/arial.ttf",  # Arial Regular
+                "/System/Library/Fonts/STHeiti Light.ttc",
+                "/System/Library/Fonts/Hiragino Sans GB.ttc",
                 "/System/Library/Fonts/PingFang.ttc",
                 "/System/Library/Fonts/Helvetica.ttc",
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -599,6 +605,290 @@ def build_nameplate_zpl(
     parts.append(f"^PQ{max(1, int(quantity))},0,1,Y")
     parts.append("^XZ")
 
+    return ("\n".join(parts) + "\n").encode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# 模版六 周转箱标贴 (turnover-box / carton label) — 102×152mm, ZD888 ZPL.
+# One label per box of 4 machines (printed in 2 copies). Layout per spec page 06:
+#   PID (=P/N) big, QR top-right, QTY 4 PCS, PO, production date, a 2×2 grid of
+#   four Code-128 SN barcodes, the receiving warehouse, and a remarks line.
+# The QR payload is  SN*{PID}*{QTY}*{PO}*{DATE}*{seq}  — it does NOT contain the
+# serial numbers (those live only in the four Code-128 barcodes). {seq} is a
+# per-day running counter ("一天出了多少张单"), 3-digit zero-padded, reset daily.
+# ---------------------------------------------------------------------------
+CARTON_WIDTH_MM = 102.0
+CARTON_HEIGHT_MM = 152.0
+CARTON_DPI = 203
+CARTON_QTY = 4                       # machines per box (fixed per spec)
+CARTON_SN_COUNT = 4
+CARTON_QR_MM = 20.0
+CARTON_PO_DEFAULT = "XXXXXXXXXXX"    # 11-X placeholder until real POs are wired
+CARTON_WAREHOUSE_DEFAULT = "收料仓"
+CARTON_REMARK_LABEL = "备注:"
+# Operators paste 4 SNs into the SN box separated by any of these (EN/CN comma,
+# EN/CN semicolon) or whitespace.
+CARTON_SN_SEPARATORS = ",;，；、 \t\r\n"
+
+
+def carton_qr_payload(
+    pid: str, po: str, prod_date: str, seq: int, *, qty: int = CARTON_QTY
+) -> str:
+    """QR data string for 模版六: ``SN*{PID}*{QTY}*{PO}*{DATE}*{seq:03d}``.
+
+    Note ``SN`` here is a literal tag, not a serial number — the QR carries no
+    serials. ``seq`` is the day's running count, zero-padded to 3 digits.
+    """
+    return f"SN*{pid}*{int(qty)}*{po}*{prod_date}*{int(seq):03d}"
+
+
+def split_carton_sns(raw: str) -> list[str]:
+    """Split a free-form SN string (EN/CN comma/semicolon/whitespace) into a
+    normalized, de-duplicated list, order preserved."""
+    import re
+
+    out: list[str] = []
+    for tok in re.split(f"[{re.escape(CARTON_SN_SEPARATORS)}]+", str(raw or "")):
+        sn = normalize_sn(tok)
+        if sn and sn not in out:
+            out.append(sn)
+    return out
+
+
+def _carton_state_paths(data_dir):
+    """Return (seq_file, log_file) under ``data_dir``, creating the dir."""
+    d = Path(data_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "carton_seq.json", d / "carton_log.jsonl"
+
+
+def peek_carton_seq(data_dir, *, today: str | None = None) -> int:
+    """Return what the next turnover-box seq would be today (1-based) without
+    committing it. Resets when the local date rolls over."""
+    import json
+    from datetime import date
+
+    today = today or date.today().isoformat()
+    seq_path, _ = _carton_state_paths(data_dir)
+    try:
+        st = json.loads(seq_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        st = {}
+    base = int(st.get("count", 0)) if st.get("date") == today else 0
+    return base + 1
+
+
+def commit_carton_print(data_dir, record: dict, *, today: str | None = None) -> int:
+    """Bump and persist today's count, append a台账 line to the log, return the
+    committed seq. Call this only after a successful print so failures don't
+    burn a number."""
+    import json
+    from datetime import date, datetime
+
+    today = today or date.today().isoformat()
+    seq_path, log_path = _carton_state_paths(data_dir)
+    try:
+        st = json.loads(seq_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        st = {}
+    count = int(st.get("count", 0)) if st.get("date") == today else 0
+    count += 1
+    seq_path.write_text(
+        json.dumps({"date": today, "count": count}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    rec = {
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "date": today,
+        "seq": count,
+        **record,
+    }
+    with open(log_path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    return count
+
+
+def build_turnover_box_zpl(
+    model_key: str | None,
+    grade: str | None,
+    sns: list[str],
+    *,
+    seq: int,
+    pid: str | None = None,
+    po: str | None = None,
+    prod_date: str | None = None,
+    warehouse: str | None = None,
+    dpi: int = CARTON_DPI,
+    quantity: int = 2,
+    darkness: int | None = None,
+) -> bytes:
+    """Generate ZPL for the 模版六 周转箱 (turnover-box) label, 102×152mm.
+
+    ``pid`` defaults to ``lookup_pn(model_key, grade)`` so the PID, the QR and
+    the model never drift; ``po`` / ``prod_date`` / ``warehouse`` default to the
+    11-X placeholder, today, and 收料仓. ``seq`` is the day's running count
+    (the caller obtains it via :func:`peek_carton_seq` and persists it with
+    :func:`commit_carton_print` only after a successful print).
+    """
+    from datetime import date
+
+    sns = [normalize_sn(s) for s in (sns or []) if normalize_sn(s)]
+    if len(sns) != CARTON_SN_COUNT:
+        raise ValueError(
+            f"turnover box label needs exactly {CARTON_SN_COUNT} SNs; got {len(sns)}"
+        )
+    pid = (pid or lookup_pn(model_key, grade) or "").strip()
+    if not pid:
+        raise ValueError(
+            f"could not resolve PID/PN for model={model_key!r} grade={grade!r}"
+        )
+    po = (po if po is not None else CARTON_PO_DEFAULT).strip() or CARTON_PO_DEFAULT
+    prod_date = prod_date or date.today().isoformat()
+    warehouse = (warehouse or CARTON_WAREHOUSE_DEFAULT).strip() or CARTON_WAREHOUSE_DEFAULT
+    payload = carton_qr_payload(pid, po, prod_date, seq)
+
+    def mm(v: float) -> int:
+        return _mm_to_dots(v, dpi)
+
+    label_w = mm(CARTON_WIDTH_MM)
+    label_h = mm(CARTON_HEIGHT_MM)
+
+    parts: list[str] = [
+        "^XA",
+        "^CI28",
+        f"^PW{label_w}",
+        f"^LL{label_h}",
+        "^LH0,0",
+        "^LS0",
+        "^PON",
+    ]
+    if darkness is not None:
+        parts.append(f"~SD{max(0, min(30, int(darkness))):02d}")
+
+    # --- table geometry (mm), measured from BarTender's official render ------
+    L, R = 5.0, 97.0
+    y_top = 1.8
+    y_pid_qty = 24.9      # PID | QTY
+    y_qty_po = 50.1       # QTY | PO  (also QR cell bottom)
+    y_po_date = 60.6      # PO | DATE   (PO/DATE are thin rows)
+    y_date_sn = 71.1      # DATE | SN
+    y_sn_wh = 106.7       # SN | 收料仓  (SN block is one open cell — no inner grid)
+    y_wh_rm = 123.5       # 收料仓 | 备注
+    y_bottom = 148.1      # 备注 is a tall row
+    x_qr_split = 60.0     # PID/QTY block | QR cell
+    x_mid = (L + R) / 2.0
+    sn_row_mid = (y_date_sn + y_sn_wh) / 2.0
+    th_frame = max(8, mm(1.3))      # bold outer frame
+    th = max(6, mm(0.9))            # internal dividers: slightly thinner than the frame
+
+    def hline(y: float) -> None:
+        parts.append(f"^FO{mm(L)},{mm(y)}^GB{mm(R - L)},{th},{th}^FS")
+
+    def place(img, x: int, y: int) -> None:
+        parts.append(_image_to_gfa(img, max(0, int(x)), max(0, int(y))))
+
+    def row_label_value(label, value, y1, y2, label_h_mm, value_h_mm, suffix=None):
+        # Vertically center the small label and the larger value on the row's
+        # mid-line, flush left (matches the BarTender original).
+        lab = _render_text_image(label, mm(label_h_mm), bold=True)
+        val = _render_text_image(str(value), mm(value_h_mm), bold=True)
+        cy = mm((y1 + y2) / 2.0)
+        x = mm(L) + mm(3.0)
+        place(lab, x, cy - lab.height // 2)
+        x += lab.width + mm(2.5)
+        place(val, x, cy - val.height // 2)
+        if suffix:
+            suf = _render_text_image(suffix, mm(label_h_mm), bold=True)
+            place(suf, x + val.width + mm(2.0), cy - suf.height // 2)
+
+    # bold outer frame
+    parts.append(
+        f"^FO{mm(L)},{mm(y_top)}^GB{mm(R - L)},{mm(y_bottom - y_top)},{th_frame}^FS"
+    )
+    # full-width horizontal dividers (from QTY|PO downward)
+    for y in (y_qty_po, y_po_date, y_date_sn, y_sn_wh, y_wh_rm):
+        hline(y)
+    # PID|QTY divider spans ONLY the left block — the QR is one tall open cell,
+    # so this line must NOT cross into it (that was the stray box under the QR).
+    parts.append(
+        f"^FO{mm(L)},{mm(y_pid_qty)}^GB{mm(x_qr_split - L)},{th},{th}^FS"
+    )
+    # vertical divider: PID/QTY block | QR cell
+    parts.append(
+        f"^FO{mm(x_qr_split)},{mm(y_top)}^GB{th},{mm(y_qty_po - y_top)},{th}^FS"
+    )
+
+    # --- PID / QTY / PO / DATE rows -----------------------------------------
+    row_label_value("PID:", pid, y_top, y_pid_qty, 5.5, 9.0)
+    row_label_value("QTY:", CARTON_QTY, y_pid_qty, y_qty_po, 5.5, 9.0, suffix="PCS")
+    row_label_value("PO:", po, y_qty_po, y_po_date, 5.0, 6.0)
+    row_label_value("DATE:", prod_date, y_po_date, y_date_sn, 5.0, 6.0)
+
+    # --- QR (top-right, one open cell) + wrapped payload text under it -------
+    qr_cell_w = mm(R - x_qr_split)
+    qr_mag = 8                                       # QR magnification (~29mm)
+    # The fixed 37-char payload encodes to a version-3 (29-module) QR; use that
+    # exact width so the symbol centers in its cell.
+    qr_px = 29 * qr_mag
+    qr_x = mm(x_qr_split) + max(0, (qr_cell_w - qr_px) // 2)
+    qr_y = mm(y_top) + mm(3.0)
+    parts.extend(
+        [
+            f"^FO{qr_x},{qr_y}",
+            f"^BQN,2,{qr_mag},Q,7",
+            f"^FDQA,{payload}^FS",
+        ]
+    )
+    # human-readable payload under the QR — bigger, wrapped to fit the cell width
+    ds_h = max(16, mm(2.4))
+    ds_max_w = qr_cell_w - mm(3.0)
+    probe = _render_text_image(payload, ds_h, bold=False)
+    if probe.width <= ds_max_w:
+        ds_lines = [payload]
+    else:
+        n_lines = (probe.width + ds_max_w - 1) // ds_max_w
+        per = (len(payload) + n_lines - 1) // n_lines
+        ds_lines = [payload[i:i + per] for i in range(0, len(payload), per)]
+    ty = qr_y + qr_px + mm(2.0)
+    for ln in ds_lines:
+        li = _render_text_image(ln, ds_h, bold=False)
+        place(li, mm(x_qr_split) + max(0, (qr_cell_w - li.width) // 2), ty)
+        ty += li.height + mm(0.4)
+
+    # --- four Code-128 SN barcodes (open 2×2, no internal grid) -------------
+    bar_w = mm(33.0)                # slightly narrower (per feedback)
+    bar_h = mm(9.0)                 # slightly taller (per feedback)
+    sn_text_h = max(13, mm(2.0))
+    sn_cells = [
+        (L, x_mid, y_date_sn, sn_row_mid),
+        (x_mid, R, y_date_sn, sn_row_mid),
+        (L, x_mid, sn_row_mid, y_sn_wh),
+        (x_mid, R, sn_row_mid, y_sn_wh),
+    ]
+    for sn, (cx1, cx2, cy1, cy2) in zip(sns, sn_cells):
+        center_x = mm((cx1 + cx2) / 2.0)
+        bx = center_x - bar_w // 2
+        by = mm(cy1) + mm(2.0)
+        parts.append(
+            _render_barcode_gfa(
+                sn, origin_x=bx, origin_y=by, target_w_dots=bar_w, target_h_dots=bar_h
+            )
+        )
+        txt = _render_text_image(f"S/N: {sn}", sn_text_h, bold=False)
+        place(txt, center_x - txt.width // 2, by + bar_h + mm(0.6))
+
+    # --- warehouse (centered) + remarks (centered, near top of the tall row) -
+    wh_img = _render_text_image(warehouse, mm(7.0), bold=True)
+    place(
+        wh_img,
+        mm(x_mid) - wh_img.width // 2,
+        mm((y_sn_wh + y_wh_rm) / 2.0) - wh_img.height // 2,
+    )
+    rm_img = _render_text_image(CARTON_REMARK_LABEL, mm(5.0), bold=True)
+    place(rm_img, mm(x_mid) - rm_img.width // 2, mm(y_wh_rm) + mm(3.5))
+
+    parts.append(f"^PQ{max(1, int(quantity))},0,1,Y")
+    parts.append("^XZ")
     return ("\n".join(parts) + "\n").encode("utf-8")
 
 

@@ -16,6 +16,20 @@ import yaml
 DEFAULT_SELECTED_MATERIAL_GROUPS = {"补充包材", "补充配件"}
 
 
+def _hidden_process_kwargs() -> dict:
+    # Without these flags every `subprocess.run(...)` in a PyInstaller --windowed exe pops a fresh cmd window on Windows.
+    if not sys.platform.startswith("win"):
+        return {}
+    kwargs: dict = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+    startupinfo_factory = getattr(subprocess, "STARTUPINFO", None)
+    if startupinfo_factory is not None:
+        startupinfo = startupinfo_factory()
+        startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+        startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+        kwargs["startupinfo"] = startupinfo
+    return kwargs
+
+
 class FormEntryError(RuntimeError):
     pass
 
@@ -212,7 +226,7 @@ def _run_autoupdate_bridge(payload: dict[str, Any]) -> dict[str, Any]:
     if getattr(sys, "frozen", False):
         python = os.environ.get("UGREEN_AUTOUPDATE_PYTHON") or "python"
     cmd = [python, "-m", "automation.runner", "submit-report", "--payload", str(payload_path)]
-    result = subprocess.run(cmd, cwd=root, text=True, capture_output=True, timeout=300)
+    result = subprocess.run(cmd, cwd=root, text=True, capture_output=True, timeout=300, **_hidden_process_kwargs())
     if result.returncode != 0:
         raise FormEntryError((result.stderr or result.stdout or "自动录表系统调用失败").strip())
     text = (result.stdout or "").strip().splitlines()[-1]
@@ -273,6 +287,7 @@ def sync_autoupdate_repo(project_root: Path | None = None) -> dict[str, Any]:
             text=True,
             capture_output=True,
             timeout=30,
+            **_hidden_process_kwargs(),
         )
 
     try:
@@ -328,7 +343,7 @@ def refresh_form_materials(project_root: Path | None = None, account_name: str |
     cmd = [python, "-m", "automation.runner", "forms", "refresh"]
     if account_name:
         cmd.extend(["--account", account_name])
-    result = subprocess.run(cmd, cwd=root, text=True, capture_output=True, timeout=180)
+    result = subprocess.run(cmd, cwd=root, text=True, capture_output=True, timeout=180, **_hidden_process_kwargs())
     if result.returncode != 0:
         raise FormEntryError((result.stderr or result.stdout or "鑷姩褰曡〃鐗╂枡鍒锋柊澶辫触").strip())
     text = (result.stdout or "").strip().splitlines()[-1]

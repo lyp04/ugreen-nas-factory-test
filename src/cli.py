@@ -75,7 +75,9 @@ FORM_MISSING_ACCESSORY_STAGE = "未上传：缺少配件照片"
 FAN_RPM_FAILURE_STAGE = "风扇转速异常"
 FAN_RPM_KEYS = ("resource_monitor", "fan_normal", "fan_silent", "fan_full_speed")
 CPU_TEMP_FAILURE_STAGE = "CPU 温度过高"
-CPU_TEMP_KEYS = ("resource_monitor", "fan_normal", "fan_silent", "fan_full_speed")
+# resource_monitor 在 4 个 SMB 传输测试之后立即抓，是满载尾巴的瞬时温度——会偏高但不代表散热坏。
+# 只看 3 个风扇模式页（各 wait 12s 进入稳态）。风扇全速若还压不下来，才是真的散热故障。
+CPU_TEMP_KEYS = ("fan_normal", "fan_silent", "fan_full_speed")
 DEFAULT_CPU_TEMP_MAX_C = 60.0
 NUMBER_RE = re.compile(r"[-+]?(?:\d+(?:,\d{3})+|\d+)(?:\.\d+)?")
 POOL_CREATION_ERROR_MARKERS = (

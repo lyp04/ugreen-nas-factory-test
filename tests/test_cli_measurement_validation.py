@@ -45,6 +45,18 @@ def test_cpu_temp_over_threshold_fails() -> None:
     assert "62℃" in stage and "60℃" in stage
 
 
+def test_cpu_temp_resource_monitor_is_ignored() -> None:
+    # resource_monitor 是满载尾巴的瞬时温度，不参与判定（见 6F6F 误报）。
+    cli._validate_captured_measurements(
+        {
+            "resource_monitor": {"cpu_temp": "65 °C", "device_fan_rpm": "827 转/分"},
+            "fan_normal": {"cpu_temp": "53 °C", "device_fan_rpm": "734 转/分"},
+            "fan_silent": {"cpu_temp": "53 °C", "device_fan_rpm": "440 转/分"},
+            "fan_full_speed": {"cpu_temp": "52 °C", "device_fan_rpm": "2454 转/分"},
+        }
+    )
+
+
 def test_cpu_temp_at_threshold_passes() -> None:
     cli._validate_captured_measurements(
         {

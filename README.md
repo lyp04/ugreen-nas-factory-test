@@ -18,6 +18,126 @@ Windows 桌面工具，自动化完成 UGREEN NAS 的出厂全流程测试：系
 - GUI 支持多台 NAS 排队并发测试，扫码枪扫一个排一个
 - App 自更新（从 GitHub Release 拉取新版本，SHA-256 校验后原地替换）
 
+## 标签打印功能
+
+本工具支持 4 种标签模版，覆盖从单机到整箱的全部标贴需求：
+
+| 模版 | 尺寸 | 内容 | 打印机 | 每次份数 |
+|------|------|------|--------|----------|
+| 模版二（SN 标签） | 42×25mm | Code 128 条码 + SN 文字 | Zebra ZD888 (203dpi) | 2（彩盒+中箱） |
+| 模版一（铭牌标贴） | 83.7×36.7mm | QR 码 + Code 128 + P/N + SN | Zebra ZT610 (600dpi) | 1 |
+| 模版五（69 码） | 50×30mm | EAN-13 条码 + Model + P/N 标题 | Deli DL-888T (203dpi) | 2（彩盒+中箱） |
+| 模版六（周转箱） | 102×152mm | PID + QR + 4×SN 条码 + PO + 日期 | Zebra ZD888 (203dpi) | 2 |
+
+### 触发方式
+
+- **手动打印：** GUI 选中设备 → 点击「打印标签」→ 勾选需要的模版 → 确认
+- **自动打印：** 勾选「自动打印标签」复选框后，测试通过即自动打印已勾选的模版
+- **CLI 打印：** `run-cli print-label --sn xxx`、`print-nameplate`、`print-ean13`、`print-carton`
+
+### P/N 和 EAN-13 自动查表
+
+SN 前缀自动识别机型（2800 / 4800 / 4800Plus），结合 A/B 等级从内置查表得到 P/N 和 EAN-13：
+
+| 机型 | 等级 | P/N | EAN-13 |
+|------|------|-----|--------|
+| DXP2800 | A | 00000 | 6900000000000 |
+| DXP2800 | B | 00001 | 6900000000001 |
+| DXP4800 | A | 00002 | 6900000000002 |
+| DXP4800 | B | 00003 | 6900000000003 |
+| DXP4800Plus | A | 00004 | 6900000000004 |
+| DXP4800Plus | B | 00005 | 6900000000005 |
+
+新机型上线时需要在 `src/utils/label.py` 的 `NAMEPLATE_PN_TABLE` 和 `NAMEPLATE_EAN13_TABLE` 字典中添加对应条目。
+
+### 周转箱标贴特殊逻辑
+
+- 必须选中恰好 4 个**同机型**的 SN 才能打印（否则按钮灰色不可选）
+- QR 码内容格式：`SN*{PID}*{QTY}*{PO}*{DATE}*{流水号}`
+- 流水号按天计数、跨天清零，存储在 `output_dir` 下的 `carton_seq.json`
+- 打印失败不会消耗序号（`peek_carton_seq` 只读，`commit_carton_print` 才提交）
+- 审计日志写入 `carton_log.jsonl`
+
+### 添加 / 更换打印机
+
+**第一步：查看当前 Windows 打印队列**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\run-cli.ps1 print-label --list-printers
+```
+
+输出示例：
+
+```
+ZDesigner ZD888-203dpi ZPL (副本 1)    driver=ZDesigner ZD888-203dpi ZPL    port=USB004
+ZDesigner ZD888-203dpi ZPL             driver=ZDesigner ZD888-203dpi ZPL    port=USB002
+ZDesigner ZT610-600dpi ZPL             driver=ZDesigner ZT610-600dpi ZPL    port=USB001
+DeliDL-888T                            driver=Deli DL-888T                  port=USB003
+```
+
+**第二步：在 `config/config.yml` 中写入精确名字**
+
+```yaml
+# SN 标签（模版二）—— 找到 USB004 上的 ZD888 副本
+label_printer:
+  name: "ZDesigner ZD888-203dpi ZPL (副本 1)"  # 必须和 --list-printers 输出完全一致
+  dpi: 203
+  quantity: 2
+  auto_print_on_pass: false
+
+# 铭牌（模版一）—— ZT610 工业机
+nameplate_printer:
+  name: "ZDesigner ZT610-600dpi ZPL"
+  dpi: 600
+  quantity: 1
+  auto_print_on_pass: false
+  qr_top_left_mm: [65.0, 5.0]       # QR 码左上角坐标（mm）
+  strip_top_left_mm: [6.0, 25.0]    # 条码带左上角坐标（mm）
+  placeholder_pn: "000000"           # 查不到 P/N 时的占位
+
+# 69 码（模版五）—— Deli 热敏机
+ean13_printer:
+  name: "DeliDL-888T"
+  dpi: 203
+  quantity: 2
+  auto_print_on_pass: false
+
+# 周转箱（模版六）—— 第二台 ZD888（不带副本后缀）
+carton_printer:
+  name: "ZDesigner ZD888-203dpi ZPL"
+  dpi: 203
+  quantity: 2
+  auto_print_on_pass: false
+  po_default: "XXXXXXXXXXX"  # PO 占位，后续接真实订单时改
+  warehouse: "收料仓"       # 收料仓名称
+```
+
+**关键注意事项：**
+
+- `name` 字段**大小写不敏感但必须精确匹配**，不做子串匹配。写错一个字符就会找不到打印机
+- 同一型号打印机如果装了多个驱动实例（如 "副本 1"、"副本 2"），必须区分清楚哪个接了哪根 USB 线
+- `dpi` 必须和打印机实际分辨率一致，否则标签会整体缩放变形
+- `auto_print_on_pass: true` 会在测试通过后立刻打印，适合流水线无人看管场景
+
+**第三步：试打验证**
+
+```powershell
+# 干跑（不发打印机），生成 PNG 预览
+powershell -ExecutionPolicy Bypass -File .\run-cli.ps1 print-label --sn TEST1234 --preview ./test.png --no-print
+
+# 实际打印一份
+powershell -ExecutionPolicy Bypass -File .\run-cli.ps1 print-label --sn TEST1234 --quantity 1
+
+# 导出 ZPL 原始指令（排查打印机不吃指令的问题）
+powershell -ExecutionPolicy Bypass -File .\run-cli.ps1 print-label --sn TEST1234 --zpl-out ./test.zpl --no-print
+```
+
+### 跨平台开发说明
+
+标签渲染（生成 ZPL/TSPL 指令 + PNG 预览）在 macOS/Linux 上也能跑，只是无法发送到 Windows 打印队列。开发调试时用 `--preview` + `--no-print` 即可在任何平台上预览效果。
+
+---
+
 ## 快速使用
 
 安装依赖：

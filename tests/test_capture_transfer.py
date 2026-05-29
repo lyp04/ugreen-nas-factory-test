@@ -385,10 +385,15 @@ def test_upload_capture_waits_for_seed_after_speed_sample_window(tmp_path, monke
 def test_transfer_capture_reports_highest_stable_threshold_sample(tmp_path, monkeypatch) -> None:
     shot = tmp_path / "speed.png"
     shot.write_bytes(b"png")
+    # Each accepted threshold capture re-reads the rate right after the screenshot
+    # (the "screenshot-moment" read), so two extra readings are needed vs. the
+    # number of loop iterations.
     texts = iter(
         [
             f"{READ_MARKER} 320 MB/s {WRITE_MARKER} 0 B/s",
             f"{READ_MARKER} 320 MB/s {WRITE_MARKER} 0 B/s",
+            f"{READ_MARKER} 320 MB/s {WRITE_MARKER} 0 B/s",
+            f"{READ_MARKER} 560 MB/s {WRITE_MARKER} 0 B/s",
             f"{READ_MARKER} 560 MB/s {WRITE_MARKER} 0 B/s",
             f"{READ_MARKER} 560 MB/s {WRITE_MARKER} 0 B/s",
         ]
@@ -423,6 +428,58 @@ def test_transfer_capture_reports_highest_stable_threshold_sample(tmp_path, monk
     assert result.reached_threshold is True
     assert result.values["rate_mbps"] == "560"
     assert result.values["speed_status"] == "ok"
+
+
+def test_transfer_capture_rejects_trough_screenshot_and_matches_value(tmp_path, monkeypatch) -> None:
+    # The screen rate is bursty: the peak (560) that triggers a capture has fallen
+    # to a trough (26.4) by the time the screenshot is grabbed. That screenshot must
+    # be rejected, and the reported value must equal the rate frozen in the screenshot
+    # that is finally kept (never the pre-screenshot peak).
+    best_shot = tmp_path / "best.png"
+    trough_shot = tmp_path / "trough.png"
+    peak_shot = tmp_path / "peak.png"
+    for path in (best_shot, trough_shot, peak_shot):
+        path.write_bytes(b"png")
+
+    texts = iter(
+        [
+            f"{READ_MARKER} 560 MB/s {WRITE_MARKER} 0 B/s",   # iter1 top: peak triggers capture
+            f"{READ_MARKER} 26.4 MB/s {WRITE_MARKER} 0 B/s",  # iter1 screenshot-moment: trough -> reject
+            f"{READ_MARKER} 560 MB/s {WRITE_MARKER} 0 B/s",   # iter2 top: peak triggers capture
+            f"{READ_MARKER} 560 MB/s {WRITE_MARKER} 0 B/s",   # iter2 screenshot-moment: peak -> accept
+        ]
+    )
+    shots = iter([best_shot, trough_shot, peak_shot])
+    process_checks = iter([False, True])
+    cfg = SmbTransferConfig(unc_share=r"\\192.168.0.168\hdd", local_dir=tmp_path)
+
+    class FakePage:
+        def wait_for_timeout(self, _ms: int) -> None:
+            return None
+
+    monkeypatch.setattr(capture, "_frame_text", lambda _frame: next(texts))
+    monkeypatch.setattr(capture, "_process_finished", lambda _proc: next(process_checks))
+    monkeypatch.setattr(capture, "dismiss_desktop_overlays", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(capture, "capture_page", lambda *_args, **_kwargs: next(shots))
+
+    result = capture._capture_transfer_attempt(
+        FakePage(),
+        object(),
+        object(),
+        cfg,
+        "SN123",
+        "hdd_read",
+        "hdd",
+        "download",
+        tmp_path,
+        {"speed_stable_samples": 1, "speed_attempt_timeout_s": 5, "speed_sample_interval_ms": 100},
+        300,
+        1,
+    )
+
+    assert result.reached_threshold is True
+    assert result.values["rate_mbps"] == "560"   # screenshot-moment value, not the discarded peak/trough
+    assert result.shot_path == peak_shot          # trough screenshot was rejected
 
 
 def test_existing_transfer_capture_requires_reported_rate_above_threshold(tmp_path) -> None:

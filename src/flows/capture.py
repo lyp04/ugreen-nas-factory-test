@@ -637,9 +637,28 @@ def _capture_transfer_attempt(
                 if stable_samples >= stable_target and (
                     threshold_sample is None or sample.rate_bytes > threshold_sample.rate_bytes
                 ):
-                    threshold_sample = sample
+                    # Disk transfer rates are bursty: the value parsed before the
+                    # screenshot can be a peak while the screenshot itself is grabbed
+                    # a refresh later in a trough (observed 344.8 recorded vs 26.4
+                    # shown). Take the screenshot first, then re-read the rate from
+                    # that same display state, and only accept it when the rate frozen
+                    # in the screenshot is itself >= threshold. The reported value is
+                    # the re-read rate, so it always equals the number in the image.
                     dismiss_desktop_overlays(page, max_rounds=2, completion_wait_ms=0)
-                    threshold_sample_shot = capture_page(page, sn, page_key, screenshots_dir)
+                    shot = capture_page(page, sn, page_key, screenshots_dir)
+                    shot_sample = _transfer_speed_sample(_frame_text(frame), share, direction)
+                    if (
+                        shot_sample is not None
+                        and shot_sample.rate_bytes >= threshold_bytes
+                        and (
+                            threshold_sample is None
+                            or shot_sample.rate_bytes > threshold_sample.rate_bytes
+                        )
+                    ):
+                        threshold_sample = shot_sample
+                        threshold_sample_shot = shot
+                    else:
+                        stable_samples = 0
             else:
                 stable_samples = 0
 

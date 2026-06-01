@@ -158,3 +158,32 @@ def test_cpu_temp_failing_pages_helper() -> None:
     )
     assert set(pages) == {"fan_full_speed"}
     assert pages["fan_full_speed"] == 72.0
+
+
+def test_classify_failure_category_hardware_buckets() -> None:
+    # 四类硬件检测各归各位——这些不触发自动故障上报。
+    assert cli.classify_failure_category("风扇转速异常: 风扇标准模式 风扇转速 0，必须大于 0") == "fan_rpm"
+    assert cli.classify_failure_category("CPU 温度过高: 风扇全速模式 CPU 温度 75℃ > 70℃") == "cpu_temp"
+    assert (
+        cli.classify_failure_category("Storage pool summary did not appear in time after creation")
+        == "storage_pool"
+    )
+    assert cli.classify_failure_category("Capture failed at page 'hdd_write': 80 MB/s < 100 MB/s") == "rw_speed"
+    assert cli.classify_failure_category("Capture failed at page 'ssd_read' timed out") == "rw_speed"
+
+
+def test_classify_failure_category_operator_conditions() -> None:
+    # operator 可自行处理的已知条件不当作需要排障的「故障」，不上报。
+    assert cli.classify_failure_category("请先解绑SN，SN未解绑") == "operator"
+    assert cli.classify_failure_category("this account already has a submitted record for this form") == "operator"
+
+
+def test_classify_failure_category_other_triggers_report() -> None:
+    # 非四类硬件、非 operator 条件 → other（唯一会触发自动上报的桶）。
+    assert (
+        cli.classify_failure_category("UGOS at 192.168.0.50:9999 did not become ready within 90s")
+        == "other"
+    )
+    assert cli.classify_failure_category("测试失败 something totally unexpected") == "other"
+    # 非传输页的截图失败仍属未分类（不是读写速度）。
+    assert cli.classify_failure_category("Capture failed at page 'storage_pool'") == "other"

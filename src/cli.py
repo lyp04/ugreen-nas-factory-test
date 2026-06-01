@@ -32,6 +32,7 @@ from .utils.desktop import dismiss_desktop_overlays
 from .utils import label as label_util
 from .utils.logger import logger, setup_logger
 from .utils.screenshot import capture_failure, relocate_session_dirs, session_dirs
+from .report import reporter as fault_reporter
 from .utils.sn import (
     SN_TAIL_LENGTH,
     extract_full_sn,
@@ -331,6 +332,63 @@ def _pool_failure_stage(message: str) -> str:
     if "did not expose any unused healthy disks" in message:
         return "建池失败：无可用未使用盘"
     return POOL_CREATION_FAILURE_STAGE
+
+
+# 自动故障上报用的粗分类。只有 "other"（不属于这四类硬件检测、且非 operator 可自行处理的
+# 已知条件）才会触发 GitHub Issue 自动上报；其余各类各有专门提示/判定，不重复上报。
+def classify_failure_category(exc_or_message: object) -> str:
+    message = str(exc_or_message)
+    if FAN_RPM_FAILURE_STAGE in message:
+        return "fan_rpm"
+    if CPU_TEMP_FAILURE_STAGE in message:
+        return "cpu_temp"
+    if is_pool_creation_timeout_error(message):
+        return "storage_pool"
+    capture_match = re.search(r"Capture failed at page '([A-Za-z0-9_]+)'", message)
+    if capture_match and capture_match.group(1) in ("hdd_write", "hdd_read", "ssd_write", "ssd_read"):
+        return "rw_speed"
+    if re.search(r"\d+(?:\.\d+)?\s*MB/s\s*<\s*\d+(?:\.\d+)?\s*MB/s", message):
+        return "rw_speed"
+    # operator 可自行处理的已知条件：不当作需要排障的「故障」，不上报。
+    if is_unflashed_password_error(message):
+        return "operator"
+    if "SN未解绑" in message or "请先解绑SN" in message:
+        return "operator"
+    if "already has a submitted record for this form" in message:
+        return "operator"
+    if FORM_MISSING_ACCESSORY_STAGE in message:
+        return "operator"
+    return "other"
+
+
+def _maybe_autoreport_failure(config: dict, report: dict, dirs: dict, output_root: Path) -> None:
+    """run_test 收尾时调用：仅当本次为「失败 + 未分类(other)」才异步上报。永不抛异常。"""
+    try:
+        if report.get("status") != "failed":
+            return
+        message = str(report.get("error") or "")
+        if classify_failure_category(message) != "other":
+            return
+        fault_cfg = config.get("fault_report") or {}
+        if not fault_cfg.get("enabled", True):
+            return
+        secrets = [
+            str((config.get("admin") or {}).get("password") or ""),
+            str(fault_cfg.get("token") or ""),
+        ]
+        fault_reporter.report_failure(
+            fault_cfg,
+            output_root,
+            sn=str(report.get("sn") or ""),
+            sn_dir=dirs.get("base"),
+            model=report.get("form_model"),
+            category="other",
+            stage=str(report.get("current_stage") or "测试失败"),
+            message=message,
+            secrets=secrets,
+        )
+    except Exception:
+        pass
 
 
 class TaskProgress:
@@ -852,6 +910,7 @@ def run_test(
                 logger.info(f"NAS {ip}: device lock released")
                 device_lock.release()
             _release_reserved_ips(reserved_ips)
+            _maybe_autoreport_failure(config, report, dirs, output_root)
 
     logger.info(f"Test complete for {sn}")
     return report

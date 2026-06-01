@@ -44,6 +44,12 @@ Write-Host "== 构建 EXE ==" -ForegroundColor Cyan
     --hidden-import "PIL.ImageChops" `
     --hidden-import "win32print" `
     --hidden-import "src.cli" `
+    --hidden-import "src.report" `
+    --hidden-import "src.report.reporter" `
+    --hidden-import "src.report.github_issues" `
+    --hidden-import "src.report.collector" `
+    --hidden-import "src.report.fingerprint" `
+    --hidden-import "src.report.redact" `
     --hidden-import "src.gui" `
     --hidden-import "src.updater" `
     --hidden-import "src.version" `

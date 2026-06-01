@@ -87,6 +87,7 @@ jobs:
               "tests/test_ugreen_broadcast.py",
               "tests/test_screenshot_utils.py",
               "tests/test_form_entry_materials.py",
+              "tests/test_fault_report.py",
               "tests/test_print_labels.py"
           ) | Where-Object { Test-Path $_ }
           python -m pytest @tests -v

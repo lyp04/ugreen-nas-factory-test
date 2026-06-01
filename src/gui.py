@@ -33,7 +33,6 @@ if __package__ in {None, ""}:
         get_project_root,
         is_pool_creation_timeout_error,
         is_unflashed_password_error,
-        run_smoke,
         run_test,
     )
     from src.discovery import ugreen_broadcast
@@ -60,7 +59,6 @@ else:
         get_project_root,
         is_pool_creation_timeout_error,
         is_unflashed_password_error,
-        run_smoke,
         run_test,
     )
     from .discovery import ugreen_broadcast
@@ -717,7 +715,6 @@ class FactoryTestGUI:
         self.ui_queue: queue.Queue[dict] = queue.Queue()
         self.devices: dict[str, DeviceTask] = {}
         self.workers: dict[str, threading.Thread] = {}
-        self.smoke_worker: threading.Thread | None = None
         self.task_counter = 0
         self.selected_task_id: str | None = None
         self.selected_task_ids: list[str] = []
@@ -1861,8 +1858,6 @@ class FactoryTestGUI:
             self.workers.pop(str(event.get("task_id")), None)
             self._refresh_summary()
             self._refresh_action_states()
-        elif event_type == "smoke_done":
-            self._finish_smoke(event)
         elif event_type == "auto_scan_done":
             self._finish_auto_scan(event)
         elif event_type == "form_material_refresh":
@@ -4588,45 +4583,6 @@ class FactoryTestGUI:
             self.status_var.set(f"{datetime.now().strftime('%H:%M:%S')}  已显示 {task.sn} 的浏览器窗口")
         else:
             messagebox.showwarning("显示失败", "未找到该设备对应的浏览器窗口，可能已经结束")
-
-    def _on_smoke(self) -> None:
-        if self._active_task_count() > 0:
-            messagebox.showwarning("任务进行中", "当前有设备正在测试，请先等待设备队列空闲")
-            return
-
-        if self.smoke_worker and self.smoke_worker.is_alive():
-            messagebox.showwarning("任务进行中", "当前已有冒烟检查在运行")
-            return
-
-        if not self.manual_ip_var.get().strip():
-            messagebox.showwarning("需要 IP", "冒烟检查需要手动填写 NAS IP")
-            return
-
-        nas_ip = self.manual_ip_var.get().strip()
-        self.status_var.set(f"{datetime.now().strftime('%H:%M:%S')}  冒烟检查中 {nas_ip}")
-
-        def worker() -> None:
-            try:
-                result = run_smoke(nas_ip, setup_file_log=False)
-                summary = f"选择器命中 {result['hits']}/{result['total']}，未填写 TODO {len(result['todos'])}"
-                self.ui_queue.put({"type": "smoke_done", "success": True, "message": summary})
-            except Exception as exc:
-                self.ui_queue.put({"type": "smoke_done", "success": False, "message": str(exc)})
-
-        self.smoke_worker = threading.Thread(target=worker, daemon=True)
-        self.smoke_worker.start()
-        self._refresh_action_states()
-
-    def _finish_smoke(self, event: dict) -> None:
-        success = bool(event.get("success"))
-        message = str(event.get("message") or "")
-        if success:
-            self.status_var.set(f"{datetime.now().strftime('%H:%M:%S')}  {message}")
-            messagebox.showinfo("冒烟检查完成", message)
-        else:
-            self.status_var.set(f"{datetime.now().strftime('%H:%M:%S')}  冒烟检查失败")
-            messagebox.showerror("冒烟检查失败", message)
-        self._refresh_action_states()
 
     def _remove_current_task(self) -> None:
         task = self._selected_task()

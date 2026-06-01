@@ -2,7 +2,6 @@
 # Run CLI (useful for scripted/batch testing or debugging).
 # Examples:
 #   powershell -ExecutionPolicy Bypass -File .\run-cli.ps1 test --sn SN123 --nas-ip auto
-#   powershell -ExecutionPolicy Bypass -File .\run-cli.ps1 smoke --nas-ip 192.168.1.100
 
 $ErrorActionPreference = 'Stop'
 Set-Location -Path $PSScriptRoot

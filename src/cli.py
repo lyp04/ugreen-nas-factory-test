@@ -74,11 +74,13 @@ PAGE_LABELS = {
 FORM_MISSING_ACCESSORY_STAGE = "未上传：缺少配件照片"
 FAN_RPM_FAILURE_STAGE = "风扇转速异常"
 FAN_RPM_KEYS = ("resource_monitor", "fan_normal", "fan_silent", "fan_full_speed")
+# 安静（静音）模式下风扇可以完全停转——0 转速属正常工况，不当作故障；其余模式仍要求 > 0。
+FAN_RPM_ZERO_OK_KEYS = frozenset({"fan_silent"})
 CPU_TEMP_FAILURE_STAGE = "CPU 温度过高"
 # resource_monitor 在 4 个 SMB 传输测试之后立即抓，是满载尾巴的瞬时温度——会偏高但不代表散热坏。
 # 只看 3 个风扇模式页（各 wait 12s 进入稳态）。风扇全速若还压不下来，才是真的散热故障。
 CPU_TEMP_KEYS = ("fan_normal", "fan_silent", "fan_full_speed")
-DEFAULT_CPU_TEMP_MAX_C = 60.0
+DEFAULT_CPU_TEMP_MAX_C = 70.0
 NUMBER_RE = re.compile(r"[-+]?(?:\d+(?:,\d{3})+|\d+)(?:\.\d+)?")
 POOL_CREATION_ERROR_MARKERS = (
     "Storage pool summary did not appear in time after creation",
@@ -201,7 +203,7 @@ def _fan_rpm_failures(captured_values: dict) -> list[str]:
         label = _page_label(page_key)
         if rpm is None:
             failures.append(f"{label} 未读取到风扇转速")
-        elif rpm <= 0:
+        elif rpm <= 0 and page_key not in FAN_RPM_ZERO_OK_KEYS:
             failures.append(f"{label} 风扇转速 {raw}，必须大于 0")
     return failures
 
@@ -892,49 +894,6 @@ def run_cleanup(sn: str, nas_ip: str = "auto", setup_file_log: bool = True) -> d
     return report
 
 
-def run_smoke(nas_ip: str, setup_file_log: bool = True) -> dict:
-    config, selectors = load_configs(PROJECT_ROOT)
-    output_root = (PROJECT_ROOT / config["output_dir"]).resolve()
-    smoke_dirs = session_dirs(output_root, "_smoke")
-    if setup_file_log:
-        setup_logger(smoke_dirs["sn_root"], sn="_smoke")
-
-    unresolved = _find_todo_selectors(selectors)
-    if unresolved:
-        logger.warning(f"{len(unresolved)} selectors are still TODO:")
-        for path in unresolved:
-            logger.warning(f"  - {path}")
-    else:
-        logger.info("All selectors in selectors.yml are filled in")
-
-    port = config["network"]["ugos_http_port"]
-    nas_url = f"http://{nas_ip}:{port}"
-
-    with sync_playwright() as pw:
-        browser_session = launch_managed_context(pw, config["browser"], "_smoke")
-        context = browser_session.context
-        page = browser_session.page
-        page.set_default_timeout(5000)
-
-        try:
-            page.goto(nas_url, wait_until="domcontentloaded")
-            results = _probe_selectors(page, selectors)
-            hit = sum(1 for v in results.values() if v)
-            total = len(results)
-            logger.info(f"Selector probe: {hit}/{total} visible")
-            for key, visible in results.items():
-                logger.info(f"  {'OK  ' if visible else 'MISS'}  {key}")
-        finally:
-            close_managed_context(browser_session)
-
-    return {
-        "todos": unresolved,
-        "hits": hit,
-        "total": total,
-        "missing": [k for k, v in results.items() if not v],
-    }
-
-
 def _resolve_ip(nas_ip: str, config: dict) -> str:
     if nas_ip and nas_ip.lower() != "auto":
         return nas_ip
@@ -1433,33 +1392,6 @@ def _device_lock_for_ip(ip: str) -> threading.Lock:
         return lock
 
 
-def _find_todo_selectors(selectors: dict, prefix: str = "") -> list[str]:
-    todos: list[str] = []
-    for key, value in selectors.items():
-        path = f"{prefix}.{key}" if prefix else key
-        if isinstance(value, dict):
-            todos.extend(_find_todo_selectors(value, path))
-        elif isinstance(value, str) and value == "TODO":
-            todos.append(path)
-    return todos
-
-
-def _probe_selectors(page, selectors: dict, prefix: str = "") -> dict[str, bool]:
-    results: dict[str, bool] = {}
-    for key, value in selectors.items():
-        path = f"{prefix}.{key}" if prefix else key
-        if isinstance(value, dict):
-            results.update(_probe_selectors(page, value, path))
-        elif path.endswith(".app"):
-            continue
-        elif isinstance(value, str) and value and value != "TODO":
-            try:
-                results[path] = page.locator(value).first.is_visible(timeout=2000)
-            except Exception:
-                results[path] = False
-    return results
-
-
 def _handle_capture_progress(
     progress: TaskProgress,
     event: dict,
@@ -1538,12 +1470,6 @@ def test(
 @click.option("--nas-ip", default="auto", help="NAS IP, or 'auto' to discover via mDNS/port scan")
 def cleanup(sn: str, nas_ip: str) -> None:
     run_cleanup(sn, nas_ip)
-
-
-@cli.command()
-@click.option("--nas-ip", required=True, help="NAS IP to probe")
-def smoke(nas_ip: str) -> None:
-    run_smoke(nas_ip)
 
 
 def _load_label_config() -> dict:

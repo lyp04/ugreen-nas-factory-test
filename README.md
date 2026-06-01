@@ -12,7 +12,7 @@ Windows 桌面工具，自动化完成 UGREEN NAS 的出厂全流程测试：系
 - 浏览器自动驾驶 UGOS 管理页面（Playwright + Edge），完成向导 → 登录 → 固件更新 → 建池建共享
 - SMB 传输测速（上传 + 下载），抓取 Windows 任务管理器实时速率截图，低于阈值自动判定失败
 - 逐页截图采集（系统更新、网口、存储池、读写速率、资源监控、风扇模式），绑定 CPU 温度 / 风扇转速等指标
-- CPU 温度超限（> 60 ℃）全机型自动判定测试失败
+- CPU 温度超限（> 70 ℃）全机型自动判定测试失败（风扇安静模式转速可为 0，不判失败）
 - 标签打印：SN 条码标签（模版二）、铭牌标贴（模版一）、69 码 EAN-13（模版五）、周转箱标贴（模版六）
 - 测试通过后自动录表到 内部系统（通过 `ugreen-nas-autoupdate` 桥接）
 - GUI 支持多台 NAS 排队并发测试，扫码枪扫一个排一个
@@ -161,9 +161,6 @@ powershell -ExecutionPolicy Bypass -File .\run-cli.ps1 test --sn SN123 --nas-ip 
 # 仅清理存储池
 powershell -ExecutionPolicy Bypass -File .\run-cli.ps1 cleanup --sn SN123 --nas-ip auto
 
-# 连通性检查
-powershell -ExecutionPolicy Bypass -File .\run-cli.ps1 smoke --nas-ip 192.168.0.100
-
 # 打印 SN 标签（模版二）
 powershell -ExecutionPolicy Bypass -File .\run-cli.ps1 print-label --sn SN123
 
@@ -195,7 +192,7 @@ powershell -ExecutionPolicy Bypass -File .\build-exe.ps1
 | `provision.pools` | 自动建池方案（RAID 级别、磁盘选择） |
 | `transfer.source_files` | 各机型测速源文件路径（按 SN 前缀区分机型） |
 | `transfer.speed_thresholds_mb_s` | 传输速率通过阈值（MB/s），按机型可覆盖 |
-| `validation.cpu_temp_max_c` | CPU 温度上限（℃），超过即判定失败 |
+| `validation.cpu_temp_max_c` | CPU 温度上限（℃），超过即判定失败（默认 70，仅 resource_monitor 页除外） |
 | `label_printer` | SN 条码标签打印机（模版二） |
 | `nameplate_printer` | 铭牌标贴打印机（模版一） |
 | `ean13_printer` | 69 码 EAN-13 打印机（模版五） |
@@ -210,7 +207,7 @@ powershell -ExecutionPolicy Bypass -File .\build-exe.ps1
 ```
 src/
 ├── gui.py                     GUI 主窗口（Tkinter），多任务排队
-├── cli.py                     CLI 入口（Click），test / cleanup / smoke / print-*
+├── cli.py                     CLI 入口（Click），test / cleanup / print-*
 ├── form_entry.py              内部系统 自动录表桥接
 ├── updater.py                 App 自更新（GitHub Release）
 ├── version.py                 版本号

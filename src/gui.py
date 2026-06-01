@@ -422,6 +422,8 @@ UI_TEXT = {
         "materials_submission_pending": "录表未完成",
         "materials_summary_missing": "缺料 {count} 项",
         "materials_mode_fresh_full_retry": "每次重取物料，全选后反选缺料",
+        "materials_status_resubmit": "已录表",
+        "materials_summary_resubmit": "重复提交·物料以首次录表/内部系统 为准",
         "materials_col_name": "名称",
         "materials_col_code": "编码",
         "materials_col_qty": "数量",
@@ -530,6 +532,8 @@ UI_TEXT = {
         "materials_submission_pending": "Submission incomplete",
         "materials_summary_missing": "{count} out of stock",
         "materials_mode_fresh_full_retry": "Fresh material list, submit all then remove out-of-stock items",
+        "materials_status_resubmit": "Already recorded",
+        "materials_summary_resubmit": "Duplicate submission · material detail per first entry / 内部系统",
         "materials_col_name": "Name",
         "materials_col_code": "Code",
         "materials_col_qty": "Qty",
@@ -638,6 +642,8 @@ UI_TEXT = {
         "materials_submission_pending": "Envío incompleto",
         "materials_summary_missing": "{count} sin stock",
         "materials_mode_fresh_full_retry": "Lista actualizada, enviar todo y retirar faltantes",
+        "materials_status_resubmit": "Ya registrado",
+        "materials_summary_resubmit": "Reenvío duplicado · detalle según primer registro / 内部系统",
         "materials_col_name": "Nombre",
         "materials_col_code": "Código",
         "materials_col_qty": "Cantidad",
@@ -2738,6 +2744,12 @@ class FactoryTestGUI:
         removed_codes = {str(c) for c in (form_result.get("removed_material_codes") or [])}
         form_status = str(form_result.get("status") or "").lower()
         submission_complete = form_status in {"success", "already_submitted"}
+        # A duplicate-SN short-circuit (already_submitted) carries no per-item
+        # deduction detail — the real deduction happened on the first submission.
+        # Without this guard every item renders as "已扣", wrongly showing a unit
+        # that was actually short on stock as fully deducted. Fall back to a
+        # neutral "recorded" state and point the operator to 内部系统 instead.
+        resubmit_no_detail = form_status == "already_submitted" and not removed_codes
 
         self._clear_materials_tab()
         rendered_any = False
@@ -2768,10 +2780,14 @@ class FactoryTestGUI:
                 if str(item.get("code") or "") and str(item.get("code") or "") not in removed_codes
             ]
             selected_count = len(kept_codes)
-            group_tag = "group_selected" if selected_count > 0 else "group_unselected"
-            group_status = (
-                self._t("materials_status_selected") if selected_count > 0 else self._t("materials_status_unselected")
-            )
+            if resubmit_no_detail:
+                group_tag = "group_unselected"
+                group_status = self._t("materials_status_resubmit")
+            else:
+                group_tag = "group_selected" if selected_count > 0 else "group_unselected"
+                group_status = (
+                    self._t("materials_status_selected") if selected_count > 0 else self._t("materials_status_unselected")
+                )
             count_text = self._t("materials_group_count", selected=selected_count, total=total_count)
             group_node = self.materials_tree.insert(
                 "",
@@ -2789,6 +2805,9 @@ class FactoryTestGUI:
                 qty_text = str(qty) if qty not in (None, "") else ""
                 if not submission_complete:
                     item_status = self._t("materials_status_pending")
+                    item_tag = "item_pending"
+                elif resubmit_no_detail:
+                    item_status = self._t("materials_status_resubmit")
                     item_tag = "item_pending"
                 elif code and code in removed_codes:
                     item_status = self._t("materials_status_missing")
@@ -2809,7 +2828,9 @@ class FactoryTestGUI:
         grade = str(form_data.get("grade") or "").upper()
         model_label = str(form_data.get("model_label") or form_data.get("model_key") or "")
         parts = [p for p in (model_label, f"{self._t('grade')} {grade}" if grade else "") if p]
-        if str(form_result.get("material_selection_mode") or "") == "fresh_full_select_then_retry_remove_missing":
+        if resubmit_no_detail:
+            parts.append(self._t("materials_summary_resubmit"))
+        elif str(form_result.get("material_selection_mode") or "") == "fresh_full_select_then_retry_remove_missing":
             parts.append(self._t("materials_mode_fresh_full_retry"))
         if not submission_complete:
             parts.append(self._t("materials_submission_pending"))

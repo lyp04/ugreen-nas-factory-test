@@ -231,6 +231,63 @@ def test_materials_tab_shows_fresh_full_retry_mode(tmp_path) -> None:
     assert any(row["text"] == "包材 B" and "item_missing" in row["tags"] for row in gui.materials_tree.rows.values())
 
 
+def test_materials_tab_resubmit_not_shown_as_full_deduct(tmp_path) -> None:
+    # Duplicate-SN re-submission → form_result.status == "already_submitted" with
+    # no removed_material_codes. The materials tab must NOT mark every item as
+    # deducted (the old "假全扣" bug); it shows a neutral "已录表" state plus a note
+    # pointing to 内部系统, so an originally out-of-stock unit isn't misread as 全扣.
+    gui = _gui_for_output(tmp_path)
+    gui.language_var = SimpleNamespace(get=lambda: "中文")
+    gui.materials_tree = _Tree()
+    gui.materials_status_var = _Var()
+    task = DeviceTask(
+        task_id="task-1",
+        sn="HB670EE52241F8CD",
+        requested_ip="192.168.0.214",
+        mode="setup",
+        cleanup_before_finish=True,
+        factory_reset_before_finish=True,
+        auto_form_entry=True,
+    )
+    sn_root = tmp_path / task.sn
+    sn_root.mkdir()
+    (sn_root / "test_report.json").write_text(
+        json.dumps(
+            {
+                "form_data": {
+                    "model_label": "DXP2800",
+                    "grade": "B",
+                    "material_groups": [
+                        {
+                            "title": "补充包材",
+                            "items": [
+                                {"code": "MR_A", "name": "包材 A", "default_qty": 1},
+                                {"code": "MR_B", "name": "贴纸", "default_qty": 1},
+                            ],
+                        }
+                    ],
+                },
+                "form_result": {
+                    "status": "already_submitted",
+                    "existing_record_count": 1,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    gui._refresh_materials_tab(task)
+
+    summary = gui.materials_status_var.get()
+    assert "重复提交" in summary
+    assert "缺料" not in summary
+    assert "每次重取物料" not in summary
+    item_rows = [r for r in gui.materials_tree.rows.values() if r["text"] in {"包材 A", "贴纸"}]
+    assert len(item_rows) == 2
+    assert all("item_selected" not in r["tags"] for r in gui.materials_tree.rows.values())
+    assert all(r["values"][2] == "已录表" and "item_pending" in r["tags"] for r in item_rows)
+
+
 def test_failed_report_does_not_block_auto_scan(tmp_path) -> None:
     gui = _gui_for_output(tmp_path)
     sn_root = tmp_path / "HB670EE07251E54E"

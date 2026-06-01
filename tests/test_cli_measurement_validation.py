@@ -131,3 +131,30 @@ def test_cpu_temp_missing_does_not_fail() -> None:
             "fan_full_speed": {"device_fan_rpm": "2500 转/分"},
         }
     )
+
+
+def test_fan_rpm_failing_pages_helper() -> None:
+    # 界面标红与判定共用这个函数：resource_monitor 不参与、安静模式 0 豁免。
+    pages = cli.fan_rpm_failing_pages(
+        {
+            "resource_monitor": {"device_fan_rpm": "0 转/分"},
+            "fan_normal": {"device_fan_rpm": "0 转/分"},
+            "fan_silent": {"device_fan_rpm": "0 转/分"},
+            "fan_full_speed": {"device_fan_rpm": "2400 转/分"},
+        }
+    )
+    assert pages == {"fan_normal": "zero"}
+
+
+def test_cpu_temp_failing_pages_helper() -> None:
+    pages = cli.cpu_temp_failing_pages(
+        {
+            "resource_monitor": {"cpu_temp": "99 °C"},  # 不参与
+            "fan_normal": {"cpu_temp": "50 °C"},
+            "fan_silent": {"cpu_temp": "66 °C"},  # 70 阈值下通过
+            "fan_full_speed": {"cpu_temp": "72 °C"},
+        },
+        70.0,
+    )
+    assert set(pages) == {"fan_full_speed"}
+    assert pages["fan_full_speed"] == 72.0

@@ -27,9 +27,12 @@ if __package__ in {None, ""}:
         sys.path.insert(0, str(package_root))
     from src import form_entry
     from src.cli import (
+        DEFAULT_CPU_TEMP_MAX_C,
         UNFLASHED_MESSAGE,
         UNFLASHED_TITLE,
+        cpu_temp_failing_pages,
         failure_stage_for_error,
+        fan_rpm_failing_pages,
         get_project_root,
         is_pool_creation_timeout_error,
         is_unflashed_password_error,
@@ -53,9 +56,12 @@ if __package__ in {None, ""}:
 else:
     from . import form_entry
     from .cli import (
+        DEFAULT_CPU_TEMP_MAX_C,
         UNFLASHED_MESSAGE,
         UNFLASHED_TITLE,
+        cpu_temp_failing_pages,
         failure_stage_for_error,
+        fan_rpm_failing_pages,
         get_project_root,
         is_pool_creation_timeout_error,
         is_unflashed_password_error,
@@ -2523,6 +2529,29 @@ class FactoryTestGUI:
             font=("Microsoft YaHei UI", 10, "bold"),
         ).grid(row=row_index, column=1, sticky=tk.W, pady=2)
 
+    def _add_measure_row_segments(
+        self, section: ttk.LabelFrame, row_index: int, label: str, segments: list[tuple[str, str]]
+    ) -> None:
+        """Like _add_measure_row but renders the value as several independently-colored
+        pieces, so e.g. an over-limit temp can go red while the fan RPM stays normal."""
+        color_map = {"good": "#1f7a1f", "bad": "#c0392b", "muted": "#777777"}
+        ttk.Label(section, text=label, foreground="#666666").grid(
+            row=row_index, column=0, sticky=tk.W, padx=(0, 16), pady=2
+        )
+        value_frame = ttk.Frame(section)
+        value_frame.grid(row=row_index, column=1, sticky=tk.W, pady=2)
+        for i, (text, tone) in enumerate(segments):
+            if i:
+                ttk.Label(
+                    value_frame, text="   |   ", foreground="#aaaaaa",
+                    font=("Microsoft YaHei UI", 10),
+                ).pack(side=tk.LEFT)
+            ttk.Label(
+                value_frame, text=text,
+                foreground=color_map.get(tone, "#222222"),
+                font=("Microsoft YaHei UI", 10, "bold"),
+            ).pack(side=tk.LEFT)
+
     def _refresh_measurements_tab(self, task: DeviceTask) -> None:
         if self.measure_inner is None:
             return
@@ -2585,7 +2614,17 @@ class FactoryTestGUI:
                 self._add_measure_row(section, i, label, value, tone)
             rendered_any = True
 
-        fan_rows: list[tuple[str, str, str]] = []
+        temp_max_c = DEFAULT_CPU_TEMP_MAX_C
+        if isinstance(self.config, dict):
+            try:
+                temp_max_c = float(
+                    (self.config.get("validation") or {}).get("cpu_temp_max_c", DEFAULT_CPU_TEMP_MAX_C)
+                )
+            except (TypeError, ValueError):
+                temp_max_c = DEFAULT_CPU_TEMP_MAX_C
+        temp_fail_pages = cpu_temp_failing_pages(captured, temp_max_c)
+        rpm_fail_pages = fan_rpm_failing_pages(captured)
+        fan_rows: list[tuple[str, list[tuple[str, str]]]] = []
         for key, label_key in (
             ("fan_normal", "measure_fan_normal"),
             ("fan_silent", "measure_fan_silent"),
@@ -2596,12 +2635,16 @@ class FactoryTestGUI:
             rpm = page.get("device_fan_rpm")
             if not temp and not rpm:
                 continue
-            parts = [str(p) for p in (temp, rpm) if p]
-            fan_rows.append((self._t(label_key), "   |   ".join(parts), ""))
+            segments: list[tuple[str, str]] = []
+            if temp:
+                segments.append((str(temp), "bad" if key in temp_fail_pages else ""))
+            if rpm:
+                segments.append((str(rpm), "bad" if key in rpm_fail_pages else ""))
+            fan_rows.append((self._t(label_key), segments))
         if fan_rows:
             section = self._add_measure_section(self._t("measure_section_fan"))
-            for i, (label, value, tone) in enumerate(fan_rows):
-                self._add_measure_row(section, i, label, value, tone)
+            for i, (label, segments) in enumerate(fan_rows):
+                self._add_measure_row_segments(section, i, label, segments)
             rendered_any = True
 
         if not rendered_any:

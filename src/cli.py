@@ -194,37 +194,52 @@ def _first_number(value: object) -> float | None:
         return None
 
 
-def _fan_rpm_failures(captured_values: dict) -> list[str]:
-    failures: list[str] = []
+def fan_rpm_failing_pages(captured_values: dict) -> dict[str, str]:
+    """page_key -> 失败原因（'missing' 未读取 / 'zero' 转速≤0）。仅检查需风扇运转的页；
+    安静模式 0 转豁免、resource_monitor 不参与。供判定与界面标红共用，避免两边逻辑分叉。"""
+    bad: dict[str, str] = {}
     for page_key in FAN_RPM_KEYS:
         values = captured_values.get(page_key)
         if not isinstance(values, dict):
             continue
-        raw = values.get("device_fan_rpm")
-        rpm = _first_number(raw)
-        label = _page_label(page_key)
+        rpm = _first_number(values.get("device_fan_rpm"))
         if rpm is None:
-            failures.append(f"{label} 未读取到风扇转速")
+            bad[page_key] = "missing"
         elif rpm <= 0 and page_key not in FAN_RPM_ZERO_OK_KEYS:
+            bad[page_key] = "zero"
+    return bad
+
+
+def _fan_rpm_failures(captured_values: dict) -> list[str]:
+    failures: list[str] = []
+    for page_key, reason in fan_rpm_failing_pages(captured_values).items():
+        label = _page_label(page_key)
+        if reason == "missing":
+            failures.append(f"{label} 未读取到风扇转速")
+        else:
+            raw = (captured_values.get(page_key) or {}).get("device_fan_rpm")
             failures.append(f"{label} 风扇转速 {raw}，必须大于 0")
     return failures
 
 
-def _cpu_temp_failures(captured_values: dict, max_c: float) -> list[str]:
-    failures: list[str] = []
+def cpu_temp_failing_pages(captured_values: dict, max_c: float) -> dict[str, float]:
+    """page_key -> 实测温度，仅含超过 max_c 的风扇模式页（resource_monitor 不参与）。"""
+    over: dict[str, float] = {}
     for page_key in CPU_TEMP_KEYS:
         values = captured_values.get(page_key)
         if not isinstance(values, dict):
             continue
-        raw = values.get("cpu_temp")
-        if raw is None:
-            continue
-        temp = _first_number(raw)
-        if temp is None:
-            continue
-        if temp > max_c:
-            failures.append(f"{_page_label(page_key)} CPU 温度 {temp:g}℃ > {max_c:g}℃")
-    return failures
+        temp = _first_number(values.get("cpu_temp"))
+        if temp is not None and temp > max_c:
+            over[page_key] = temp
+    return over
+
+
+def _cpu_temp_failures(captured_values: dict, max_c: float) -> list[str]:
+    return [
+        f"{_page_label(page_key)} CPU 温度 {temp:g}℃ > {max_c:g}℃"
+        for page_key, temp in cpu_temp_failing_pages(captured_values, max_c).items()
+    ]
 
 
 def _validate_captured_measurements(captured_values: dict, cpu_temp_max_c: float = DEFAULT_CPU_TEMP_MAX_C) -> None:

@@ -73,7 +73,9 @@ PAGE_LABELS = {
 }
 FORM_MISSING_ACCESSORY_STAGE = "未上传：缺少配件照片"
 FAN_RPM_FAILURE_STAGE = "风扇转速异常"
-FAN_RPM_KEYS = ("resource_monitor", "fan_normal", "fan_silent", "fan_full_speed")
+# 与 CPU 温度判定一致：resource_monitor 是满载尾巴的瞬时读数（风扇可能正降速、整机偏凉时为 0），
+# 不可靠，不参与风扇转速判定。只看 3 个风扇模式页（各 wait 12s 进入稳态）。
+FAN_RPM_KEYS = ("fan_normal", "fan_silent", "fan_full_speed")
 # 安静（静音）模式下风扇可以完全停转——0 转速属正常工况，不当作故障；其余模式仍要求 > 0。
 FAN_RPM_ZERO_OK_KEYS = frozenset({"fan_silent"})
 CPU_TEMP_FAILURE_STAGE = "CPU 温度过高"

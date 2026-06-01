@@ -5,16 +5,33 @@ from src import cli
 
 def test_zero_fan_rpm_fails_measurement_validation() -> None:
     captured = {
+        # resource_monitor 不参与风扇判定，即便 0 也不算失败……
         "resource_monitor": {"cpu_temp": "55 °C", "device_fan_rpm": "0 转/分"},
+        # ……但风扇全速模式 0 转速一定是真故障。
         "fan_full_speed": {"cpu_temp": "55 °C", "device_fan_rpm": "0 转/分"},
     }
 
     with pytest.raises(RuntimeError) as exc_info:
         cli._validate_captured_measurements(captured)
 
-    assert "风扇转速异常" in str(exc_info.value)
-    assert "风扇全速模式" in str(exc_info.value)
+    msg = str(exc_info.value)
+    assert "风扇转速异常" in msg
+    assert "风扇全速模式" in msg
+    assert "资源监控" not in msg  # resource_monitor 已从风扇判定中排除
     assert cli.failure_stage_for_error(exc_info.value) == "风扇转速异常"
+
+
+def test_resource_monitor_zero_rpm_ignored() -> None:
+    # 实测复现（HB670EE52241F8CD）：整机偏凉时 resource_monitor 与安静模式都读到 0 转，
+    # 但风扇全速能上到 2400+，说明风扇没坏——不应判失败。
+    cli._validate_captured_measurements(
+        {
+            "resource_monitor": {"cpu_temp": "42 °C", "device_fan_rpm": "0 转/分"},
+            "fan_normal": {"cpu_temp": "42 °C", "device_fan_rpm": "285 转/分"},
+            "fan_silent": {"cpu_temp": "42 °C", "device_fan_rpm": "0 转/分"},
+            "fan_full_speed": {"cpu_temp": "43 °C", "device_fan_rpm": "2419 转/分"},
+        }
+    )
 
 
 def test_positive_fan_rpm_passes_measurement_validation() -> None:

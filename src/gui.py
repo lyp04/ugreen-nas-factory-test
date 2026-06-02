@@ -424,6 +424,13 @@ UI_TEXT = {
         "materials_mode_fresh_full_retry": "每次重取物料，全选后反选缺料",
         "materials_status_resubmit": "已录表",
         "materials_summary_resubmit": "重复提交·物料以首次录表/内部系统 为准",
+        "materials_status_excluded": "不扣",
+        "materials_toggle_add_title": "加入扣料列表",
+        "materials_toggle_add_body": "确定要将物料「{name}」(编码 {code}) 加入扣料列表？",
+        "materials_toggle_remove_title": "从扣料列表移除",
+        "materials_toggle_remove_body": "确定要将物料「{name}」(编码 {code}) 从扣料列表移除？",
+        "materials_toggle_failed_title": "操作失败",
+        "materials_toggle_group_all_in": "该分组按整组扣料，无法对单项切换。",
         "materials_col_name": "名称",
         "materials_col_code": "编码",
         "materials_col_qty": "数量",
@@ -534,6 +541,13 @@ UI_TEXT = {
         "materials_mode_fresh_full_retry": "Fresh material list, submit all then remove out-of-stock items",
         "materials_status_resubmit": "Already recorded",
         "materials_summary_resubmit": "Duplicate submission · material detail per first entry / 内部系统",
+        "materials_status_excluded": "Not deducted",
+        "materials_toggle_add_title": "Add to deduction list",
+        "materials_toggle_add_body": "Add material \"{name}\" (code {code}) to the deduction list?",
+        "materials_toggle_remove_title": "Remove from deduction list",
+        "materials_toggle_remove_body": "Remove material \"{name}\" (code {code}) from the deduction list?",
+        "materials_toggle_failed_title": "Toggle failed",
+        "materials_toggle_group_all_in": "This group deducts as a whole — single items cannot be toggled.",
         "materials_col_name": "Name",
         "materials_col_code": "Code",
         "materials_col_qty": "Qty",
@@ -644,6 +658,13 @@ UI_TEXT = {
         "materials_mode_fresh_full_retry": "Lista actualizada, enviar todo y retirar faltantes",
         "materials_status_resubmit": "Ya registrado",
         "materials_summary_resubmit": "Reenvío duplicado · detalle según primer registro / 内部系统",
+        "materials_status_excluded": "No descontado",
+        "materials_toggle_add_title": "Agregar a deducción",
+        "materials_toggle_add_body": "¿Agregar el material «{name}» (código {code}) a la lista de deducción?",
+        "materials_toggle_remove_title": "Quitar de deducción",
+        "materials_toggle_remove_body": "¿Quitar el material «{name}» (código {code}) de la lista de deducción?",
+        "materials_toggle_failed_title": "Operación fallida",
+        "materials_toggle_group_all_in": "Este grupo se descuenta como conjunto; los ítems individuales no se pueden alternar.",
         "materials_col_name": "Nombre",
         "materials_col_code": "Código",
         "materials_col_qty": "Cantidad",
@@ -776,6 +797,9 @@ class FactoryTestGUI:
         self.materials_status_var = tk.StringVar(value="")
         self.materials_status_label: ttk.Label | None = None
         self.materials_refresh_after_id: str | None = None
+        # Populated by _refresh_materials_tab; consumed by _on_materials_double_click.
+        self._materials_active_form_id: str = ""
+        self._materials_node_meta: dict[str, dict] = {}
         self.measure_tab_frame: ttk.Frame | None = None
         self.measure_canvas: tk.Canvas | None = None
         self.measure_inner: ttk.Frame | None = None
@@ -1692,6 +1716,8 @@ class FactoryTestGUI:
         self.materials_tree.tag_configure("item_selected", foreground="#1f7a1f")
         self.materials_tree.tag_configure("item_missing", foreground="#c0392b")
         self.materials_tree.tag_configure("item_pending", foreground="#a87f1c")
+        self.materials_tree.tag_configure("item_excluded", foreground="#000000")
+        self.materials_tree.bind("<Double-1>", self._on_materials_double_click)
         self.materials_tree.grid(row=1, column=0, sticky=tk.NSEW)
         materials_scroll = ttk.Scrollbar(
             self.materials_tab_frame, orient=tk.VERTICAL, command=self.materials_tree.yview
@@ -2502,6 +2528,10 @@ class FactoryTestGUI:
             return
         for item in self.materials_tree.get_children():
             self.materials_tree.delete(item)
+        # Drop stale code/selected metadata so a double-click after a clear
+        # cannot misfire against a deleted row's id.
+        self._materials_node_meta = {}
+        self._materials_active_form_id = ""
         self.materials_status_var.set(status_text)
 
     def _clear_measurements_tab(self, status_text: str = "") -> None:
@@ -2739,7 +2769,32 @@ class FactoryTestGUI:
         if not form_data:
             self._clear_materials_tab(self._t("materials_no_report"))
             return
-        material_groups = form_data.get("material_groups") or []
+        form_id = str(form_data.get("form_id") or "")
+        # Always pull the authoritative candidate list from materials.json so every
+        # 更换部件 row shows — including the ones currently NOT in the deduction
+        # list. The form_data inside test_report.json only carries the items that
+        # were tagged for deduction at submission time. Gate on form_id (always
+        # present in real reports built by build_report_form_data) so tests with
+        # minimal mocked form_data don't accidentally pull this machine's
+        # materials.json.
+        live_groups: list[dict[str, Any]] = []
+        if form_id:
+            try:
+                live_groups = form_entry.list_replacement_part_candidates(
+                    project_root=get_project_root(),
+                    form_id=form_id,
+                )
+            except form_entry.FormEntryError:
+                live_groups = []
+            except Exception as exc:  # autoupdate root missing, etc.
+                logger.debug("materials tab: live candidates lookup failed: {}", exc)
+                live_groups = []
+
+        material_groups_from_report = form_data.get("material_groups") or []
+        if live_groups:
+            material_groups = live_groups
+        else:
+            material_groups = material_groups_from_report
         form_result = report.get("form_result") if isinstance(report.get("form_result"), dict) else {}
         removed_codes = {str(c) for c in (form_result.get("removed_material_codes") or [])}
         form_status = str(form_result.get("status") or "").lower()
@@ -2752,6 +2807,12 @@ class FactoryTestGUI:
         resubmit_no_detail = form_status == "already_submitted" and not removed_codes
 
         self._clear_materials_tab()
+        # Set AFTER _clear_materials_tab — clear wipes these too.
+        # `_materials_active_form_id` tells the double-click handler which form's
+        # selected_material_codes to mutate; `_materials_node_meta` maps tree
+        # node id → (code, name, selected, group_all_in) for the same handler.
+        self._materials_active_form_id = form_id
+        self._materials_node_meta = {}
         rendered_any = False
         for group in material_groups:
             title = str(group.get("title") or "")
@@ -2759,6 +2820,7 @@ class FactoryTestGUI:
                 continue
             candidates = group.get("items") or []
             total_count = len(candidates)
+            group_all_in = bool(group.get("group_all_in", False))
             if total_count == 0:
                 group_tag = "group_unselected"
                 group_status = self._t("materials_status_group_disabled")
@@ -2774,21 +2836,21 @@ class FactoryTestGUI:
                 rendered_any = True
                 continue
 
-            kept_codes = [
-                str(item.get("code") or "")
+            in_list_count = sum(
+                1
                 for item in candidates
-                if str(item.get("code") or "") and str(item.get("code") or "") not in removed_codes
-            ]
-            selected_count = len(kept_codes)
+                if bool(item.get("selected", True))
+                and str(item.get("code") or "") not in removed_codes
+            )
             if resubmit_no_detail:
                 group_tag = "group_unselected"
                 group_status = self._t("materials_status_resubmit")
             else:
-                group_tag = "group_selected" if selected_count > 0 else "group_unselected"
+                group_tag = "group_selected" if in_list_count > 0 else "group_unselected"
                 group_status = (
-                    self._t("materials_status_selected") if selected_count > 0 else self._t("materials_status_unselected")
+                    self._t("materials_status_selected") if in_list_count > 0 else self._t("materials_status_unselected")
                 )
-            count_text = self._t("materials_group_count", selected=selected_count, total=total_count)
+            count_text = self._t("materials_group_count", selected=in_list_count, total=total_count)
             group_node = self.materials_tree.insert(
                 "",
                 tk.END,
@@ -2803,7 +2865,14 @@ class FactoryTestGUI:
                 name = str(item.get("name") or code or "")
                 qty = item.get("default_qty") if item.get("default_qty") is not None else item.get("qty")
                 qty_text = str(qty) if qty not in (None, "") else ""
-                if not submission_complete:
+                # `selected` is the deduction-list membership flag from
+                # list_replacement_part_candidates. Old report-only fallbacks
+                # default to True so they keep rendering as before.
+                in_deduction_list = bool(item.get("selected", True))
+                if not in_deduction_list:
+                    item_status = self._t("materials_status_excluded")
+                    item_tag = "item_excluded"
+                elif not submission_complete:
                     item_status = self._t("materials_status_pending")
                     item_tag = "item_pending"
                 elif resubmit_no_detail:
@@ -2815,13 +2884,21 @@ class FactoryTestGUI:
                 else:
                     item_status = self._t("materials_status_selected")
                     item_tag = "item_selected"
-                self.materials_tree.insert(
+                node_id = self.materials_tree.insert(
                     group_node,
                     tk.END,
                     text=name,
                     values=(code, qty_text, item_status),
                     tags=(item_tag,),
                 )
+                if code:
+                    self._materials_node_meta[node_id] = {
+                        "code": code,
+                        "name": name,
+                        "selected": in_deduction_list,
+                        "group_all_in": group_all_in,
+                        "group_title": title,
+                    }
         if not rendered_any:
             self.materials_status_var.set(self._t("materials_no_config"))
             return
@@ -2837,6 +2914,54 @@ class FactoryTestGUI:
         elif removed_codes:
             parts.append(self._t("materials_summary_missing", count=len(removed_codes)))
         self.materials_status_var.set(" | ".join(parts))
+
+    def _on_materials_double_click(self, event: "tk.Event") -> None:
+        # Double-click any 物料 row → confirm dialog → add/remove the code from
+        # selected_material_codes in materials.json. Group rows (no metadata
+        # entry) and items inside a whole-group-deducted group both no-op (the
+        # latter with an explanatory popup).
+        if self.materials_tree is None:
+            return
+        node_id = self.materials_tree.identify_row(event.y)
+        if not node_id:
+            return
+        meta = self._materials_node_meta.get(node_id)
+        if not meta:
+            return
+        if meta.get("group_all_in"):
+            messagebox.showinfo(
+                self._t("materials_toggle_failed_title"),
+                self._t("materials_toggle_group_all_in"),
+            )
+            return
+        currently_selected = bool(meta.get("selected"))
+        name = str(meta.get("name") or "")
+        code = str(meta.get("code") or "")
+        if currently_selected:
+            title = self._t("materials_toggle_remove_title")
+            body = self._t("materials_toggle_remove_body", name=name, code=code)
+        else:
+            title = self._t("materials_toggle_add_title")
+            body = self._t("materials_toggle_add_body", name=name, code=code)
+        if not messagebox.askyesno(title, body, icon=messagebox.QUESTION):
+            return
+        form_id = self._materials_active_form_id or None
+        try:
+            form_entry.toggle_material_deduction(
+                project_root=get_project_root(),
+                form_id=form_id,
+                code=code,
+                select=not currently_selected,
+            )
+        except Exception as exc:
+            logger.error("toggle deduction failed (code={}, select={}): {}", code, not currently_selected, exc)
+            messagebox.showerror(self._t("materials_toggle_failed_title"), str(exc))
+            return
+        if self.selected_task_id is None:
+            return
+        task = self.devices.get(self.selected_task_id)
+        if task is not None:
+            self._refresh_materials_tab(task)
 
     def _clear_timing_chart(self) -> None:
         self._cancel_timing_chart_refresh()

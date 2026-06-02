@@ -63,6 +63,122 @@ def test_form_data_includes_selected_code_from_unselected_group(monkeypatch, tmp
 
 
 # ---------------------------------------------------------------------------
+# list_replacement_part_candidates + toggle_material_deduction:
+# the data layer behind the GUI's color-coded 物料 tab + double-click toggle.
+# ---------------------------------------------------------------------------
+
+
+def _seed_materials_fixture(tmp_path: Path) -> Path:
+    config = tmp_path / "config"
+    config.mkdir(exist_ok=True)
+    (config / "forms.json").write_text(
+        json.dumps(
+            {
+                "models": {"2800": "form_2800"},
+                "forms": {
+                    "form_2800": {
+                        "model_key": "2800",
+                        "default_grade": "A",
+                        "template": {"id": 1, "warehouse_id": 6, "sku": "RV_TEST"},
+                        "retread_results": {"A": {"field": "result", "value": "RV_A", "relations": []}},
+                        "part_groups": [
+                            {"field": "replace_parts", "title": "更换部件"},
+                            {"field": "add_packaging", "title": "补充包材"},
+                        ],
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (config / "materials.json").write_text(
+        json.dumps(
+            {
+                "forms": {
+                    "form_2800": {
+                        "selected_material_groups": ["补充包材"],
+                        "selected_material_codes": ["MR_THERMAL"],
+                        "materials": [
+                            {"code": "MR_THERMAL", "name": "导热硅胶", "group": "更换部件"},
+                            {"code": "MR_OTHER", "name": "其他部件", "group": "更换部件"},
+                            {"code": "MR_BOX", "name": "纸箱", "group": "补充包材"},
+                        ],
+                    }
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return config
+
+
+def test_list_replacement_part_candidates_flags_selection(monkeypatch, tmp_path: Path) -> None:
+    _seed_materials_fixture(tmp_path)
+    monkeypatch.setattr(form_entry, "autoupdate_root", lambda: tmp_path)
+
+    groups = form_entry.list_replacement_part_candidates(project_root=tmp_path, model="2800")
+
+    by_title = {group["title"]: group for group in groups}
+    assert set(by_title) == {"更换部件", "补充包材"}
+    # 更换部件 is a by-code group: every candidate shows, selected flag tracks
+    # selected_material_codes membership.
+    replace = {item["code"]: item for item in by_title["更换部件"]["items"]}
+    assert by_title["更换部件"]["group_all_in"] is False
+    assert replace["MR_THERMAL"]["selected"] is True
+    assert replace["MR_OTHER"]["selected"] is False
+    # 补充包材 is an all-in group: every candidate is selected by group membership.
+    assert by_title["补充包材"]["group_all_in"] is True
+    assert by_title["补充包材"]["items"][0]["selected"] is True
+
+
+def test_toggle_material_deduction_adds_then_removes(monkeypatch, tmp_path: Path) -> None:
+    config = _seed_materials_fixture(tmp_path)
+    monkeypatch.setattr(form_entry, "autoupdate_root", lambda: tmp_path)
+
+    # MR_OTHER starts unselected.
+    materials_path = config / "materials.json"
+    assert "MR_OTHER" not in json.loads(materials_path.read_text(encoding="utf-8"))["forms"]["form_2800"]["selected_material_codes"]
+
+    # Add it.
+    result = form_entry.toggle_material_deduction(
+        project_root=tmp_path, model="2800", code="MR_OTHER", select=True
+    )
+    assert result is True
+    codes = json.loads(materials_path.read_text(encoding="utf-8"))["forms"]["form_2800"]["selected_material_codes"]
+    assert "MR_OTHER" in codes and "MR_THERMAL" in codes
+
+    # Remove it via the implicit-flip path (no `select` arg).
+    result = form_entry.toggle_material_deduction(
+        project_root=tmp_path, model="2800", code="MR_OTHER"
+    )
+    assert result is False
+    codes = json.loads(materials_path.read_text(encoding="utf-8"))["forms"]["form_2800"]["selected_material_codes"]
+    assert "MR_OTHER" not in codes and "MR_THERMAL" in codes
+
+
+def test_toggle_material_deduction_is_idempotent(monkeypatch, tmp_path: Path) -> None:
+    config = _seed_materials_fixture(tmp_path)
+    monkeypatch.setattr(form_entry, "autoupdate_root", lambda: tmp_path)
+
+    # MR_THERMAL is already selected — selecting again should not duplicate.
+    form_entry.toggle_material_deduction(
+        project_root=tmp_path, model="2800", code="MR_THERMAL", select=True
+    )
+    codes = json.loads((config / "materials.json").read_text(encoding="utf-8"))["forms"]["form_2800"]["selected_material_codes"]
+    assert codes.count("MR_THERMAL") == 1
+
+
+def test_toggle_material_deduction_rejects_blank_code(monkeypatch, tmp_path: Path) -> None:
+    _seed_materials_fixture(tmp_path)
+    monkeypatch.setattr(form_entry, "autoupdate_root", lambda: tmp_path)
+
+    assert form_entry.toggle_material_deduction(project_root=tmp_path, model="2800", code="") is False
+    assert form_entry.toggle_material_deduction(project_root=tmp_path, model="2800", code="   ") is False
+
+
+# ---------------------------------------------------------------------------
 # sync_autoupdate_repo: never raise, no-op gracefully when preconditions fail.
 # ---------------------------------------------------------------------------
 

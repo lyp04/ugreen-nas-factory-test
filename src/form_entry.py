@@ -495,5 +495,79 @@ def normalize_material(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def list_replacement_part_candidates(
+    project_root: Path | None = None,
+    model: str | None = None,
+    form_id: str | None = None,
+) -> list[dict[str, Any]]:
+    # The full per-form candidate list with its current deduction-list membership.
+    # GUI feeds this into the 物料 tab so every part is shown (not just the codes
+    # currently in selected_material_codes), and color-codes by `selected`.
+    root = project_root or Path.cwd()
+    resolved_form_id = resolve_form_id(root, model=model, form_id=form_id)
+    forms = load_json(resolve_config_path(root, "forms.json"))
+    materials = load_json(resolve_config_path(root, "materials.json"))
+    form = forms.get("forms", {}).get(resolved_form_id) or {}
+    material_form = materials.get("forms", {}).get(resolved_form_id, {})
+    selected_groups = set(material_form.get("selected_material_groups") or DEFAULT_SELECTED_MATERIAL_GROUPS)
+    selected_codes = {str(code) for code in material_form.get("selected_material_codes") or []}
+    all_materials = material_form.get("materials") or []
+
+    groups: list[dict[str, Any]] = []
+    for group in form.get("part_groups", []):
+        group_title = str(group.get("title") or "")
+        group_all_in = group_title in selected_groups
+        items: list[dict[str, Any]] = []
+        for raw in all_materials:
+            if str(raw.get("group") or "") != group_title:
+                continue
+            normalized = normalize_material(raw)
+            code = str(normalized.get("code") or "")
+            normalized["selected"] = group_all_in or (bool(code) and code in selected_codes)
+            items.append(normalized)
+        groups.append(
+            {
+                "field": group.get("field"),
+                "title": group_title,
+                "group_all_in": group_all_in,
+                "items": items,
+            }
+        )
+    return groups
+
+
+def toggle_material_deduction(
+    project_root: Path | None = None,
+    model: str | None = None,
+    form_id: str | None = None,
+    code: str = "",
+    select: bool | None = None,
+) -> bool:
+    # Add/remove `code` from selected_material_codes in materials.json.
+    # If `select` is None, flips. Returns the post-toggle membership.
+    code_str = str(code or "").strip()
+    if not code_str:
+        return False
+    root = project_root or Path.cwd()
+    resolved_form_id = resolve_form_id(root, model=model, form_id=form_id)
+    materials_path = resolve_config_path(root, "materials.json")
+    materials = load_json(materials_path)
+    forms_map = materials.setdefault("forms", {})
+    material_form = forms_map.setdefault(resolved_form_id, {})
+    codes = [str(c) for c in (material_form.get("selected_material_codes") or [])]
+    currently = code_str in codes
+    target = (not currently) if select is None else bool(select)
+    if target and not currently:
+        codes.append(code_str)
+    elif not target and currently:
+        codes = [c for c in codes if c != code_str]
+    material_form["selected_material_codes"] = codes
+    materials_path.write_text(
+        json.dumps(materials, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return code_str in codes
+
+
 def is_previous_step_error(message: str) -> bool:
     return "缺少第一步翻新记录" in str(message) or "previous refurbishment process" in str(message)

@@ -20,13 +20,21 @@ _VOLATILE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"[-+]?\d+(?:\.\d+)?"), "<n>"),                # 残余数字
 ]
 
+# 「上下文转储」后缀：页面正文预览 / 候选 IP 列表 / Playwright 调用日志等。
+# 同一类故障每次转储的内容都不同（如「服务启动中…」vs「<empty>」），留着会把
+# 指纹打散成多个 Issue，归一化时整段切掉，只保留前面稳定的错误骨架。
+# （完整信息仍保留在 Issue 正文的「错误信息」段落里，不影响排障。）
+_CONTEXT_SUFFIX_RE = re.compile(
+    r"\s*(?:;\s*last page:|;\s*candidates:|\bCall log:).*$", re.IGNORECASE
+)
+
 
 def normalize_signature(message: object, max_len: int = 200) -> str:
     """取错误信息的首行并归一化掉易变片段，得到稳定的「错误骨架」。"""
     text = str(message or "").strip()
     if not text:
         return ""
-    text = text.splitlines()[0]
+    text = _CONTEXT_SUFFIX_RE.sub("", text.splitlines()[0])
     for pattern, repl in _VOLATILE_PATTERNS:
         text = pattern.sub(repl, text)
     text = re.sub(r"\s+", " ", text).strip()

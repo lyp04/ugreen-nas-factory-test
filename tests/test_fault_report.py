@@ -61,6 +61,30 @@ def test_signature_normalizes_volatile_bits() -> None:
     assert "<ip>" in a and "<n>" in a
 
 
+def test_signature_strips_volatile_context_suffix() -> None:
+    # 同一类「服务启动卡死」故障，仅尾部 last page 转储不同，不应拆成两个指纹
+    a = fingerprint.normalize_signature(
+        "UGOS setup page stayed on 'service starting' screen for 300s; "
+        "last page: 服务启动中 您可以尝试手动刷新页面 刷新"
+    )
+    b = fingerprint.normalize_signature(
+        "UGOS setup page stayed on 'service starting' screen for 280s; last page: <empty>"
+    )
+    assert a == b
+    assert "last page" not in a
+    # 候选 IP 列表长度变化也不该打散指纹
+    c = fingerprint.normalize_signature(
+        "No unused UGOS NAS matching SN tail 00D3 became available before timeout: "
+        "No discovered UGOS NAS matched SN tail 00D3; candidates: ['192.168.0.1', '192.168.0.2']"
+    )
+    d = fingerprint.normalize_signature(
+        "No unused UGOS NAS matching SN tail 00D3 became available before timeout: "
+        "No discovered UGOS NAS matched SN tail 00D3; candidates: ['10.0.0.9']"
+    )
+    assert c == d
+    assert "candidates" not in c
+
+
 def test_fingerprint_stable_and_discriminating() -> None:
     sig = fingerprint.normalize_signature("weird crash at step foo")
     base = fingerprint.compute("other", "4800", sig)

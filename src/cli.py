@@ -18,7 +18,14 @@ from . import form_entry
 
 FORM_ENTRY_ENABLED = True
 from .discovery import ugreen_broadcast
-from .discovery.discover import _looks_like_ugos, find_nas, find_nas_candidates, wait_until_ready
+from .discovery.discover import (
+    _looks_like_ugos,
+    find_nas,
+    find_nas_candidates,
+    probe_reachability,
+    reachability_verdict,
+    wait_until_ready,
+)
 from .flows import capture as capture_flow
 from .flows import cleanup as cleanup_flow
 from .flows import login as login_flow
@@ -361,10 +368,32 @@ def classify_failure_category(exc_or_message: object) -> str:
     return "other"
 
 
+def _attach_failure_diagnostics(report: dict, ip: str, port: int) -> None:
+    """失败时探测一下 ip:port，把「设备 vs 连接」的判定写进 report。永不抛异常。"""
+    if not ip:
+        return
+    try:
+        probe = probe_reachability(ip, port)
+        verdict = reachability_verdict(probe)
+        report["failure_reachability"] = probe
+        report["failure_verdict"] = verdict
+        logger.info(
+            f"Failure probe {ip}:{port} -> tcp={probe.get('tcp')} "
+            f"http={probe.get('http_status')} ping={probe.get('ping')} | {verdict}"
+        )
+    except Exception:
+        pass
+
+
 def _maybe_autoreport_failure(config: dict, report: dict, dirs: dict, output_root: Path) -> None:
     """run_test 收尾时调用：仅当本次为「失败 + 未分类(other)」才异步上报。永不抛异常。"""
     try:
         if report.get("status") != "failed":
+            return
+        # 连上设备前就失败（发现超时 / 设备上线超时）不会落地目录，没有可打包的产物，
+        # 也更像 operator/网络问题——不留空壳目录、不上报。
+        sn_dir = dirs.get("base")
+        if not sn_dir or not Path(sn_dir).exists():
             return
         message = str(report.get("error") or "")
         if classify_failure_category(message) != "other":
@@ -527,6 +556,20 @@ def run_test(
     if setup_file_log:
         setup_logger(dirs["sn_root"], sn=sn)
 
+    # GUI 模式（setup_file_log=False）不调用 setup_logger，run.log 从不落盘，故障 zip
+    # 里也就没有日志。这里挂一个按 task 过滤的内存 sink，收尾时再把缓冲写进
+    # <sn>/run.log——不持有文件句柄，避免 SN 升级 relocate 时在 Windows 上撞文件锁。
+    task_key = task_id or sn
+    run_log_buffer: list[str] = []
+    run_log_sink_id: int | None = None
+    if not setup_file_log:
+        run_log_sink_id = logger.add(
+            lambda message: run_log_buffer.append(str(message)),
+            level="DEBUG",
+            filter=lambda record: record["extra"].get("task_id") == task_key,
+            format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}",
+        )
+
     page_keys = list(config["pages"])
     total_steps = (
         3
@@ -562,9 +605,15 @@ def run_test(
     device_lock: threading.Lock | None = None
     device_lock_acquired = False
     reserved_ips: set[str] = set()
+    connected = False
 
     def checkpoint(stage: str | None = None) -> None:
-        _write_report_checkpoint(dirs, report, stage)
+        if stage is not None:
+            report["current_stage"] = stage
+        # 连上设备前不落盘，避免给「没匹配到的 SN / 离线设备」留空壳目录。CLI 模式
+        # （setup_file_log=True）目录已由 setup_logger 建好，保持原样即时落盘。
+        if connected or setup_file_log:
+            _write_report_checkpoint(dirs, report, stage)
 
     with logger.contextualize(task_id=task_id or sn, device_sn=sn):
         _raise_if_cancelled(cancel_requested_cb)
@@ -600,6 +649,8 @@ def run_test(
             logger.info(f"NAS {ip}: device lock acquired")
             progress.set_stage("等待设备上线", status="running", nas_ip=ip)
             _wait_until_ready_cancelable(ip, port, config["network"]["service_ready_timeout"], cancel_requested_cb)
+            # 设备已就绪：从这里开始才落地 <sn>/ 目录与 run.log（此前的失败不留目录）。
+            connected = True
             progress.complete_step("设备已连接", nas_ip=ip)
             checkpoint("设备已连接")
 
@@ -880,6 +931,7 @@ def run_test(
                     report["error"] = str(exc)
                     report["current_stage"] = failure_stage
                     progress.finish("failed", failure_stage, nas_ip=ip or nas_ip, error=str(exc))
+                    _attach_failure_diagnostics(report, ip, port)
                     capture_failure(page, sn, step="cli_top", dest_dir=dirs["screenshots"])
                     raise
                 finally:
@@ -893,7 +945,8 @@ def run_test(
                 report["error"] = str(exc)
                 progress.finish("cancelled", "用户中断", nas_ip=ip or nas_ip, error=str(exc))
                 report["finished_at"] = datetime.now().isoformat()
-                _write_json_atomic(dirs["base"] / "test_report.json", report)
+                if connected or setup_file_log:
+                    _write_json_atomic(dirs["base"] / "test_report.json", report)
             raise
         except Exception as exc:
             if report.get("status") == "running":
@@ -902,15 +955,30 @@ def run_test(
                 report["error"] = str(exc)
                 report["current_stage"] = failure_stage
                 progress.finish("failed", failure_stage, nas_ip=ip or nas_ip, error=str(exc))
+                _attach_failure_diagnostics(report, ip, port)
                 report["finished_at"] = datetime.now().isoformat()
-                _write_json_atomic(dirs["base"] / "test_report.json", report)
+                # 连上设备前失败（发现/上线超时）不落盘——不留空壳目录。
+                if connected or setup_file_log:
+                    _write_json_atomic(dirs["base"] / "test_report.json", report)
             raise
         finally:
             if device_lock_acquired and device_lock is not None:
                 logger.info(f"NAS {ip}: device lock released")
                 device_lock.release()
             _release_reserved_ips(reserved_ips)
+            # 把内存日志缓冲落到 <sn>/run.log，再做故障上报，这样故障 zip 带得上完整日志。
+            # 仅当目录已存在（已连上设备）才写，避免给连接前失败的任务建空壳目录。
+            if run_log_buffer and not setup_file_log and dirs["base"].exists():
+                try:
+                    (dirs["base"] / "run.log").write_text("".join(run_log_buffer), encoding="utf-8")
+                except Exception:
+                    pass
             _maybe_autoreport_failure(config, report, dirs, output_root)
+            if run_log_sink_id is not None:
+                try:
+                    logger.remove(run_log_sink_id)
+                except Exception:
+                    pass
 
     logger.info(f"Test complete for {sn}")
     return report

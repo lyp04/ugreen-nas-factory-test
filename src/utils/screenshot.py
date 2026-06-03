@@ -16,6 +16,10 @@ def _timestamp() -> str:
 
 
 def session_dirs(output_root: Path, sn: str) -> dict[str, Path]:
+    # Intentionally does NOT create the directories. The folder is materialized
+    # lazily by whoever writes the first real artifact (test_report checkpoint
+    # after the device connects, a screenshot, run.log, ...). That way a manual
+    # SN / SN-tail entry whose device is never found leaves no empty folder.
     sn_root = output_root / sn
     base = sn_root
     dirs = {
@@ -23,8 +27,6 @@ def session_dirs(output_root: Path, sn: str) -> dict[str, Path]:
         "base": base,
         "screenshots": base / "图片",
     }
-    for p in dirs.values():
-        p.mkdir(parents=True, exist_ok=True)
     trace_dir = base / "traces"
     if trace_dir.exists():
         shutil.rmtree(trace_dir, ignore_errors=True)
@@ -73,6 +75,7 @@ def _merge_session_dirs(source: Path, target: Path) -> None:
 
 
 def capture_page(page: "Page", sn: str, page_key: str, dest_dir: Path) -> Path:
+    dest_dir.mkdir(parents=True, exist_ok=True)
     filename = f"{sn}_{page_key}_{_timestamp()}.png"
     target = dest_dir / filename
     page.screenshot(path=str(target), full_page=True)
@@ -81,6 +84,7 @@ def capture_page(page: "Page", sn: str, page_key: str, dest_dir: Path) -> Path:
 
 
 def capture_failure(page: "Page", sn: str, step: str, dest_dir: Path) -> None:
+    dest_dir.mkdir(parents=True, exist_ok=True)
     ts = _timestamp()
     shot = dest_dir / f"{sn}_FAIL_{step}_{ts}.png"
     html = dest_dir / f"{sn}_FAIL_{step}_{ts}.html"

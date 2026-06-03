@@ -1444,7 +1444,44 @@ def _share_exists_via_smb(page: "Page", share_name: str, admin: dict) -> bool:
             pass
 
 
+_OPEN_APP_ATTEMPTS = 2
+
+
 def _open_app(page: "Page", desktop_selectors: dict, app: str) -> "Frame":
+    # UGOS sometimes renders the desktop launcher but never mounts the app iframe
+    # in time (seen as "iframe 'storagemgr' did not appear on the desktop"). It's
+    # almost always transient on a sluggish first boot, so reload the desktop and
+    # try once more before failing the whole test.
+    last_error: ProvisionError | None = None
+    for attempt in range(1, _OPEN_APP_ATTEMPTS + 1):
+        try:
+            return _open_app_once(page, desktop_selectors, app)
+        except ProvisionError as exc:
+            last_error = exc
+            if attempt >= _OPEN_APP_ATTEMPTS:
+                break
+            logger.warning(
+                f"Opening app '{app}' failed (attempt {attempt}/{_OPEN_APP_ATTEMPTS}): {exc}; "
+                "reloading desktop and retrying"
+            )
+            _recover_desktop_before_retry(page)
+    assert last_error is not None
+    raise last_error
+
+
+def _recover_desktop_before_retry(page: "Page") -> None:
+    try:
+        page.reload(wait_until="domcontentloaded", timeout=FRAME_WAIT_MS)
+    except Exception:
+        pass
+    try:
+        page.wait_for_timeout(SHORT_UI_WAIT_MS)
+        dismiss_desktop_overlays(page, max_rounds=3, completion_wait_ms=2_000, idle_wait_ms=0)
+    except Exception:
+        pass
+
+
+def _open_app_once(page: "Page", desktop_selectors: dict, app: str) -> "Frame":
     app_selector = _require_selector(desktop_selectors.get("apps", {}).get(app), f"desktop_launchers.apps.{app}")
     frame_selector = _require_selector(desktop_selectors.get("frames", {}).get(app), f"desktop_launchers.frames.{app}")
     frame_selectors = _frame_selector_candidates(frame_selector, app)

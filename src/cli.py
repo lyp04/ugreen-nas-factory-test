@@ -40,6 +40,11 @@ from .utils import label as label_util
 from .utils.logger import logger, setup_logger
 from .utils.screenshot import capture_failure, relocate_session_dirs, session_dirs
 from .report import reporter as fault_reporter
+from .measurements import (
+    DEFAULT_CPU_TEMP_MAX_C,
+    cpu_temp_failing_pages,
+    fan_rpm_failing_pages,
+)
 from .utils.sn import (
     SN_TAIL_LENGTH,
     extract_full_sn,
@@ -81,17 +86,9 @@ PAGE_LABELS = {
 }
 FORM_MISSING_ACCESSORY_STAGE = "未上传：缺少配件照片"
 FAN_RPM_FAILURE_STAGE = "风扇转速异常"
-# 与 CPU 温度判定一致：resource_monitor 是满载尾巴的瞬时读数（风扇可能正降速、整机偏凉时为 0），
-# 不可靠，不参与风扇转速判定。只看 3 个风扇模式页（各 wait 12s 进入稳态）。
-FAN_RPM_KEYS = ("fan_normal", "fan_silent", "fan_full_speed")
-# 安静（静音）模式下风扇可以完全停转——0 转速属正常工况，不当作故障；其余模式仍要求 > 0。
-FAN_RPM_ZERO_OK_KEYS = frozenset({"fan_silent"})
 CPU_TEMP_FAILURE_STAGE = "CPU 温度过高"
-# resource_monitor 在 4 个 SMB 传输测试之后立即抓，是满载尾巴的瞬时温度——会偏高但不代表散热坏。
-# 只看 3 个风扇模式页（各 wait 12s 进入稳态）。风扇全速若还压不下来，才是真的散热故障。
-CPU_TEMP_KEYS = ("fan_normal", "fan_silent", "fan_full_speed")
-DEFAULT_CPU_TEMP_MAX_C = 70.0
-NUMBER_RE = re.compile(r"[-+]?(?:\d+(?:,\d{3})+|\d+)(?:\.\d+)?")
+# 风扇/温度判定的页键、静音 0 转豁免、温度阈值与 _first_number 已抽到 src/measurements.py，
+# 供「抓取时不合格就重抓」「重测时不复用旧失败截图」「最终整体校验」三处共用，避免逻辑分叉。
 POOL_CREATION_ERROR_MARKERS = (
     "Storage pool summary did not appear in time after creation",
     "Storage-pool creation dialog did not render any configured disk options in time",
@@ -192,32 +189,6 @@ def _has_resume_artifacts(report: dict) -> bool:
     )
 
 
-def _first_number(value: object) -> float | None:
-    match = NUMBER_RE.search(str(value or ""))
-    if not match:
-        return None
-    try:
-        return float(match.group(0).replace(",", ""))
-    except ValueError:
-        return None
-
-
-def fan_rpm_failing_pages(captured_values: dict) -> dict[str, str]:
-    """page_key -> 失败原因（'missing' 未读取 / 'zero' 转速≤0）。仅检查需风扇运转的页；
-    安静模式 0 转豁免、resource_monitor 不参与。供判定与界面标红共用，避免两边逻辑分叉。"""
-    bad: dict[str, str] = {}
-    for page_key in FAN_RPM_KEYS:
-        values = captured_values.get(page_key)
-        if not isinstance(values, dict):
-            continue
-        rpm = _first_number(values.get("device_fan_rpm"))
-        if rpm is None:
-            bad[page_key] = "missing"
-        elif rpm <= 0 and page_key not in FAN_RPM_ZERO_OK_KEYS:
-            bad[page_key] = "zero"
-    return bad
-
-
 def _fan_rpm_failures(captured_values: dict) -> list[str]:
     failures: list[str] = []
     for page_key, reason in fan_rpm_failing_pages(captured_values).items():
@@ -228,19 +199,6 @@ def _fan_rpm_failures(captured_values: dict) -> list[str]:
             raw = (captured_values.get(page_key) or {}).get("device_fan_rpm")
             failures.append(f"{label} 风扇转速 {raw}，必须大于 0")
     return failures
-
-
-def cpu_temp_failing_pages(captured_values: dict, max_c: float) -> dict[str, float]:
-    """page_key -> 实测温度，仅含超过 max_c 的风扇模式页（resource_monitor 不参与）。"""
-    over: dict[str, float] = {}
-    for page_key in CPU_TEMP_KEYS:
-        values = captured_values.get(page_key)
-        if not isinstance(values, dict):
-            continue
-        temp = _first_number(values.get("cpu_temp"))
-        if temp is not None and temp > max_c:
-            over[page_key] = temp
-    return over
 
 
 def _cpu_temp_failures(captured_values: dict, max_c: float) -> list[str]:
@@ -806,6 +764,15 @@ def run_test(
                     report["captured"] = dict(report.get("captured") or {})
                     transfer_config = dict(config.get("transfer") or {})
                     transfer_config["model"] = form_model or "2800"
+                    validation_cfg = config.get("validation") or {}
+                    cpu_temp_max_c = float(
+                        validation_cfg.get("cpu_temp_max_c", DEFAULT_CPU_TEMP_MAX_C)
+                    )
+                    # 抓风扇模式页时若温度超标/转速异常，最多在这么多秒内反复重抓再定格，
+                    # 与传输速度重试同理；超时仍不合格才按失败记录。每页各享一份预算。
+                    fan_recheck_budget_s = float(
+                        validation_cfg.get("cpu_temp_recheck_seconds", 30)
+                    )
 
                     def capture_progress(event: dict) -> None:
                         _handle_capture_progress(progress, event, cancel_requested_cb)
@@ -833,14 +800,14 @@ def run_test(
                         transfer_config,
                         progress_cb=capture_progress,
                         capture_values=captured_values,
+                        cpu_temp_max_c=cpu_temp_max_c,
+                        fan_recheck_budget_s=fan_recheck_budget_s,
                     )
                     report["captured"] = saved
                     report["captured_values"] = captured_values
                     _validate_captured_measurements(
                         captured_values,
-                        cpu_temp_max_c=float(
-                            (config.get("validation") or {}).get("cpu_temp_max_c", DEFAULT_CPU_TEMP_MAX_C)
-                        ),
+                        cpu_temp_max_c=cpu_temp_max_c,
                     )
                     checkpoint("截图完成")
 

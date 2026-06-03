@@ -14,6 +14,11 @@ from urllib.parse import urlparse
 
 from playwright.sync_api import expect
 
+from ..measurements import (
+    DEFAULT_CPU_TEMP_MAX_C,
+    fan_mode_page_is_failing,
+    fan_mode_value_failures,
+)
 from ..utils.app_guides import dismiss_arco_app_guides, dismiss_storage_guide_modal
 from ..utils.desktop import click_desktop_launcher, dismiss_desktop_overlays, find_visible_locator
 from ..utils.logger import logger
@@ -40,6 +45,10 @@ if TYPE_CHECKING:
 
 
 FAN_CAPTURE_KEYS = {"fan_normal", "fan_silent", "fan_full_speed"}
+# 风扇模式页读数不合格（温度超标 / 转速异常）时，每隔这么久重读+重抓一次，直到合格或用满预算。
+FAN_RECHECK_INTERVAL_MS = 5_000
+# 重抓预算默认值（秒）。CLI 会用 config validation.cpu_temp_recheck_seconds 覆盖。
+DEFAULT_FAN_RECHECK_BUDGET_S = 30.0
 TRANSFER_ACTIVITY_RE = re.compile(r"\b(?:[1-9]\d*(?:\.\d+)?)\s?(?:KB|MB|GB)/s\b")
 RATE_RE = re.compile(r"([0-9]+(?:\.\d+)?)\s*([KMG]?B/s)")
 POOL_DISK_TOKEN_RE = re.compile(r"M\.2硬盘\d+|硬盘\d+")
@@ -152,6 +161,8 @@ def run(
     transfer_cfg: dict | None = None,
     progress_cb: Callable[[dict], None] | None = None,
     capture_values: dict[str, dict[str, str]] | None = None,
+    cpu_temp_max_c: float = DEFAULT_CPU_TEMP_MAX_C,
+    fan_recheck_budget_s: float = DEFAULT_FAN_RECHECK_BUDGET_S,
 ) -> dict[str, str]:
     dismiss_desktop_overlays(page, selectors, max_rounds=2, completion_wait_ms=0)
     desktop_selectors = selectors.get("desktop_launchers", {})
@@ -184,6 +195,7 @@ def run(
                     page_key,
                     existing_min_rate,
                     require_reported_values=require_reported_values,
+                    fan_mode_max_c=cpu_temp_max_c if page_key in FAN_CAPTURE_KEYS else None,
                 )
                 if existing is not None:
                     logger.info(f"Skipping {page_key}; existing screenshot found -> {existing.name}")
@@ -229,6 +241,8 @@ def run(
                         nav_selectors,
                         screenshots_dir,
                         capture_values,
+                        cpu_temp_max_c=cpu_temp_max_c,
+                        recheck_budget_s=fan_recheck_budget_s,
                     )
                 elif is_transfer_page:
                     share, direction = _transfer_share_direction(spec, page_key)
@@ -292,11 +306,24 @@ def _existing_capture_path(
     page_key: str,
     min_rate_mb_s: float | None = None,
     require_reported_values: bool = False,
+    fan_mode_max_c: float | None = None,
 ) -> Path | None:
     report_path = screenshots_dir.parent / "test_report.json"
     if require_reported_values and not _reported_capture_values(report_path, page_key):
         logger.info(f"Skipping existing {page_key} screenshot; no reported key values found")
         return None
+
+    # 重测护栏：上次留下的风扇/温度截图若记录的就是不合格读数（温度超标 / 转速异常），
+    # 不要复用——否则会拿旧失败值重新判定、永远复现同一个失败。强制重抓让设备有机会
+    # 在已冷却/风扇已稳态后给出合格读数。与传输速度「低于阈值不复用」同理。
+    if fan_mode_max_c is not None:
+        reported = _reported_capture_values(report_path, page_key)
+        if fan_mode_page_is_failing(page_key, reported, fan_mode_max_c):
+            logger.info(
+                f"Skipping existing {page_key} screenshot; recorded fan/temp reading "
+                f"would fail validation -> re-capturing"
+            )
+            return None
 
     if min_rate_mb_s is not None:
         reported_rate = _reported_transfer_rate_mb_s(report_path, page_key)
@@ -889,6 +916,8 @@ def _capture_fan_mode(
     nav_selectors: dict,
     screenshots_dir: Path,
     capture_values: dict[str, dict[str, str]] | None,
+    cpu_temp_max_c: float = DEFAULT_CPU_TEMP_MAX_C,
+    recheck_budget_s: float = DEFAULT_FAN_RECHECK_BUDGET_S,
 ) -> Path:
     fan_spec = _require_page_spec(page_specs, "fan_control")
     monitor_spec = _require_page_spec(page_specs, "resource_monitor")
@@ -927,15 +956,43 @@ def _capture_fan_mode(
     try:
         _arrange_fan_capture_windows(page)
         page.wait_for_timeout(FAN_POST_LAYOUT_WAIT_MS)
-        dismiss_desktop_overlays(page, max_rounds=2, completion_wait_ms=0)
-        page.wait_for_timeout(SHORT_UI_WAIT_MS)
-        # Read the RPM back-to-back with the screenshot. The fan is still
-        # ramping after a mode switch, and dismissing overlays / grabbing the
-        # screenshot spikes the CPU (and fan), so any gap between the read and
-        # the shot makes the reported RPM diverge from the number frozen in the
-        # screenshot (observed 508 reported vs 1044 on screen).
-        values = _log_key_values(monitor_frame, monitor_spec, page_key)
-        shot = capture_page(page, sn, page_key, screenshots_dir)
+        # 读数不合格（温度超标 / 转速异常）就重读+重抓，最多 recheck_budget_s 秒，等读数进入
+        # 合格区间再定格；超时仍不合格才保留最后一张按失败记录。与传输速度重试同理——消化
+        # 「满载尾巴瞬时高温」「风扇刚切档还在爬坡」这类瞬时假故障，免得操作员白白重测一台好机。
+        deadline = time.monotonic() + max(0.0, recheck_budget_s)
+        attempt = 0
+        values: dict[str, str] = {}
+        shot: Path | None = None
+        while True:
+            attempt += 1
+            dismiss_desktop_overlays(page, max_rounds=2, completion_wait_ms=0)
+            page.wait_for_timeout(SHORT_UI_WAIT_MS)
+            # Read the RPM back-to-back with the screenshot. The fan is still
+            # ramping after a mode switch, and dismissing overlays / grabbing the
+            # screenshot spikes the CPU (and fan), so any gap between the read and
+            # the shot makes the reported RPM diverge from the number frozen in the
+            # screenshot (observed 508 reported vs 1044 on screen).
+            values = _log_key_values(monitor_frame, monitor_spec, page_key)
+            shot = capture_page(page, sn, page_key, screenshots_dir)
+            failures = fan_mode_value_failures(page_key, values, cpu_temp_max_c)
+            if not failures:
+                break
+            if time.monotonic() >= deadline:
+                if attempt > 1:
+                    logger.warning(
+                        f"{page_key}: 读数仍不合格（{'；'.join(failures)}），已用满 "
+                        f"{recheck_budget_s:.0f}s 重抓预算，按当前截图记录"
+                    )
+                break
+            logger.info(
+                f"{page_key}: 读数不合格（{'；'.join(failures)}），"
+                f"{FAN_RECHECK_INTERVAL_MS // 1000}s 后重抓（第 {attempt} 次，预算 {recheck_budget_s:.0f}s）"
+            )
+            try:
+                shot.unlink(missing_ok=True)  # 丢弃这张不合格截图，免得目录里堆叠中间产物
+            except OSError:
+                pass
+            page.wait_for_timeout(FAN_RECHECK_INTERVAL_MS)
         if capture_values is not None and values:
             capture_values[page_key] = values
         return shot

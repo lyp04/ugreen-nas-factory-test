@@ -150,6 +150,10 @@ TIMING_COLORS = (
 )
 TIMING_MIN_VISIBLE_SECONDS = 20
 TIMING_DAY_ROLLOVER_THRESHOLD_SECONDS = 12 * 3600
+# GUI 注入 task.logs 的边界标记：它们之前的日志属于排队等待（"已加入队列" 用入队时刻打戳）
+# 或上一次会话（恢复任务时把磁盘上旧的 run.log 也并入了 task.logs）。这些都不是本次测试的
+# 耗时——build_timing_slices 遇到这些标记会丢弃此前累计，只统计标记之后最近一段连续运行。
+TIMING_RESET_MARKERS = ("已加入队列", "已从上次队列恢复", "自动恢复执行")
 
 
 def format_elapsed(seconds: int) -> str:
@@ -188,6 +192,14 @@ def build_timing_slices(logs: list[str]) -> list[TimingSlice]:
     update_index = 0
     active_update = False
     for index, (second, message) in enumerate(entries[:-1]):
+        # 越过排队/恢复边界就重置：丢弃此前累计（排队等待或上一次会话并入的旧 run.log），
+        # 并跳过这一行到下一行的空档（入队→开跑、旧会话→恢复 之间的空闲不计入耗时）。
+        if any(marker in message for marker in TIMING_RESET_MARKERS):
+            durations = {}
+            current = "准备"
+            update_index = 0
+            active_update = False
+            continue
         current, update_index, active_update = _timing_phase_after_message(
             message,
             current,

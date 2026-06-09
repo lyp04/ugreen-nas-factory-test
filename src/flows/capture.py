@@ -423,12 +423,16 @@ def _capture_standard_page(
     frame = _open_app(page, desktop_selectors, app)
     _navigate(frame, spec, nav_selectors)
     _wait_for_landmark(frame, spec, page_key)
-    values = _log_key_values(frame, spec, page_key)
-    if capture_values is not None and values:
-        capture_values[page_key] = values
     dismiss_desktop_overlays(page, max_rounds=2, completion_wait_ms=0)
     page.wait_for_timeout(SHORT_UI_WAIT_MS)
-    return capture_page(page, sn, page_key, screenshots_dir)
+    # 读数必须和截图背靠背：resource_monitor 在 4 个 SMB 传输刚结束时打开，CPU 正快速降温，
+    # 若先读数、再关弹窗+等待+截图，上传的数值会比图里冻住的数值偏高（实测上传 70℃ vs 截图 52℃）。
+    # 与风扇页 _capture_fan_mode 同理——读完立刻截，保证上传值 == 截图里的数字。
+    values = _log_key_values(frame, spec, page_key)
+    shot = capture_page(page, sn, page_key, screenshots_dir)
+    if capture_values is not None and values:
+        capture_values[page_key] = values
+    return shot
 
 
 def _capture_transfer_page(

@@ -2,19 +2,20 @@
 
 Windows 桌面工具，自动化完成 UGREEN NAS 的出厂全流程测试：系统初始化、固件更新、建池建共享、SMB 传输测速、截图采集、标签打印和恢复出厂设置。测试结果通过桥接接口交给独立的 `ugreen-nas-autoupdate` 项目自动录入 内部系统 表单。
 
-已支持机型：DXP2800（2 盘位）、DXP4800（4 盘位）、DXP4800Plus（4 盘位 + M.2）。
+已支持机型：DXP2800（SN 前缀 `HB`）、DXP4800（前缀 `EC671`）、DXP4800Plus（前缀 `EC752`，含 M.2）。机型由 SN 前缀自动识别（见 `src/utils/sn.py` 的 `SN_MODEL_PREFIXES`）。
 
-当前版本 0.1.0。
+版本号不在本文档硬编码；以 git tag（形如 `v0.1.23`）和 GitHub Release 为准。CI 在打 tag 时把 tag 名 stamp 进 `src/version.py`。
 
 ## 功能
 
-- 局域网自动发现 NAS（mDNS / 端口扫描 / UGREEN 广播），扫到即测
+- 局域网自动发现 NAS（UGREEN 广播 → mDNS → 端口扫描三级），扫到即测
 - 浏览器自动驾驶 UGOS 管理页面（Playwright + Edge），完成向导 → 登录 → 固件更新 → 建池建共享
 - SMB 传输测速（上传 + 下载），抓取 Windows 任务管理器实时速率截图，低于阈值自动判定失败
-- 逐页截图采集（系统更新、网口、存储池、读写速率、资源监控、风扇模式），绑定 CPU 温度 / 风扇转速等指标
-- CPU 温度超限（> 70 ℃）全机型自动判定测试失败（风扇安静模式转速可为 0，不判失败）
+- 逐页截图采集（系统更新、网口、存储池、HDD/SSD 读写速率、资源监控、风扇三模式），绑定 CPU 温度 / 风扇转速等指标
+- 风扇三模式页 CPU 温度超限（默认 > 70 ℃）即判失败；超标时会在预算时间内反复重读+重抓等读数回到合格区间再定格（风扇安静模式转速可为 0，不判失败；resource_monitor 页是满载尾巴瞬时读数，不参与判定）
 - 标签打印：SN 条码标签（模版二）、铭牌标贴（模版一）、69 码 EAN-13（模版五）、周转箱标贴（模版六）
-- 测试通过后自动录表到 内部系统（通过 `ugreen-nas-autoupdate` 桥接）
+- 测试通过后自动录表到 内部系统（通过同级 `ugreen-nas-autoupdate` 项目桥接）
+- 故障自动上报：非硬件类失败自动打包日志上传 Release 资产并按指纹去重创建/更新 GitHub Issue（见 `config.yml` 的 `fault_report`，token 留空即停用）
 - GUI 支持多台 NAS 排队并发测试，扫码枪扫一个排一个
 - App 自更新（从 GitHub Release 拉取新版本，SHA-256 校验后原地替换）
 
@@ -188,17 +189,19 @@ powershell -ExecutionPolicy Bypass -File .\build-exe.ps1
 |--------|------|
 | `admin.username / password` | UGOS 登录账号 |
 | `network.subnet` | NAS 发现的扫描网段 |
-| `pages` | 需要截图采集的页面列表 |
+| `pages` | 需要截图采集的页面列表（system_update / network_interface / storage_pool / hdd_write / hdd_read / ssd_write / ssd_read / resource_monitor / fan_normal / fan_silent / fan_full_speed） |
 | `provision.pools` | 自动建池方案（RAID 级别、磁盘选择） |
-| `transfer.source_files` | 各机型测速源文件路径（按 SN 前缀区分机型） |
-| `transfer.speed_thresholds_mb_s` | 传输速率通过阈值（MB/s），按机型可覆盖 |
-| `validation.cpu_temp_max_c` | CPU 温度上限（℃），超过即判定失败（默认 70，仅 resource_monitor 页除外） |
+| `transfer.source_files` | 各机型测速源文件路径（按 SN 前缀区分机型：2800=5G / 4800=10G / 4800Plus=20G） |
+| `transfer.speed_thresholds_mb_s` | 传输速率通过阈值（MB/s）。默认 200，按机型覆盖：2800=100、4800=100、4800Plus=200 |
+| `validation.cpu_temp_max_c` | 风扇三模式页 CPU 温度上限（℃），超过即判失败（默认 70；resource_monitor 页不参与判定） |
+| `validation.cpu_temp_recheck_seconds` | 温度/转速超标时的重读+重抓预算（秒，默认 30；0 = 抓一次定生死） |
 | `label_printer` | SN 条码标签打印机（模版二） |
 | `nameplate_printer` | 铭牌标贴打印机（模版一） |
 | `ean13_printer` | 69 码 EAN-13 打印机（模版五） |
 | `carton_printer` | 周转箱标贴打印机（模版六） |
-| `output_dir` | 截图和日志输出目录 |
-| `paths.autoupdate_root` | 自动录表系统目录（可被 `UGREEN_AUTOUPDATE_ROOT` 覆盖） |
+| `fault_report` | 故障自动上报（GitHub Issue + 日志打包），token 留空即停用 |
+| `output_dir` | 截图、日志、报告输出目录 |
+| `paths.autoupdate_root` | 自动录表系统目录（可被 `UGREEN_AUTOUPDATE_ROOT` 覆盖；缺省找同级 `ugreen-nas-autoupdate`） |
 
 页面选择器在 `config/selectors.yml`，跟随 UGOS 前端变化更新。
 
@@ -207,10 +210,18 @@ powershell -ExecutionPolicy Bypass -File .\build-exe.ps1
 ```
 src/
 ├── gui.py                     GUI 主窗口（Tkinter），多任务排队
+├── gui_no_form.py             GUI 变体：不触发自动录表
 ├── cli.py                     CLI 入口（Click），test / cleanup / print-*
-├── form_entry.py              内部系统 自动录表桥接
+├── form_entry.py              内部系统 自动录表桥接（文件 payload + 子进程 runner）
+├── measurements.py            温度/转速判定规则（与界面标红共用）
 ├── updater.py                 App 自更新（GitHub Release）
-├── version.py                 版本号
+├── version.py                 版本号（CI 在打 tag 时覆写）
+├── report/
+│   ├── collector.py           失败日志/截图采集打包
+│   ├── fingerprint.py         故障指纹（同类问题去重）
+│   ├── github_issues.py       GitHub Issue 创建/更新
+│   ├── redact.py              敏感信息脱敏
+│   └── reporter.py            故障上报编排
 ├── flows/
 │   ├── login.py               UGOS 登录
 │   ├── setup_wizard.py        初始化向导
@@ -228,8 +239,10 @@ src/
     ├── browser_control.py     Playwright 浏览器管理（隐藏窗口、PID 追踪）
     ├── screenshot.py          截图工具（SN 变更时目录迁移）
     ├── smb_transfer.py        SMB 传输测速（分块拷贝 + 进度文件）
-    ├── label.py               ZPL/TSPL 标签渲染（位图条码 + 字体回退）
-    ├── sn.py                  SN 解析（机型、等级、P/N 查表）
+    ├── label.py               ZPL/TSPL 标签渲染（位图条码 + 字体回退 + P/N·EAN-13 查表）
+    ├── sn.py                  SN 解析（机型前缀、等级、尾号匹配）
+    ├── app_guides.py          UGOS App 弹窗/引导关闭策略
+    ├── desktop.py             桌面/窗口辅助
     ├── config_loader.py       配置加载
     ├── logger.py              日志
     └── retry.py               重试装饰器（指数退避）

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
@@ -9,6 +10,7 @@ from urllib.parse import urlparse
 from playwright.sync_api import expect
 
 from . import cleanup as cleanup_flow
+from . import login as login_flow
 from ..utils.app_guides import dismiss_arco_app_guides, dismiss_storage_guide_modal
 from ..utils.desktop import click_desktop_launcher, dismiss_desktop_overlays
 from ..utils.logger import logger
@@ -23,6 +25,12 @@ SHORT_UI_WAIT_MS = 800
 POOL_READY_TIMEOUT_MS = 180_000
 POOL_CREATE_RETRY_INTERVAL_MS = 5_000
 POOL_CREATE_RETRY_POLL_MS = 500
+# A storage space (volume) keeps initialising for a while after its pool is "ready", and
+# UGOS only lists it once it is. The share dialog therefore may not show every space yet,
+# so we wait and reopen the dialog until all of them appear before picking one.
+SHARE_STORAGE_READY_TIMEOUT_MS = 180_000
+_CAPACITY_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(PB|TB|GB|MB)", re.IGNORECASE)
+_CAPACITY_UNIT_GB = {"MB": 1 / 1024, "GB": 1.0, "TB": 1024.0, "PB": 1024.0 * 1024}
 SHARE_FOLDER_MENU_TEXT = "\u65b0\u5efa\u5171\u4eab\u6587\u4ef6\u5939"
 SHARE_NAME_CONFLICT_TEXT = "\u5b58\u5728\u540c\u540d\u6587\u4ef6\u5939"
 MODAL_CANCEL_TEXT = "\u53d6\u6d88"
@@ -46,6 +54,16 @@ POOL_DISK_TOKEN_RE = re.compile(r"M\.2硬盘\d+|硬盘\d+")
 APP_LIBRARY_ICON_SELECTOR = ".nav-home .nav-home-icon"
 APP_LIBRARY_ITEM_SELECTOR = "div.app-item-wrapper"
 
+# A login-only marker: present on the UGOS login screen, absent on the desktop and
+# inside app modals. Used to tell a genuine session-logout apart from a merely slow
+# desktop. Overridable via selectors.yml (login.page_marker).
+LOGIN_PAGE_MARKER_FALLBACK = ".login-wrapper, .login-account"
+
+# Per-thread provisioning context. Tests run several NAS concurrently, each in its own
+# thread with its own Playwright page, so the re-login callback must not be shared
+# across threads — threading.local keeps each run's callback isolated.
+_provision_ctx = threading.local()
+
 
 class ProvisionError(RuntimeError):
     pass
@@ -64,21 +82,27 @@ def run(
     model: str | None = None,
     reset_existing_pools: bool = True,
 ) -> None:
-    dismiss_desktop_overlays(page, selectors, max_rounds=2, completion_wait_ms=0)
-    desktop = selectors.get("desktop_launchers", {})
-    nav = selectors.get("provision_nav", {})
-    provision_selectors = selectors.get("provision", {})
-    pools = config.get("provision", {}).get("pools", [])
+    # Make a session-recovery callback available to every _open_app call in this run, so
+    # a mid-provision logout can be repaired in place rather than aborting the test.
+    _provision_ctx.relogin = _make_relogin(page, selectors, admin)
+    try:
+        dismiss_desktop_overlays(page, selectors, max_rounds=2, completion_wait_ms=0)
+        desktop = selectors.get("desktop_launchers", {})
+        nav = selectors.get("provision_nav", {})
+        provision_selectors = selectors.get("provision", {})
+        pools = config.get("provision", {}).get("pools", [])
 
-    _ensure_smb_enabled(page, desktop, nav, provision_selectors)
-    if reset_existing_pools:
-        _cleanup_existing_pools_before_provisioning(page, selectors, admin)
+        _ensure_smb_enabled(page, desktop, nav, provision_selectors)
+        if reset_existing_pools:
+            _cleanup_existing_pools_before_provisioning(page, selectors, admin)
 
-    for pool in pools:
-        _ensure_pool(page, desktop, nav, provision_selectors, pool, admin, confirm_disk_shortage_cb, model)
+        for pool in pools:
+            _ensure_pool(page, desktop, nav, provision_selectors, pool, admin, confirm_disk_shortage_cb, model)
 
-    for pool in pools:
-        _ensure_share(page, desktop, nav, provision_selectors, pool, admin)
+        for pool in pools:
+            _ensure_share(page, desktop, nav, provision_selectors, pool, admin, expected_space_count=len(pools))
+    finally:
+        _provision_ctx.relogin = None
 
 
 def _ensure_smb_enabled(page: "Page", desktop: dict, nav: dict, provision: dict) -> None:
@@ -154,7 +178,15 @@ def _ensure_pool(
     logger.info(f"  Storage pool ready: {pool_name} -> {summary_text}")
 
 
-def _ensure_share(page: "Page", desktop: dict, nav: dict, provision: dict, pool: dict, admin: dict) -> None:
+def _ensure_share(
+    page: "Page",
+    desktop: dict,
+    nav: dict,
+    provision: dict,
+    pool: dict,
+    admin: dict,
+    expected_space_count: int = 1,
+) -> None:
     frame = _open_app(page, desktop, "filemgr")
     _dismiss_filemgr_intro_with_wait(page, frame, provision, wait_ms=6_000)
     _dismiss_filemgr_self_folder_tip_with_wait(page, frame, provision, wait_ms=6_000)
@@ -173,24 +205,44 @@ def _ensure_share(page: "Page", desktop: dict, nav: dict, provision: dict, pool:
         return
 
     logger.info(f"Provisioning: create shared folder {share_name} on {storage_space}")
-    _open_share_create_modal(frame, provision)
-
-    modal = frame.locator(_require_selector(provision.get("filemgr_share_modal"), "provision.filemgr_share_modal")).first
-    expect(modal).to_be_visible(timeout=FRAME_WAIT_MS)
-
-    _fill_share_name(frame, provision, share_name)
-    if _handle_share_name_conflict(page, frame, share_name, admin):
-        return
-
-    storage_select = frame.locator(
-        _require_selector(provision.get("filemgr_share_storage_select"), "provision.filemgr_share_storage_select")
-    ).first
-    storage_select.click()
-
+    modal_selector = _require_selector(provision.get("filemgr_share_modal"), "provision.filemgr_share_modal")
+    select_selector = _require_selector(provision.get("filemgr_share_storage_select"), "provision.filemgr_share_storage_select")
     option_selector = _require_selector(provision.get("filemgr_share_storage_option"), "provision.filemgr_share_storage_option")
-    storage_option = frame.locator(option_selector).filter(has_text=storage_space).first
-    expect(storage_option).to_be_visible(timeout=FRAME_WAIT_MS)
-    storage_option.click()
+    pool_key = (pool.get("key") or "").strip().lower()
+
+    deadline = time.monotonic() + (SHARE_STORAGE_READY_TIMEOUT_MS / 1000)
+    while True:
+        _open_share_create_modal(frame, provision)
+        modal = frame.locator(modal_selector).first
+        expect(modal).to_be_visible(timeout=FRAME_WAIT_MS)
+
+        _fill_share_name(frame, provision, share_name)
+        if _handle_share_name_conflict(page, frame, share_name, admin):
+            return
+
+        frame.locator(select_selector).first.click()
+        indices, entries = _collect_visible_storage_options(frame, option_selector)
+        past_deadline = time.monotonic() >= deadline
+        position = _pick_storage_space_index(
+            entries, pool_key, storage_space, expected_space_count, require_full=not past_deadline
+        )
+        if position is not None:
+            frame.locator(option_selector).nth(indices[position]).click()
+            logger.info(f"  selected storage space '{entries[position][0]}' for share {share_name}")
+            break
+
+        seen = [text for text, _cap in entries]
+        if past_deadline:
+            raise ProvisionError(
+                f"storage space for share '{share_name}' (expected {storage_space}) did not become "
+                f"available; options seen: {seen}"
+            )
+        logger.info(
+            f"  storage space for {share_name} not ready yet "
+            f"(have {seen or '[]'}, expected {expected_space_count}); reopening dialog and retrying"
+        )
+        _cancel_share_modal(frame)
+        page.wait_for_timeout(POOL_CREATE_RETRY_INTERVAL_MS)
 
     if _handle_share_name_conflict(page, frame, share_name, admin):
         return
@@ -220,6 +272,100 @@ def _ensure_share(page: "Page", desktop: dict, nav: dict, provision: dict, pool:
     expect(share_row).to_be_visible(timeout=FRAME_WAIT_MS)
     page.wait_for_timeout(SHORT_UI_WAIT_MS)
     logger.info(f"  Shared folder ready: {share_name}")
+
+
+def _storage_capacity_gb(text: str) -> float | None:
+    """Largest capacity (in GB) mentioned in a storage-space option's label, or None."""
+
+    best: float | None = None
+    for number, unit in _CAPACITY_RE.findall(text or ""):
+        try:
+            gb = float(number) * _CAPACITY_UNIT_GB[unit.upper()]
+        except (ValueError, KeyError):
+            continue
+        if best is None or gb > best:
+            best = gb
+    return best
+
+
+def _pick_storage_space_index(
+    entries: list[tuple[str, float | None]],
+    pool_key: str,
+    storage_space: str,
+    expected_space_count: int,
+    require_full: bool,
+) -> int | None:
+    """Choose which storage-space option to use for a share's pool.
+
+    UGOS numbers storage spaces by initialisation-completion order, not pool-creation
+    order, so the configured 存储空间N name is unreliable (the M.2 pool's space and the
+    HDD pool's space swap numbers between runs). Map by capacity class instead — the HDD
+    pool's space is always far larger than the M.2 (ssd) pool's. While ``require_full`` is
+    set we hold out until every expected space is listed, so "largest"/"smallest" is taken
+    over the complete set rather than whichever space initialised first.
+    """
+
+    if require_full and len(entries) < max(expected_space_count, 1):
+        return None
+
+    capped = [(idx, cap) for idx, (_text, cap) in enumerate(entries) if cap is not None]
+    if pool_key == "ssd" and capped:
+        return min(capped, key=lambda item: item[1])[0]
+    if pool_key == "hdd" and capped:
+        return max(capped, key=lambda item: item[1])[0]
+
+    # Unknown pool key or unparseable capacities: fall back to the configured name.
+    for idx, (text, _cap) in enumerate(entries):
+        if storage_space and storage_space in text:
+            return idx
+    return None
+
+
+def _collect_visible_storage_options(
+    frame: "Frame", option_selector: str
+) -> tuple[list[int], list[tuple[str, float | None]]]:
+    """Return parallel lists of (locator index, (text, capacity)) for visible options."""
+
+    options = frame.locator(option_selector)
+    deadline = time.monotonic() + 3.0
+    while True:
+        indices: list[int] = []
+        entries: list[tuple[str, float | None]] = []
+        try:
+            count = options.count()
+        except Exception:
+            count = 0
+        for index in range(min(count, 20)):
+            option = options.nth(index)
+            try:
+                if not option.is_visible(timeout=100):
+                    continue
+                text = (option.inner_text(timeout=300) or "").strip()
+            except Exception:
+                continue
+            indices.append(index)
+            entries.append((text, _storage_capacity_gb(text)))
+        if entries or time.monotonic() >= deadline:
+            return indices, entries
+        frame.page.wait_for_timeout(200)
+
+
+def _cancel_share_modal(frame: "Frame") -> None:
+    """Close the create-share dialog so the next attempt re-fetches the storage list."""
+
+    try:
+        cancel = frame.locator(f'.arco-modal-footer button:has-text("{MODAL_CANCEL_TEXT}")').first
+        if cancel.count() and cancel.is_visible(timeout=500):
+            cancel.click()
+            frame.page.wait_for_timeout(300)
+            return
+    except Exception:
+        pass
+    try:
+        frame.page.keyboard.press("Escape")
+        frame.page.wait_for_timeout(300)
+    except Exception:
+        pass
 
 
 def _dismiss_filemgr_intro(page: "Page", frame: "Frame", provision: dict) -> bool:
@@ -1447,6 +1593,54 @@ def _share_exists_via_smb(page: "Page", share_name: str, admin: dict) -> bool:
 _OPEN_APP_ATTEMPTS = 2
 
 
+def _base_url(page: "Page") -> str:
+    parsed = urlparse(page.url)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return page.url
+
+
+def _make_relogin(page: "Page", selectors: dict, admin: dict) -> Callable[[], bool]:
+    """Build a callback that re-authenticates *iff* the page dropped to the login screen.
+
+    UGOS sometimes logs the session out mid-provisioning — most often right after a
+    desktop reload (see ``_recover_desktop_before_retry``). The top page then shows the
+    login form instead of the desktop, so the next ``_open_app`` finds no launcher/iframe
+    and dies with a confusing "Could not open the app library from the desktop toolbar".
+    The returned callback detects the login page via a login-only marker and, only then,
+    replays the standard login flow; on any other page it is a no-op.
+    """
+
+    login_sel = selectors.get("login", {}) or {}
+    marker = login_sel.get("page_marker") or LOGIN_PAGE_MARKER_FALLBACK
+
+    def relogin_if_on_login_page() -> bool:
+        try:
+            if not page.locator(marker).first.is_visible(timeout=800):
+                return False
+        except Exception:
+            return False
+        logger.warning("Provisioning: login page detected mid-provision; re-authenticating")
+        login_flow.run(page, _base_url(page), admin, selectors)
+        page.wait_for_timeout(SHORT_UI_WAIT_MS)
+        return True
+
+    return relogin_if_on_login_page
+
+
+def _relogin_if_on_login_page() -> bool:
+    """Re-login when the current page is the login screen, using the active run's context."""
+
+    relogin = getattr(_provision_ctx, "relogin", None)
+    if relogin is None:
+        return False
+    try:
+        return bool(relogin())
+    except Exception as exc:  # never let recovery mask the original failure
+        logger.warning(f"Provisioning: re-login attempt failed: {exc}")
+        return False
+
+
 def _open_app(page: "Page", desktop_selectors: dict, app: str) -> "Frame":
     # UGOS sometimes renders the desktop launcher but never mounts the app iframe
     # in time (seen as "iframe 'storagemgr' did not appear on the desktop"). It's
@@ -1474,6 +1668,9 @@ def _recover_desktop_before_retry(page: "Page") -> None:
         page.reload(wait_until="domcontentloaded", timeout=FRAME_WAIT_MS)
     except Exception:
         pass
+    # A reload can bounce us back to the login page when UGOS has dropped the session;
+    # re-authenticate before sweeping overlays so the desktop is actually present.
+    _relogin_if_on_login_page()
     try:
         page.wait_for_timeout(SHORT_UI_WAIT_MS)
         dismiss_desktop_overlays(page, max_rounds=3, completion_wait_ms=2_000, idle_wait_ms=0)
@@ -1491,6 +1688,10 @@ def _open_app_once(page: "Page", desktop_selectors: dict, app: str) -> "Frame":
         _activate_window(page, frame_selector)
     else:
         launcher = _find_visible_locator(page, app_selector, timeout_ms=1_500)
+        if launcher is None and _relogin_if_on_login_page():
+            # Session had expired and we were sitting on the login page, not the desktop;
+            # after re-login the launcher should be back.
+            launcher = _find_visible_locator(page, app_selector, timeout_ms=FRAME_WAIT_MS)
         if launcher is None:
             logger.info(f"Desktop launcher for {app} is not visible; opening app library")
             _open_app_library(page)

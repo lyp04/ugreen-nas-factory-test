@@ -35,6 +35,9 @@ login:
   password_input: 'input[type="password"]'
   submit_button: 'button.ivu-btn-primary'
   post_login_marker: 'div[moduleid] .click-region, iframe[name]'
+  # Login-only marker: present on the login screen, absent on the desktop and inside app
+  # modals. Lets provisioning tell a real session logout apart from a slow desktop.
+  page_marker: '.login-wrapper, .login-account'
 
 # -----------------------------------------------------------------------------
 # Desktop app launchers and iframe anchors

@@ -247,3 +247,116 @@ def test_open_share_create_modal_uses_share_menu_after_stale_create_button(monke
     provision._open_share_create_modal(frame, provision_selectors)
 
     assert frame.click_log == ["empty", "quick", "share_item"]
+
+
+class _FakeMarkerLocator:
+    def __init__(self, visible: bool) -> None:
+        self._visible = visible
+
+    @property
+    def first(self) -> "_FakeMarkerLocator":
+        return self
+
+    def is_visible(self, timeout: int | None = None) -> bool:
+        return self._visible
+
+
+class _FakeReloginPage:
+    def __init__(self, url: str, login_marker_visible: bool) -> None:
+        self.url = url
+        self._login_marker_visible = login_marker_visible
+        self.waits: list[int] = []
+
+    def locator(self, _selector: str) -> _FakeMarkerLocator:
+        return _FakeMarkerLocator(self._login_marker_visible)
+
+    def wait_for_timeout(self, ms: int) -> None:
+        self.waits.append(ms)
+
+
+def test_make_relogin_is_noop_off_the_login_page(monkeypatch) -> None:
+    calls: list[tuple] = []
+    monkeypatch.setattr(provision.login_flow, "run", lambda *args, **_kwargs: calls.append(args))
+
+    page = _FakeReloginPage("http://10.0.0.5:9999/desktop", login_marker_visible=False)
+    relogin = provision._make_relogin(page, {"login": {}}, {"username": "u", "password": "p"})
+
+    assert relogin() is False
+    assert calls == []
+
+
+def test_make_relogin_reauthenticates_at_base_url_on_login_page(monkeypatch) -> None:
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        provision.login_flow,
+        "run",
+        lambda _page, url, admin, _selectors: calls.append((url, admin)),
+    )
+
+    admin = {"username": "u", "password": "p"}
+    page = _FakeReloginPage("http://10.0.0.5:9999/some/inner/path", login_marker_visible=True)
+    relogin = provision._make_relogin(page, {"login": {"page_marker": ".login-wrapper"}}, admin)
+
+    assert relogin() is True
+    # navigates to the bare host, not the deep SPA path it was stuck on
+    assert calls == [("http://10.0.0.5:9999", admin)]
+
+
+def test_relogin_if_on_login_page_delegates_to_thread_context() -> None:
+    assert getattr(provision._provision_ctx, "relogin", None) is None
+    assert provision._relogin_if_on_login_page() is False  # no active run -> no-op
+
+    seen = {"called": False}
+
+    def fake_relogin() -> bool:
+        seen["called"] = True
+        return True
+
+    provision._provision_ctx.relogin = fake_relogin
+    try:
+        assert provision._relogin_if_on_login_page() is True
+        assert seen["called"] is True
+    finally:
+        provision._provision_ctx.relogin = None
+
+
+def test_relogin_if_on_login_page_swallows_recovery_errors() -> None:
+    def boom() -> bool:
+        raise RuntimeError("login failed")
+
+    provision._provision_ctx.relogin = boom
+    try:
+        assert provision._relogin_if_on_login_page() is False
+    finally:
+        provision._provision_ctx.relogin = None
+
+
+def test_storage_capacity_gb_parses_largest_value() -> None:
+    assert provision._storage_capacity_gb("存储空间1 ext4 可用 1.7TB / 1.7TB") == 1.7 * 1024
+    assert provision._storage_capacity_gb("存储空间2 ext4 可用 438GB / 438.1GB") == 438.1
+    assert provision._storage_capacity_gb("可用 512MB / 512MB") == 512 / 1024
+    assert provision._storage_capacity_gb("存储空间1 ext4") is None
+
+
+def test_pick_storage_space_maps_by_capacity_not_name() -> None:
+    # UGOS swapped the numbering: 存储空间1 is the small M.2 space, 存储空间2 the large HDD one.
+    entries = [("存储空间1 可用 438GB", 438.1), ("存储空间2 可用 1.7TB", 1.7 * 1024)]
+
+    # hdd share must land on the large space regardless of which number it carries
+    assert provision._pick_storage_space_index(entries, "hdd", "存储空间1", 2, require_full=True) == 1
+    # ssd share must land on the small space
+    assert provision._pick_storage_space_index(entries, "ssd", "存储空间2", 2, require_full=True) == 0
+
+
+def test_pick_storage_space_waits_for_all_spaces_when_required() -> None:
+    one_space = [("存储空间1 可用 1.7TB", 1.7 * 1024)]
+    # only one of two spaces listed so far -> hold out while require_full is set
+    assert provision._pick_storage_space_index(one_space, "ssd", "存储空间2", 2, require_full=True) is None
+    # last-resort relaxed pick selects among whatever is present
+    assert provision._pick_storage_space_index(one_space, "ssd", "存储空间2", 2, require_full=False) == 0
+
+
+def test_pick_storage_space_falls_back_to_name_for_unknown_key() -> None:
+    entries = [("存储空间1", None), ("存储空间2", None)]
+    assert provision._pick_storage_space_index(entries, "", "存储空间2", 2, require_full=False) == 1
+    assert provision._pick_storage_space_index(entries, "", "缺失空间", 2, require_full=False) is None

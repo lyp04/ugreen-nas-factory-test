@@ -331,32 +331,59 @@ def test_relogin_if_on_login_page_swallows_recovery_errors() -> None:
         provision._provision_ctx.relogin = None
 
 
-def test_storage_capacity_gb_parses_largest_value() -> None:
-    assert provision._storage_capacity_gb("存储空间1 ext4 可用 1.7TB / 1.7TB") == 1.7 * 1024
-    assert provision._storage_capacity_gb("存储空间2 ext4 可用 438GB / 438.1GB") == 438.1
-    assert provision._storage_capacity_gb("可用 512MB / 512MB") == 512 / 1024
-    assert provision._storage_capacity_gb("存储空间1 ext4") is None
+def test_create_pools_and_shares_rebuilds_pools_when_storage_space_missing(monkeypatch) -> None:
+    events: list[str] = []
+    pools = [{"key": "hdd"}, {"key": "ssd"}]
+    state = {"cleaned": False}
+
+    monkeypatch.setattr(
+        provision,
+        "_ensure_pool",
+        lambda page, desktop, nav, prov, pool, admin, cb, model: events.append(f"pool:{pool['key']}"),
+    )
+
+    def fake_share(page, desktop, nav, prov, pool, admin) -> None:
+        events.append(f"share:{pool['key']}")
+        # The second share can't find its space until the pools are wiped and rebuilt.
+        if pool["key"] == "ssd" and not state["cleaned"]:
+            raise provision.StorageSpaceMissing("storage space '存储空间2' is not available")
+
+    monkeypatch.setattr(provision, "_ensure_share", fake_share)
+
+    def fake_cleanup(page, selectors, admin):
+        state["cleaned"] = True
+        events.append("cleanup")
+        return ["存储池1", "存储池2"]
+
+    monkeypatch.setattr(provision.cleanup_flow, "run", fake_cleanup)
+
+    provision._create_pools_and_shares("page", {}, {}, {}, {}, pools, {}, None, "2800")
+
+    assert events == [
+        "pool:hdd", "pool:ssd", "share:hdd", "share:ssd",  # first pass: ssd share fails
+        "cleanup",                                          # delete every pool
+        "pool:hdd", "pool:ssd", "share:hdd", "share:ssd",  # rebuild + redo shares: ok
+    ]
 
 
-def test_pick_storage_space_maps_by_capacity_not_name() -> None:
-    # UGOS swapped the numbering: 存储空间1 is the small M.2 space, 存储空间2 the large HDD one.
-    entries = [("存储空间1 可用 438GB", 438.1), ("存储空间2 可用 1.7TB", 1.7 * 1024)]
+def test_create_pools_and_shares_gives_up_after_max_rebuilds(monkeypatch) -> None:
+    events: list[str] = []
+    pools = [{"key": "hdd"}]
 
-    # hdd share must land on the large space regardless of which number it carries
-    assert provision._pick_storage_space_index(entries, "hdd", "存储空间1", 2, require_full=True) == 1
-    # ssd share must land on the small space
-    assert provision._pick_storage_space_index(entries, "ssd", "存储空间2", 2, require_full=True) == 0
+    monkeypatch.setattr(provision, "_ensure_pool", lambda *a, **k: events.append("pool"))
 
+    def always_missing(page, desktop, nav, prov, pool, admin) -> None:
+        raise provision.StorageSpaceMissing("always missing")
 
-def test_pick_storage_space_waits_for_all_spaces_when_required() -> None:
-    one_space = [("存储空间1 可用 1.7TB", 1.7 * 1024)]
-    # only one of two spaces listed so far -> hold out while require_full is set
-    assert provision._pick_storage_space_index(one_space, "ssd", "存储空间2", 2, require_full=True) is None
-    # last-resort relaxed pick selects among whatever is present
-    assert provision._pick_storage_space_index(one_space, "ssd", "存储空间2", 2, require_full=False) == 0
+    monkeypatch.setattr(provision, "_ensure_share", always_missing)
+    monkeypatch.setattr(provision.cleanup_flow, "run", lambda *a, **k: events.append("cleanup") or [])
 
+    try:
+        provision._create_pools_and_shares("page", {}, {}, {}, {}, pools, {}, None, "2800")
+    except provision.StorageSpaceMissing:
+        pass
+    else:
+        raise AssertionError("StorageSpaceMissing was not raised after exhausting rebuilds")
 
-def test_pick_storage_space_falls_back_to_name_for_unknown_key() -> None:
-    entries = [("存储空间1", None), ("存储空间2", None)]
-    assert provision._pick_storage_space_index(entries, "", "存储空间2", 2, require_full=False) == 1
-    assert provision._pick_storage_space_index(entries, "", "缺失空间", 2, require_full=False) is None
+    # one rebuild attempt between the two passes, then it gives up
+    assert events.count("cleanup") == provision.POOL_REBUILD_ATTEMPTS - 1

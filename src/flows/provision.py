@@ -25,12 +25,10 @@ SHORT_UI_WAIT_MS = 800
 POOL_READY_TIMEOUT_MS = 180_000
 POOL_CREATE_RETRY_INTERVAL_MS = 5_000
 POOL_CREATE_RETRY_POLL_MS = 500
-# A storage space (volume) keeps initialising for a while after its pool is "ready", and
-# UGOS only lists it once it is. The share dialog therefore may not show every space yet,
-# so we wait and reopen the dialog until all of them appear before picking one.
-SHARE_STORAGE_READY_TIMEOUT_MS = 180_000
-_CAPACITY_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(PB|TB|GB|MB)", re.IGNORECASE)
-_CAPACITY_UNIT_GB = {"MB": 1 / 1024, "GB": 1.0, "TB": 1024.0, "PB": 1024.0 * 1024}
+# How many times to (re)build the pools+shares. A storage space can be missing because
+# the pool layout is stale/corrupt; the recovery is to delete every pool and rebuild, so
+# we allow one rebuild pass beyond the initial attempt.
+POOL_REBUILD_ATTEMPTS = 2
 SHARE_FOLDER_MENU_TEXT = "\u65b0\u5efa\u5171\u4eab\u6587\u4ef6\u5939"
 SHARE_NAME_CONFLICT_TEXT = "\u5b58\u5728\u540c\u540d\u6587\u4ef6\u5939"
 MODAL_CANCEL_TEXT = "\u53d6\u6d88"
@@ -73,6 +71,10 @@ class ProvisionAborted(ProvisionError):
     pass
 
 
+class StorageSpaceMissing(ProvisionError):
+    """A share's target storage space is absent — recover by rebuilding all pools."""
+
+
 def run(
     page: "Page",
     config: dict,
@@ -96,13 +98,45 @@ def run(
         if reset_existing_pools:
             _cleanup_existing_pools_before_provisioning(page, selectors, admin)
 
-        for pool in pools:
-            _ensure_pool(page, desktop, nav, provision_selectors, pool, admin, confirm_disk_shortage_cb, model)
-
-        for pool in pools:
-            _ensure_share(page, desktop, nav, provision_selectors, pool, admin, expected_space_count=len(pools))
+        _create_pools_and_shares(
+            page, desktop, nav, provision_selectors, selectors, pools, admin, confirm_disk_shortage_cb, model
+        )
     finally:
         _provision_ctx.relogin = None
+
+
+def _create_pools_and_shares(
+    page: "Page",
+    desktop: dict,
+    nav: dict,
+    provision: dict,
+    selectors: dict,
+    pools: list,
+    admin: dict,
+    confirm_disk_shortage_cb: Callable[[dict], bool] | None,
+    model: str | None,
+) -> None:
+    # Create every pool, then every share. If a share can't find its storage space, the
+    # pool/space layout is bad (e.g. a stale layout reused across a resumed run, where the
+    # spaces are mis-numbered or one never materialised). Working around it in the share
+    # dialog is unreliable — the fix is to delete every pool and rebuild from scratch so
+    # the spaces come back as a clean 存储空间1/存储空间2, then redo the shares.
+    for attempt in range(1, POOL_REBUILD_ATTEMPTS + 1):
+        for pool in pools:
+            _ensure_pool(page, desktop, nav, provision, pool, admin, confirm_disk_shortage_cb, model)
+
+        try:
+            for pool in pools:
+                _ensure_share(page, desktop, nav, provision, pool, admin)
+            return
+        except StorageSpaceMissing as exc:
+            if attempt >= POOL_REBUILD_ATTEMPTS:
+                raise
+            logger.warning(
+                f"Provisioning: {exc}; deleting all storage pools and rebuilding "
+                f"(attempt {attempt}/{POOL_REBUILD_ATTEMPTS})"
+            )
+            cleanup_flow.run(page, selectors, admin)
 
 
 def _ensure_smb_enabled(page: "Page", desktop: dict, nav: dict, provision: dict) -> None:
@@ -178,15 +212,7 @@ def _ensure_pool(
     logger.info(f"  Storage pool ready: {pool_name} -> {summary_text}")
 
 
-def _ensure_share(
-    page: "Page",
-    desktop: dict,
-    nav: dict,
-    provision: dict,
-    pool: dict,
-    admin: dict,
-    expected_space_count: int = 1,
-) -> None:
+def _ensure_share(page: "Page", desktop: dict, nav: dict, provision: dict, pool: dict, admin: dict) -> None:
     frame = _open_app(page, desktop, "filemgr")
     _dismiss_filemgr_intro_with_wait(page, frame, provision, wait_ms=6_000)
     _dismiss_filemgr_self_folder_tip_with_wait(page, frame, provision, wait_ms=6_000)
@@ -205,44 +231,33 @@ def _ensure_share(
         return
 
     logger.info(f"Provisioning: create shared folder {share_name} on {storage_space}")
-    modal_selector = _require_selector(provision.get("filemgr_share_modal"), "provision.filemgr_share_modal")
-    select_selector = _require_selector(provision.get("filemgr_share_storage_select"), "provision.filemgr_share_storage_select")
+    _open_share_create_modal(frame, provision)
+
+    modal = frame.locator(_require_selector(provision.get("filemgr_share_modal"), "provision.filemgr_share_modal")).first
+    expect(modal).to_be_visible(timeout=FRAME_WAIT_MS)
+
+    _fill_share_name(frame, provision, share_name)
+    if _handle_share_name_conflict(page, frame, share_name, admin):
+        return
+
+    storage_select = frame.locator(
+        _require_selector(provision.get("filemgr_share_storage_select"), "provision.filemgr_share_storage_select")
+    ).first
+    storage_select.click()
+
     option_selector = _require_selector(provision.get("filemgr_share_storage_option"), "provision.filemgr_share_storage_option")
-    pool_key = (pool.get("key") or "").strip().lower()
-
-    deadline = time.monotonic() + (SHARE_STORAGE_READY_TIMEOUT_MS / 1000)
-    while True:
-        _open_share_create_modal(frame, provision)
-        modal = frame.locator(modal_selector).first
-        expect(modal).to_be_visible(timeout=FRAME_WAIT_MS)
-
-        _fill_share_name(frame, provision, share_name)
-        if _handle_share_name_conflict(page, frame, share_name, admin):
-            return
-
-        frame.locator(select_selector).first.click()
-        indices, entries = _collect_visible_storage_options(frame, option_selector)
-        past_deadline = time.monotonic() >= deadline
-        position = _pick_storage_space_index(
-            entries, pool_key, storage_space, expected_space_count, require_full=not past_deadline
-        )
-        if position is not None:
-            frame.locator(option_selector).nth(indices[position]).click()
-            logger.info(f"  selected storage space '{entries[position][0]}' for share {share_name}")
-            break
-
-        seen = [text for text, _cap in entries]
-        if past_deadline:
-            raise ProvisionError(
-                f"storage space for share '{share_name}' (expected {storage_space}) did not become "
-                f"available; options seen: {seen}"
-            )
-        logger.info(
-            f"  storage space for {share_name} not ready yet "
-            f"(have {seen or '[]'}, expected {expected_space_count}); reopening dialog and retrying"
-        )
-        _cancel_share_modal(frame)
-        page.wait_for_timeout(POOL_CREATE_RETRY_INTERVAL_MS)
+    storage_option = frame.locator(option_selector).filter(has_text=storage_space).first
+    try:
+        expect(storage_option).to_be_visible(timeout=FRAME_WAIT_MS)
+    except Exception as exc:
+        # The space this share needs isn't listed — the pool/space layout is bad. Bail so
+        # the caller can delete every pool and rebuild from scratch (a clean rebuild brings
+        # the spaces back as 存储空间1/存储空间2 in order).
+        _dismiss_share_modal(frame)
+        raise StorageSpaceMissing(
+            f"storage space '{storage_space}' for share '{share_name}' is not available"
+        ) from exc
+    storage_option.click()
 
     if _handle_share_name_conflict(page, frame, share_name, admin):
         return
@@ -274,84 +289,8 @@ def _ensure_share(
     logger.info(f"  Shared folder ready: {share_name}")
 
 
-def _storage_capacity_gb(text: str) -> float | None:
-    """Largest capacity (in GB) mentioned in a storage-space option's label, or None."""
-
-    best: float | None = None
-    for number, unit in _CAPACITY_RE.findall(text or ""):
-        try:
-            gb = float(number) * _CAPACITY_UNIT_GB[unit.upper()]
-        except (ValueError, KeyError):
-            continue
-        if best is None or gb > best:
-            best = gb
-    return best
-
-
-def _pick_storage_space_index(
-    entries: list[tuple[str, float | None]],
-    pool_key: str,
-    storage_space: str,
-    expected_space_count: int,
-    require_full: bool,
-) -> int | None:
-    """Choose which storage-space option to use for a share's pool.
-
-    UGOS numbers storage spaces by initialisation-completion order, not pool-creation
-    order, so the configured 存储空间N name is unreliable (the M.2 pool's space and the
-    HDD pool's space swap numbers between runs). Map by capacity class instead — the HDD
-    pool's space is always far larger than the M.2 (ssd) pool's. While ``require_full`` is
-    set we hold out until every expected space is listed, so "largest"/"smallest" is taken
-    over the complete set rather than whichever space initialised first.
-    """
-
-    if require_full and len(entries) < max(expected_space_count, 1):
-        return None
-
-    capped = [(idx, cap) for idx, (_text, cap) in enumerate(entries) if cap is not None]
-    if pool_key == "ssd" and capped:
-        return min(capped, key=lambda item: item[1])[0]
-    if pool_key == "hdd" and capped:
-        return max(capped, key=lambda item: item[1])[0]
-
-    # Unknown pool key or unparseable capacities: fall back to the configured name.
-    for idx, (text, _cap) in enumerate(entries):
-        if storage_space and storage_space in text:
-            return idx
-    return None
-
-
-def _collect_visible_storage_options(
-    frame: "Frame", option_selector: str
-) -> tuple[list[int], list[tuple[str, float | None]]]:
-    """Return parallel lists of (locator index, (text, capacity)) for visible options."""
-
-    options = frame.locator(option_selector)
-    deadline = time.monotonic() + 3.0
-    while True:
-        indices: list[int] = []
-        entries: list[tuple[str, float | None]] = []
-        try:
-            count = options.count()
-        except Exception:
-            count = 0
-        for index in range(min(count, 20)):
-            option = options.nth(index)
-            try:
-                if not option.is_visible(timeout=100):
-                    continue
-                text = (option.inner_text(timeout=300) or "").strip()
-            except Exception:
-                continue
-            indices.append(index)
-            entries.append((text, _storage_capacity_gb(text)))
-        if entries or time.monotonic() >= deadline:
-            return indices, entries
-        frame.page.wait_for_timeout(200)
-
-
-def _cancel_share_modal(frame: "Frame") -> None:
-    """Close the create-share dialog so the next attempt re-fetches the storage list."""
+def _dismiss_share_modal(frame: "Frame") -> None:
+    """Best-effort close of the create-share dialog so a pool rebuild can start clean."""
 
     try:
         cancel = frame.locator(f'.arco-modal-footer button:has-text("{MODAL_CANCEL_TEXT}")').first

@@ -1,4 +1,43 @@
+from pathlib import Path
+
+from src.utils import screenshot
 from src.utils.screenshot import relocate_session_dirs, session_dirs
+
+
+def test_capture_page_does_not_overwrite_same_second(tmp_path, monkeypatch) -> None:
+    # _timestamp() is 1-second granular; two captures of the same page within the same
+    # wall-clock second must NOT collide. The second gets a _2 suffix so the first
+    # screenshot is never overwritten — a caller holding the first path keeps a real image.
+    monkeypatch.setattr(screenshot, "_timestamp", lambda: "20260101_120000")
+
+    class FakePage:
+        def screenshot(self, path, **_kwargs):
+            Path(path).write_bytes(b"png")
+
+    page = FakePage()
+    first = screenshot.capture_page(page, "SN123", "hdd_read", tmp_path)
+    second = screenshot.capture_page(page, "SN123", "hdd_read", tmp_path)
+
+    assert first != second
+    assert first.exists() and second.exists()
+    assert first.name == "SN123_hdd_read_20260101_120000.png"
+    assert second.name == "SN123_hdd_read_20260101_120000_2.png"
+
+
+def test_capture_page_cleans_partial_png_on_screenshot_failure(tmp_path) -> None:
+    # If page.screenshot() raises after starting to write, capture_page must not leave a
+    # partial/zero-byte PNG behind (it would later be mistaken for a valid existing capture).
+    import pytest
+
+    class BoomPage:
+        def screenshot(self, path, **_kwargs):
+            Path(path).write_bytes(b"partial")
+            raise RuntimeError("screenshot failed mid-write")
+
+    with pytest.raises(RuntimeError):
+        screenshot.capture_page(BoomPage(), "SN123", "hdd_read", tmp_path)
+
+    assert list(tmp_path.glob("*.png")) == []  # partial file cleaned up
 
 
 def test_session_dirs_is_lazy_and_creates_nothing(tmp_path) -> None:

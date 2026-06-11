@@ -429,14 +429,13 @@ def test_transfer_capture_records_bracketed_stable_rate(tmp_path, monkeypatch) -
 
 
 def test_transfer_capture_rejects_unstable_screenshot(tmp_path, monkeypatch) -> None:
-    # If the displayed rate moved across the screenshot window (a bursty M.2 write:
-    # 180 just before, 560 just after), that screenshot is ambiguous and must be
-    # rejected. A later steady window is accepted, and the recorded value equals the
-    # rate frozen in the kept screenshot (never the pre-screenshot peak/trough).
-    best_shot = tmp_path / "best.png"
+    # If the displayed rate moved across the screenshot window (180 just before, 560
+    # just after — the shot straddled a ~1s refresh edge), that screenshot is ambiguous
+    # and is discarded. A later steady window is accepted, and the recorded value equals
+    # the rate frozen in the kept screenshot.
     reject_shot = tmp_path / "reject.png"
     accept_shot = tmp_path / "accept.png"
-    for path in (best_shot, reject_shot, accept_shot):
+    for path in (reject_shot, accept_shot):
         path.write_bytes(b"png")
 
     texts = iter(
@@ -449,7 +448,7 @@ def test_transfer_capture_rejects_unstable_screenshot(tmp_path, monkeypatch) -> 
             f"{READ_MARKER} 560 MB/s {WRITE_MARKER} 0 B/s",   # iter2 post (== pre -> accept)
         ]
     )
-    shots = iter([best_shot, reject_shot, accept_shot])
+    shots = iter([reject_shot, accept_shot])
     process_checks = iter([False, True])
     cfg = SmbTransferConfig(unc_share=r"\\192.168.0.168\hdd", local_dir=tmp_path)
 
@@ -480,6 +479,278 @@ def test_transfer_capture_rejects_unstable_screenshot(tmp_path, monkeypatch) -> 
     assert result.reached_threshold is True
     assert result.values["rate_mbps"] == "560"
     assert result.shot_path == accept_shot
+    assert not reject_shot.exists()  # the straddled screenshot was discarded
+
+
+def test_below_threshold_logs_bound_value_not_running_max(tmp_path, monkeypatch) -> None:
+    # The transfer peaks at 95 then tails to 60 (all < 100 threshold). The OLD code
+    # logged the running max (95) paired with whatever screenshot it happened to hold —
+    # that is exactly 录表里的速度 > 截图里的速度. Now the only recorded value comes from
+    # the final bracket-bound capture (60), which equals the number frozen in its image;
+    # the unbound 95 peak is never paired with a screenshot.
+    final_shot = tmp_path / "final.png"
+    final_shot.write_bytes(b"png")
+    texts = iter(
+        [
+            f"{READ_MARKER} 95 MB/s {WRITE_MARKER} 0 B/s",   # iter1 loop-top: peak 95 (best_seen)
+            f"{READ_MARKER} 80 MB/s {WRITE_MARKER} 0 B/s",   # iter2 loop-top: process ends after
+            f"{READ_MARKER} 60 MB/s {WRITE_MARKER} 0 B/s",   # final bound capture: pre
+            f"{READ_MARKER} 60 MB/s {WRITE_MARKER} 0 B/s",   # final bound capture: post (== pre)
+        ]
+    )
+    process_checks = iter([False, True])
+    cfg = SmbTransferConfig(unc_share=r"\\192.168.0.168\hdd", local_dir=tmp_path)
+
+    class FakePage:
+        def wait_for_timeout(self, _ms: int) -> None:
+            return None
+
+    monkeypatch.setattr(capture, "_frame_text", lambda _frame: next(texts))
+    monkeypatch.setattr(capture, "_process_finished", lambda _proc: next(process_checks))
+    monkeypatch.setattr(capture, "dismiss_desktop_overlays", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(capture, "capture_page", lambda *_args, **_kwargs: final_shot)
+
+    result = capture._capture_transfer_attempt(
+        FakePage(),
+        object(),
+        object(),
+        cfg,
+        "SN123",
+        "hdd_read",
+        "hdd",
+        "download",
+        tmp_path,
+        {"speed_stable_samples": 1, "speed_attempt_timeout_s": 5, "speed_sample_interval_ms": 100},
+        100,
+        1,
+        capture_on_low=True,
+    )
+
+    assert result.reached_threshold is False
+    assert result.values["rate_mbps"] == "60"          # bound to the screenshot, NOT the 95 peak
+    assert result.values["speed_status"] == "below_threshold"
+    assert result.shot_path == final_shot              # 60 is the number frozen in final_shot
+
+
+def test_transfer_capture_replaces_lower_bound_with_higher(tmp_path, monkeypatch) -> None:
+    # A second bracket-bound capture at a higher steady rate replaces the first: the
+    # recorded value and screenshot update together, and the superseded (lower) screenshot
+    # is deleted so it can never be mistaken for the proof image.
+    shot200 = tmp_path / "s200.png"
+    shot300 = tmp_path / "s300.png"
+    shot200.write_bytes(b"png")
+    shot300.write_bytes(b"png")
+    texts = iter(
+        [
+            f"{READ_MARKER} 200 MB/s {WRITE_MARKER} 0 B/s",  # iter1 loop-top
+            f"{READ_MARKER} 200 MB/s {WRITE_MARKER} 0 B/s",  # bound1 pre
+            f"{READ_MARKER} 200 MB/s {WRITE_MARKER} 0 B/s",  # bound1 post
+            f"{READ_MARKER} 300 MB/s {WRITE_MARKER} 0 B/s",  # iter2 loop-top
+            f"{READ_MARKER} 300 MB/s {WRITE_MARKER} 0 B/s",  # bound2 pre
+            f"{READ_MARKER} 300 MB/s {WRITE_MARKER} 0 B/s",  # bound2 post
+        ]
+    )
+    shots = iter([shot200, shot300])
+    process_checks = iter([False, True])
+    cfg = SmbTransferConfig(unc_share=r"\\192.168.0.168\hdd", local_dir=tmp_path)
+
+    class FakePage:
+        def wait_for_timeout(self, _ms: int) -> None:
+            return None
+
+    monkeypatch.setattr(capture, "_frame_text", lambda _frame: next(texts))
+    monkeypatch.setattr(capture, "_process_finished", lambda _proc: next(process_checks))
+    monkeypatch.setattr(capture, "dismiss_desktop_overlays", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(capture, "capture_page", lambda *_args, **_kwargs: next(shots))
+
+    result = capture._capture_transfer_attempt(
+        FakePage(),
+        object(),
+        object(),
+        cfg,
+        "SN123",
+        "hdd_read",
+        "hdd",
+        "download",
+        tmp_path,
+        {"speed_stable_samples": 1, "speed_attempt_timeout_s": 5, "speed_sample_interval_ms": 100},
+        100,
+        1,
+    )
+
+    assert result.reached_threshold is True
+    assert result.values["rate_mbps"] == "300"
+    assert result.shot_path == shot300
+    assert not shot200.exists()  # superseded lower-rate screenshot dropped
+    assert shot300.exists()
+
+
+def test_capture_on_low_straddle_yields_no_shot(tmp_path, monkeypatch) -> None:
+    # On the final attempt, if the failure capture straddles a refresh edge (pre != post),
+    # _bound_transfer_capture returns None and control falls through to a text-only
+    # diagnostic with NO screenshot — the unbound peak is never paired with an ambiguous image.
+    straddle_shot = tmp_path / "straddle.png"
+    straddle_shot.write_bytes(b"png")
+    texts = iter(
+        [
+            f"{READ_MARKER} 80 MB/s {WRITE_MARKER} 0 B/s",   # iter1 loop-top (best_seen=80)
+            f"{READ_MARKER} 80 MB/s {WRITE_MARKER} 0 B/s",   # iter2 loop-top, process ends
+            f"{READ_MARKER} 70 MB/s {WRITE_MARKER} 0 B/s",   # final bound capture: pre
+            f"{READ_MARKER} 90 MB/s {WRITE_MARKER} 0 B/s",   # final bound capture: post (!= pre -> None)
+        ]
+    )
+    process_checks = iter([False, True])
+    cfg = SmbTransferConfig(unc_share=r"\\192.168.0.168\hdd", local_dir=tmp_path)
+
+    class FakePage:
+        def wait_for_timeout(self, _ms: int) -> None:
+            return None
+
+    monkeypatch.setattr(capture, "_frame_text", lambda _frame: next(texts))
+    monkeypatch.setattr(capture, "_process_finished", lambda _proc: next(process_checks))
+    monkeypatch.setattr(capture, "dismiss_desktop_overlays", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(capture, "capture_page", lambda *_args, **_kwargs: straddle_shot)
+
+    result = capture._capture_transfer_attempt(
+        FakePage(),
+        object(),
+        object(),
+        cfg,
+        "SN123",
+        "hdd_read",
+        "hdd",
+        "download",
+        tmp_path,
+        {"speed_stable_samples": 1, "speed_attempt_timeout_s": 5, "speed_sample_interval_ms": 100},
+        100,
+        1,
+        capture_on_low=True,
+    )
+
+    assert result.reached_threshold is False
+    assert result.shot_path is None
+    assert result.values["rate_mbps"] == "80"
+    assert result.values["speed_status"] == "below_threshold"
+    assert not straddle_shot.exists()  # the ambiguous straddled screenshot was discarded
+
+
+def test_bound_capture_rejects_unit_boundary_flip(tmp_path, monkeypatch) -> None:
+    # "8192 KB/s" and "8 MB/s" are equal byte counts but DIFFERENT on-screen strings. The
+    # bracket compares the displayed amount+unit (not the byte count), so this window is
+    # rejected rather than recording a label the screenshot between the reads may not show.
+    shot = tmp_path / "flip.png"
+    shot.write_bytes(b"png")
+    texts = iter(
+        [
+            f"{READ_MARKER} 8192 KB/s {WRITE_MARKER} 0 B/s",  # pre
+            f"{READ_MARKER} 8 MB/s {WRITE_MARKER} 0 B/s",     # post (equal bytes, different text)
+        ]
+    )
+    monkeypatch.setattr(capture, "_frame_text", lambda _frame: next(texts))
+    monkeypatch.setattr(capture, "dismiss_desktop_overlays", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(capture, "capture_page", lambda *_args, **_kwargs: shot)
+
+    out = capture._bound_transfer_capture(
+        object(),
+        object(),
+        "SN123",
+        "hdd_read",
+        "hdd",
+        "download",
+        tmp_path,
+        min_rate_bytes=0,
+    )
+
+    assert out is None
+    assert not shot.exists()  # ambiguous (unit-flip) shot discarded
+
+
+def test_transfer_capture_records_bracketed_gbps(tmp_path, monkeypatch) -> None:
+    # A steady GB/s plateau passes and is recorded as MB/s correctly (1.2 GB/s -> 1228.8),
+    # with the 'rate' label preserving the on-screen GB/s string.
+    shot = tmp_path / "gbps.png"
+    shot.write_bytes(b"png")
+    text = f"{READ_MARKER} 1.2 GB/s {WRITE_MARKER} 0 B/s"
+    process_checks = iter([False, True])
+    cfg = SmbTransferConfig(unc_share=r"\\192.168.0.168\hdd", local_dir=tmp_path)
+
+    class FakePage:
+        def wait_for_timeout(self, _ms: int) -> None:
+            return None
+
+    monkeypatch.setattr(capture, "_frame_text", lambda _frame: text)
+    monkeypatch.setattr(capture, "_process_finished", lambda _proc: next(process_checks))
+    monkeypatch.setattr(capture, "dismiss_desktop_overlays", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(capture, "capture_page", lambda *_args, **_kwargs: shot)
+
+    result = capture._capture_transfer_attempt(
+        FakePage(),
+        object(),
+        object(),
+        cfg,
+        "SN123",
+        "ssd_read",
+        "ssd",
+        "download",
+        tmp_path,
+        {"speed_stable_samples": 1, "speed_attempt_timeout_s": 5, "speed_sample_interval_ms": 100},
+        300,
+        1,
+    )
+
+    assert result.reached_threshold is True
+    assert result.values["rate"] == "1.2 GB/s"
+    assert result.values["rate_mbps"] == "1228.8"
+    assert result.shot_path == shot
+
+
+def test_bracket_max_span_config_override() -> None:
+    assert capture._transfer_bracket_max_span_s({}) == capture.TRANSFER_BRACKET_MAX_SPAN_S
+    assert capture._transfer_bracket_max_span_s({"bracket_max_span_s": 0.9}) == 0.9
+    # 0 / non-positive / garbage fall back to the default rather than disabling the guard.
+    assert capture._transfer_bracket_max_span_s({"bracket_max_span_s": 0}) == capture.TRANSFER_BRACKET_MAX_SPAN_S
+    assert capture._transfer_bracket_max_span_s({"bracket_max_span_s": "x"}) == capture.TRANSFER_BRACKET_MAX_SPAN_S
+
+
+def test_bound_capture_span_guard_rejects_slow_shot_and_is_configurable(tmp_path, monkeypatch) -> None:
+    # A display read identically before AND after the shot is STILL rejected when the bracket
+    # spanned too long (a slow screenshot could hide an A->B->A flip and show a number neither
+    # read saw). The ceiling is tunable so a slow factory PC can widen it instead of
+    # false-failing a steady page. perf_counter is mocked to force the span.
+    text = f"{READ_MARKER} 560 MB/s {WRITE_MARKER} 0 B/s"
+    # two _bound_transfer_capture calls, each reads perf_counter twice (start, end):
+    # call#1 span 0.9 (rejected at default 0.6), call#2 span 0.4 (accepted at widened 1.0)
+    perf = iter([0.0, 0.9, 0.0, 0.4])
+    monkeypatch.setattr(capture.time, "perf_counter", lambda: next(perf))
+    monkeypatch.setattr(capture, "_frame_text", lambda _frame: text)
+    monkeypatch.setattr(capture, "dismiss_desktop_overlays", lambda *_args, **_kwargs: None)
+
+    slow_shot = tmp_path / "slow.png"
+    fast_shot = tmp_path / "fast.png"
+    shots = iter([slow_shot, fast_shot])
+
+    def fake_capture(*_args, **_kwargs):
+        path = next(shots)
+        path.write_bytes(b"png")
+        return path
+
+    monkeypatch.setattr(capture, "capture_page", fake_capture)
+
+    out_slow = capture._bound_transfer_capture(
+        object(), object(), "SN123", "hdd_read", "hdd", "download", tmp_path,
+        min_rate_bytes=0, max_span_s=0.6,
+    )
+    assert out_slow is None
+    assert not slow_shot.exists()  # slow (ambiguous) shot discarded
+
+    out_fast = capture._bound_transfer_capture(
+        object(), object(), "SN123", "hdd_read", "hdd", "download", tmp_path,
+        min_rate_bytes=0, max_span_s=1.0,
+    )
+    assert out_fast is not None
+    sample, shot = out_fast
+    assert shot == fast_shot and fast_shot.exists()
+    assert sample.rate_mb_s == 560
 
 
 def test_existing_transfer_capture_requires_reported_rate_above_threshold(tmp_path) -> None:

@@ -64,6 +64,13 @@ TRANSFER_SPEED_SAMPLE_INTERVAL_MS = 500
 TRANSFER_SPEED_STABLE_SAMPLES = 1
 TRANSFER_SPEED_MAX_RETRIES = 1
 TRANSFER_SPEED_ATTEMPT_TIMEOUT_S = 45
+# The resource-monitor display refreshes ~1.0s (measured min ~0.78s) and holds each value
+# steady between repaints. A bracket (read -> screenshot -> read) whose total span stays
+# under this bound can contain at most ONE repaint edge, so any value change makes the two
+# reads differ and the ambiguous shot is rejected. 0.6s is comfortably below the 0.78s floor
+# yet ~4x above the measured ~0.1s full-page screenshot, so steady windows are never rejected.
+# Default only — override per deployment via transfer.bracket_max_span_s for slow hardware.
+TRANSFER_BRACKET_MAX_SPAN_S = 0.6
 TRANSFER_UPLOAD_MIN_SEED_MB = 10 * 1024
 TRANSFER_UPLOAD_SEED_TIMEOUT_S = 180
 TRANSFER_UPLOAD_FINISH_TIMEOUT_S = 30
@@ -462,6 +469,7 @@ def _capture_transfer_page(
     slot_acquired = False
     shot_path: Path | None = None
     best_result: TransferAttemptResult | None = None
+    seen_shots: list[Path] = []
     attempts_run = 0
     try:
         if slot_already_acquired:
@@ -508,11 +516,10 @@ def _capture_transfer_page(
             finally:
                 _finish_transfer_process(proc, page_key, attempt)
 
+            if result.shot_path is not None:
+                seen_shots.append(result.shot_path)
             best_result = _better_transfer_result(best_result, result)
-            if shot_path is None and result.shot_path is not None:
-                shot_path = result.shot_path
             if result.reached_threshold:
-                shot_path = result.shot_path
                 best_result = result
                 break
 
@@ -521,13 +528,27 @@ def _capture_transfer_page(
                 f"{(result.values.get('rate_mbps') or '0')} MB/s"
             )
 
+        # Drop screenshots from superseded attempts so a losing retry never leaves an
+        # orphan proof image behind; only the kept attempt's screenshot survives. Done
+        # after the loop so the final best_result is settled and its shot is never deleted.
+        kept_shot = best_result.shot_path if best_result else None
+        for stale in seen_shots:
+            if stale != kept_shot:
+                _unlink_quietly(stale)
+
         if best_result and best_result.values:
             values = dict(best_result.values)
             values["attempts"] = str(attempts_run)
             for value_key, value in values.items():
                 logger.info(f"  {page_key}.{value_key}: {value}")
-            shot_path = shot_path or best_result.shot_path
+            # value and screenshot must come from the SAME attempt, never mixed across
+            # retries — otherwise the logged rate could describe a different image.
+            shot_path = best_result.shot_path
             if capture_values is not None:
+                # On a below-threshold page this records a diagnostic rate (clearly marked
+                # below_threshold / no_sample) and then raises just below, so the run fails
+                # and the value never ships — it is only ever read back for the failure
+                # report, never auto-filled into MES as a passing measurement.
                 capture_values[page_key] = values
             if not best_result.reached_threshold:
                 raise CaptureError(_transfer_threshold_error(page_key, values, threshold_mb_s, attempts_run))
@@ -644,12 +665,16 @@ def _capture_transfer_attempt(
     interval_ms = _transfer_speed_sample_interval_ms(transfer_cfg)
     stable_target = _transfer_speed_stable_samples(transfer_cfg)
     attempt_timeout_s = _transfer_speed_attempt_timeout_s(transfer_cfg)
+    max_span_s = _transfer_bracket_max_span_s(transfer_cfg)
     min_upload_seed_bytes = _transfer_upload_min_seed_bytes(transfer_cfg)
     deadline = time.monotonic() + attempt_timeout_s
-    best_sample: TransferRateSample | None = None
-    best_sample_shot: Path | None = None
-    threshold_sample: TransferRateSample | None = None
-    threshold_sample_shot: Path | None = None
+    # Invariant: the only (value, screenshot) pair this function ever returns comes
+    # from _bound_transfer_capture, so the logged rate always equals the number
+    # frozen in the saved image. `best_seen` is a text-only read kept purely for the
+    # failure diagnostic — it is never paired with a screenshot.
+    bound_sample: TransferRateSample | None = None      # best >= threshold bound capture
+    bound_shot: Path | None = None
+    best_seen: TransferRateSample | None = None
     stable_samples = 0
     last_excerpt = ""
 
@@ -658,42 +683,37 @@ def _capture_transfer_attempt(
         last_excerpt = " ".join(text.split())[:300]
         sample = _transfer_speed_sample(text, share, direction)
         if sample is not None:
-            if best_sample is None or sample.rate_bytes > best_sample.rate_bytes:
-                best_sample = sample
-                if best_sample_shot is None:
-                    dismiss_desktop_overlays(page, max_rounds=2, completion_wait_ms=0)
-                    best_sample_shot = capture_page(page, sn, page_key, screenshots_dir)
+            if best_seen is None or sample.rate_bytes > best_seen.rate_bytes:
+                best_seen = sample
             if sample.rate_bytes >= threshold_bytes:
+                # Require the rate to sit >= threshold for `stable_target` polls (a real
+                # sustained plateau, not one bursty refresh tick) before spending a
+                # bracketed screenshot, and only when it would improve on what we hold.
                 stable_samples += 1
                 if stable_samples >= stable_target and (
-                    threshold_sample is None or sample.rate_bytes > threshold_sample.rate_bytes
+                    bound_sample is None or sample.rate_bytes > bound_sample.rate_bytes
                 ):
-                    # Disk transfer rates are bursty, so a single read taken just
-                    # before or after the screenshot can differ from the number
-                    # actually frozen in the image (M.2 writes flush in bursts: a
-                    # screenshot caught a 180 MB/s trough while the read a beat later
-                    # saw a 285 MB/s burst). Bracket the screenshot with a read
-                    # immediately before and after; accept only when the displayed
-                    # rate held identical across the capture window — then the number
-                    # in the image equals what we record — and is itself >= threshold.
-                    dismiss_desktop_overlays(page, max_rounds=2, completion_wait_ms=0)
-                    pre_shot = _transfer_speed_sample(_frame_text(frame), share, direction)
-                    shot = capture_page(page, sn, page_key, screenshots_dir)
-                    post_shot = _transfer_speed_sample(_frame_text(frame), share, direction)
-                    if (
-                        pre_shot is not None
-                        and post_shot is not None
-                        and pre_shot.rate_bytes == post_shot.rate_bytes
-                        and post_shot.rate_bytes >= threshold_bytes
-                        and (
-                            threshold_sample is None
-                            or post_shot.rate_bytes > threshold_sample.rate_bytes
-                        )
-                    ):
-                        threshold_sample = post_shot
-                        threshold_sample_shot = shot
+                    captured = _bound_transfer_capture(
+                        page,
+                        frame,
+                        sn,
+                        page_key,
+                        share,
+                        direction,
+                        screenshots_dir,
+                        min_rate_bytes=threshold_bytes,
+                        max_span_s=max_span_s,
+                    )
+                    if captured is None:
+                        stable_samples = 0  # screenshot straddled a refresh edge; resample
                     else:
-                        stable_samples = 0
+                        new_sample, new_shot = captured
+                        if bound_sample is None or new_sample.rate_bytes > bound_sample.rate_bytes:
+                            if bound_shot is not None and bound_shot != new_shot:
+                                _unlink_quietly(bound_shot)
+                            bound_sample, bound_shot = new_sample, new_shot
+                        elif new_shot != bound_shot:
+                            _unlink_quietly(new_shot)
             else:
                 stable_samples = 0
 
@@ -702,7 +722,7 @@ def _capture_transfer_attempt(
         page.wait_for_timeout(interval_ms)
 
     upload_seed_complete = True
-    if threshold_sample is not None and direction == "upload":
+    if bound_sample is not None and direction == "upload":
         upload_seed_complete = _wait_for_upload_seed_complete(
             page,
             proc,
@@ -712,25 +732,63 @@ def _capture_transfer_attempt(
             transfer_cfg,
         )
 
-    if threshold_sample is not None and (direction != "upload" or upload_seed_complete):
+    if bound_sample is not None and (direction != "upload" or upload_seed_complete):
         if direction == "upload":
             _wait_for_transfer_process_exit(page, proc, page_key, transfer_cfg)
             _wait_for_post_upload_settle(page, frame, page_key, transfer_cfg)
-        shot_path = threshold_sample_shot or best_sample_shot
-        if shot_path is None:
-            dismiss_desktop_overlays(page, max_rounds=2, completion_wait_ms=0)
-            shot_path = capture_page(page, sn, page_key, screenshots_dir)
         values = _transfer_values_from_sample(
-            threshold_sample,
+            bound_sample,
             share,
             direction,
             threshold_mb_s,
             attempt,
             reached_threshold=True,
         )
-        return TransferAttemptResult(values, shot_path, True)
+        return TransferAttemptResult(values, bound_shot, True)
 
-    if best_sample is None:
+    # Reached >= threshold but the upload seed never completed: still a bound pair,
+    # reported as not-passing so the wrapper retries / fails the page.
+    if bound_sample is not None:
+        values = _transfer_values_from_sample(
+            bound_sample,
+            share,
+            direction,
+            threshold_mb_s,
+            attempt,
+            reached_threshold=False,
+        )
+        values["speed_status"] = "seed_incomplete"
+        return TransferAttemptResult(values, bound_shot, False)
+
+    # Never reached threshold. On the final attempt, bind whatever steady rate is on
+    # screen so even the failure artifact's number matches its screenshot.
+    if capture_on_low:
+        captured = _bound_transfer_capture(
+            page,
+            frame,
+            sn,
+            page_key,
+            share,
+            direction,
+            screenshots_dir,
+            min_rate_bytes=0,
+            max_span_s=max_span_s,
+        )
+        if captured is not None:
+            low_sample, low_shot = captured
+            values = _transfer_values_from_sample(
+                low_sample,
+                share,
+                direction,
+                threshold_mb_s,
+                attempt,
+                reached_threshold=False,
+            )
+            return TransferAttemptResult(values, low_shot, False)
+
+    # No screenshot can be bound to a number here, so ship the best text-only read as a
+    # diagnostic with no image (the page fails and is retested; nothing is shipped).
+    if best_seen is None:
         logger.info(f"{page_key}: no speed sample captured. Last body excerpt: {last_excerpt}")
         values = {
             "share": share,
@@ -743,21 +801,16 @@ def _capture_transfer_attempt(
         }
     else:
         values = _transfer_values_from_sample(
-            best_sample,
+            best_seen,
             share,
             direction,
             threshold_mb_s,
             attempt,
             reached_threshold=False,
         )
-        if best_sample.rate_bytes >= threshold_bytes:
-            values["speed_status"] = "seed_incomplete" if direction == "upload" else "unstable_threshold"
-
-    shot_path = best_sample_shot
-    if shot_path is None and capture_on_low:
-        dismiss_desktop_overlays(page, max_rounds=2, completion_wait_ms=0)
-        shot_path = capture_page(page, sn, page_key, screenshots_dir)
-    return TransferAttemptResult(values, shot_path, False)
+        if best_seen.rate_bytes >= threshold_bytes:
+            values["speed_status"] = "unstable_threshold"
+    return TransferAttemptResult(values, None, False)
 
 
 def _wait_for_upload_seed_complete(
@@ -877,12 +930,97 @@ def _process_finished(proc) -> bool:
         return False
 
 
+def _unlink_quietly(path: Path | None) -> None:
+    """Best-effort delete of a superseded transfer screenshot. When a higher
+    bracket-bound capture replaces an earlier one, drop the stale file so only the
+    screenshot whose number equals the logged rate survives."""
+    if path is None:
+        return
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def _bound_transfer_capture(
+    page: "Page",
+    frame: "Frame",
+    sn: str,
+    page_key: str,
+    share: str,
+    direction: str,
+    screenshots_dir: Path,
+    *,
+    min_rate_bytes: float,
+    max_span_s: float = TRANSFER_BRACKET_MAX_SPAN_S,
+) -> tuple[TransferRateSample, Path] | None:
+    """Screenshot the transfer rate so the saved image provably shows the logged number.
+
+    The UGOS resource monitor is piecewise-constant: it repaints the rate roughly
+    once a second and holds it steady in between (measured ~1.0s refresh on real
+    hardware). We read the displayed rate immediately before AND after the
+    screenshot; the shot lands inside a single refresh window only when both reads
+    are identical. If they differ, the screenshot straddled a refresh edge and is
+    ambiguous, so we discard it and signal the caller to resample. The returned
+    sample therefore equals the number frozen in the returned image — that binding,
+    not any OCR of the pixels, is what guarantees 录表数值 == 截图数值.
+
+    ``min_rate_bytes`` gates acceptance: pass the screenshot threshold for a pass
+    capture, or 0 to bind whatever steady non-idle rate is on screen (the failure
+    artifact). Returns ``(sample, shot)`` or ``None`` when the window was not steady.
+
+    The ``max_span_s`` ceiling is deliberately correctness-first: if the screenshot
+    itself drags long enough that the bracket could hide an A->B->A flip (two refresh
+    edges), we reject rather than risk logging a number the image does not show. On a
+    pathologically slow PC this can resample/false-fail a steady page (recoverable —
+    operator retests); widen ``transfer.bracket_max_span_s`` (kept < the ~0.78s refresh
+    floor) if that ever shows up. Measured screenshots are ~0.1s, ~6x under the default.
+    """
+    dismiss_desktop_overlays(page, max_rounds=2, completion_wait_ms=0)
+    span_start = time.perf_counter()
+    pre = _transfer_speed_sample(_frame_text(frame), share, direction)
+    shot = capture_page(page, sn, page_key, screenshots_dir)
+    post = _transfer_speed_sample(_frame_text(frame), share, direction)
+    span = time.perf_counter() - span_start
+    # Accept only when the SAME displayed text was read just before and just after the shot
+    # — compare amount+unit, not just the byte count, so a unit-boundary flip like
+    # "1024 KB/s" -> "1 MB/s" (equal bytes, different on-screen string) is rejected — AND
+    # the whole bracket spanned less than one refresh window, so at most one repaint edge
+    # could fall inside it and any change would have made the two reads differ.
+    steady = (
+        pre is not None
+        and post is not None
+        and pre.amount == post.amount
+        and pre.unit == post.unit
+        and post.rate_bytes >= min_rate_bytes
+    )
+    if steady and span < max_span_s:
+        return post, shot
+    if steady:
+        # Display held steady across the reads but the shot took too long to trust as a
+        # single-window capture; log it so a slow-machine false-fail is diagnosable.
+        logger.info(
+            f"{page_key}: discarding steady capture, bracket span {span:.2f}s "
+            f">= {max_span_s:.2f}s (screenshot too slow to rule out a refresh straddle)"
+        )
+    _unlink_quietly(shot)
+    return None
+
+
 def _better_transfer_result(
     current: TransferAttemptResult | None,
     candidate: TransferAttemptResult,
 ) -> TransferAttemptResult:
     if current is None:
         return candidate
+    # A result whose value is bound to a screenshot outranks a higher-but-unbound
+    # text-only read, so the kept value stays tied to an image whenever one exists
+    # (e.g. a final bracketed failure artifact must not lose to an earlier attempt's
+    # higher peak that has no screenshot). Among equals, the higher rate wins.
+    current_has_shot = current.shot_path is not None
+    candidate_has_shot = candidate.shot_path is not None
+    if current_has_shot != candidate_has_shot:
+        return candidate if candidate_has_shot else current
     current_rate = _float_or_none(current.values.get("rate_mbps")) or 0.0
     candidate_rate = _float_or_none(candidate.values.get("rate_mbps")) or 0.0
     return candidate if candidate_rate >= current_rate else current
@@ -1716,6 +1854,15 @@ def _transfer_speed_attempt_timeout_s(transfer_cfg: dict) -> float:
     raw = transfer_cfg.get("speed_attempt_timeout_s", TRANSFER_SPEED_ATTEMPT_TIMEOUT_S)
     value = _float_or_none(raw)
     return max(5.0, value if value is not None else TRANSFER_SPEED_ATTEMPT_TIMEOUT_S)
+
+
+def _transfer_bracket_max_span_s(transfer_cfg: dict) -> float:
+    # Tunable so an unusually slow factory PC (full-page screenshots dragging toward the
+    # ~0.78s display-refresh floor) can widen the bracket window instead of false-failing
+    # a steady page. Keep it below the min refresh period to preserve the binding guarantee.
+    raw = transfer_cfg.get("bracket_max_span_s", TRANSFER_BRACKET_MAX_SPAN_S)
+    value = _float_or_none(raw)
+    return value if value is not None and value > 0 else TRANSFER_BRACKET_MAX_SPAN_S
 
 
 def _transfer_upload_seed_timeout_s(transfer_cfg: dict) -> float:

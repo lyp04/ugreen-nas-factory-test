@@ -74,12 +74,34 @@ def _merge_session_dirs(source: Path, target: Path) -> None:
         shutil.move(str(item), str(destination))
 
 
+def _unique_target(dest_dir: Path, stem: str, suffix: str) -> Path:
+    """Return a path under ``dest_dir`` that does not yet exist. ``_timestamp()`` has
+    1-second granularity, so two captures of the same page within the same wall-clock
+    second would otherwise collide and the second screenshot would silently overwrite
+    the first — fatal when a caller keeps a reference to the first file (it would point
+    at an overwritten or deleted image). Append _2, _3, ... until the name is free."""
+    target = dest_dir / f"{stem}{suffix}"
+    counter = 2
+    while target.exists():
+        target = dest_dir / f"{stem}_{counter}{suffix}"
+        counter += 1
+    return target
+
+
 def capture_page(page: "Page", sn: str, page_key: str, dest_dir: Path) -> Path:
     dest_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"{sn}_{page_key}_{_timestamp()}.png"
-    target = dest_dir / filename
-    page.screenshot(path=str(target), full_page=True)
-    logger.info(f"Captured {page_key} -> {filename}")
+    target = _unique_target(dest_dir, f"{sn}_{page_key}_{_timestamp()}", ".png")
+    try:
+        page.screenshot(path=str(target), full_page=True)
+    except Exception:
+        # Don't leave a partial / zero-byte PNG behind if the screenshot fails mid-write;
+        # a stray file would later be picked up as a (bogus) existing capture.
+        try:
+            target.unlink()
+        except OSError:
+            pass
+        raise
+    logger.info(f"Captured {page_key} -> {target.name}")
     return target
 
 

@@ -753,6 +753,195 @@ def test_bound_capture_span_guard_rejects_slow_shot_and_is_configurable(tmp_path
     assert sample.rate_mb_s == 560
 
 
+def test_run_reuse_existing_false_forces_fresh_capture(tmp_path, monkeypatch) -> None:
+    # Resuming an interrupted run (reuse_existing=True) reuses a valid on-disk capture;
+    # a retest (reuse_existing=False) re-shoots the page even though one exists, so the
+    # operator never sees the previous run's cached screenshots presented as a new run.
+    selectors = {
+        "desktop_launchers": {},
+        "capture_nav": {},
+        "capture_pages": {"network_interface": {"app": "ctlmgr"}},
+    }
+    old = tmp_path / "old.png"
+    fresh = tmp_path / "fresh.png"
+
+    for name in (
+        "dismiss_desktop_overlays",
+        "_cleanup_all_transfer_workdirs_if_idle",
+        "_cleanup_legacy_transfer_workdirs_if_idle",
+        "_emit_capture_event",
+        "_cleanup_transfer_run_dir",
+    ):
+        monkeypatch.setattr(capture, name, lambda *_a, **_k: None)
+    monkeypatch.setattr(capture, "_existing_capture_path", lambda *_a, **_k: old)
+    monkeypatch.setattr(capture, "_capture_standard_page", lambda *_a, **_k: fresh)
+
+    def run_once(reuse: bool) -> dict:
+        return capture.run(
+            object(),
+            "http://nas",
+            "SN123",
+            ["network_interface"],
+            selectors,
+            tmp_path / "图片",
+            {"username": "a", "password": "b"},
+            reuse_existing=reuse,
+        )
+
+    assert run_once(True)["network_interface"] == str(old)      # resume -> reuse cached
+    assert run_once(False)["network_interface"] == str(fresh)   # retest -> fresh capture
+
+
+def test_purge_stale_page_captures_keeps_fail_and_other_pages(tmp_path) -> None:
+    # Force-fresh retest prunes a page's prior non-FAIL screenshots but keeps FAIL_
+    # diagnostics and never touches other pages' captures.
+    images = tmp_path / "图片"
+    images.mkdir()
+    old1 = images / "SN123_hdd_read_20260101_120000.png"
+    old2 = images / "SN123_hdd_read_20260101_130000.png"
+    fail = images / "SN123_FAIL_hdd_read_20260101_140000.png"
+    other = images / "SN123_ssd_read_20260101_120000.png"
+    for p in (old1, old2, fail, other):
+        p.write_bytes(b"png")
+
+    capture._purge_stale_page_captures(images, "SN123", "hdd_read")
+
+    assert not old1.exists() and not old2.exists()  # stale captures for this page pruned
+    assert fail.exists()   # FAIL diagnostic kept
+    assert other.exists()  # other page untouched
+
+
+def test_purge_stale_page_captures_tolerates_missing_dir(tmp_path) -> None:
+    # No 图片 folder yet (first run) -> no-op, no error.
+    capture._purge_stale_page_captures(tmp_path / "missing", "SN123", "hdd_read")
+
+
+def test_cpu_temp_c_parses_value() -> None:
+    assert capture._cpu_temp_c({"cpu_temp": "80 ℃"}) == 80.0
+    assert capture._cpu_temp_c({"cpu_temp": "57.5℃"}) == 57.5
+    assert capture._cpu_temp_c({"cpu_temp": ""}) is None
+    assert capture._cpu_temp_c({}) is None
+
+
+def _temp_page(monkeypatch, reads, shot_factory):
+    monkeypatch.setattr(capture, "_log_key_values", lambda *_a, **_k: next(reads))
+    monkeypatch.setattr(capture, "dismiss_desktop_overlays", lambda *_a, **_k: None)
+    monkeypatch.setattr(capture, "capture_page", shot_factory)
+
+    class FakePage:
+        def wait_for_timeout(self, _ms: int) -> None:
+            return None
+
+    return FakePage()
+
+
+def test_bound_value_capture_accepts_stable_temp_and_rpm(tmp_path, monkeypatch) -> None:
+    # temp + RPM identical just before and just after the shot -> the recorded reading
+    # provably equals the numbers frozen in the image.
+    shot = tmp_path / "rm.png"
+    shot.write_bytes(b"png")
+    reads = iter(
+        [
+            {"cpu_temp": "65 ℃", "device_fan_rpm": "1200 转/分"},  # pre
+            {"cpu_temp": "65 ℃", "device_fan_rpm": "1200 转/分"},  # post (== pre -> accept)
+        ]
+    )
+    page = _temp_page(monkeypatch, reads, lambda *_a, **_k: shot)
+
+    out = capture._bound_value_capture(
+        page, object(), {}, "SN123", "resource_monitor", tmp_path,
+        stable_keys=capture.RESOURCE_MONITOR_STABLE_KEYS,
+    )
+    assert out is not None
+    values, kept = out
+    assert values["cpu_temp"] == "65 ℃" and kept == shot and shot.exists()
+
+
+def test_bound_value_capture_rejects_when_reading_straddles_shot(tmp_path, monkeypatch) -> None:
+    # CPU cooling fast + fan ramping: temp 80->74 and RPM 954->2177 across the shot. The
+    # image would show a number neither read matches, so the capture is rejected (this is
+    # exactly the 954-reported / 2177-on-screen divergence seen on a real unit).
+    shot = tmp_path / "rm.png"
+    shot.write_bytes(b"png")
+    reads = iter(
+        [
+            {"cpu_temp": "80 ℃", "device_fan_rpm": "954 转/分"},   # pre
+            {"cpu_temp": "74 ℃", "device_fan_rpm": "2177 转/分"},  # post (!= pre -> reject)
+        ]
+    )
+    page = _temp_page(monkeypatch, reads, lambda *_a, **_k: shot)
+
+    out = capture._bound_value_capture(
+        page, object(), {}, "SN123", "resource_monitor", tmp_path,
+        stable_keys=capture.RESOURCE_MONITOR_STABLE_KEYS,
+    )
+    assert out is None
+    assert not shot.exists()  # ambiguous straddled shot discarded
+
+
+def test_capture_bound_value_page_falls_back_after_budget(tmp_path, monkeypatch) -> None:
+    # If every bracket straddles (display keeps changing) until the budget runs out, fall
+    # back to a plain read+shot so the page still yields an artifact.
+    reads = iter(
+        [
+            {"cpu_temp": "80 ℃", "device_fan_rpm": "1"},  # iter1 pre
+            {"cpu_temp": "74 ℃", "device_fan_rpm": "1"},  # iter1 post (straddle)
+            {"cpu_temp": "73 ℃", "device_fan_rpm": "1"},  # iter2 pre
+            {"cpu_temp": "70 ℃", "device_fan_rpm": "1"},  # iter2 post (straddle)
+            {"cpu_temp": "70 ℃", "device_fan_rpm": "1"},  # fallback plain read
+        ]
+    )
+    shots = iter([tmp_path / "s1.png", tmp_path / "s2.png", tmp_path / "s3.png"])
+
+    def shot_factory(*_a, **_k):
+        p = next(shots)
+        p.write_bytes(b"png")
+        return p
+
+    page = _temp_page(monkeypatch, reads, shot_factory)
+    monotonic = iter([0.0, 0.0, 7.0])
+    monkeypatch.setattr(capture.time, "monotonic", lambda: next(monotonic, 99.0))
+
+    values, shot = capture._capture_bound_value_page(
+        page, object(), {}, "SN123", "resource_monitor", tmp_path,
+        stable_keys=capture.RESOURCE_MONITOR_STABLE_KEYS, settle_budget_s=6.0,
+    )
+    assert values["cpu_temp"] == "70 ℃"
+    assert shot == tmp_path / "s3.png" and shot.exists()
+    assert not (tmp_path / "s1.png").exists()  # straddled shots cleaned up
+    assert not (tmp_path / "s2.png").exists()
+
+
+def test_wait_for_cpu_temp_returns_once_cooled(monkeypatch) -> None:
+    # resource_monitor: poll until CPU settles <= limit before capturing (drops the load-tail
+    # spike). 80 -> 78 -> 65: waits twice, returns when <= 70.
+    reads = iter([{"cpu_temp": "80 ℃"}, {"cpu_temp": "78 ℃"}, {"cpu_temp": "65 ℃"}])
+    monkeypatch.setattr(capture, "_collect_key_values", lambda *_a, **_k: next(reads))
+    monotonic = iter([0.0, 1.0, 2.0, 3.0])
+    monkeypatch.setattr(capture.time, "monotonic", lambda: next(monotonic, 999.0))
+    waits: list[int] = []
+
+    class FakePage:
+        def wait_for_timeout(self, ms: int) -> None:
+            waits.append(ms)
+
+    capture._wait_for_cpu_temp_within_limit(FakePage(), object(), {}, "resource_monitor", 70.0, 30.0)
+    assert len(waits) == 2  # waited through 80 and 78, returned at 65
+
+
+def test_wait_for_cpu_temp_no_wait_when_already_within_limit(monkeypatch) -> None:
+    monkeypatch.setattr(capture, "_collect_key_values", lambda *_a, **_k: {"cpu_temp": "60 ℃"})
+    monkeypatch.setattr(capture.time, "monotonic", lambda: 0.0)
+    waits: list[int] = []
+
+    class FakePage:
+        def wait_for_timeout(self, ms: int) -> None:
+            waits.append(ms)
+
+    capture._wait_for_cpu_temp_within_limit(FakePage(), object(), {}, "resource_monitor", 70.0, 30.0)
+    assert waits == []  # already cool -> capture immediately
+
+
 def test_existing_transfer_capture_requires_reported_rate_above_threshold(tmp_path) -> None:
     screenshots = tmp_path / "shots"
     screenshots.mkdir()

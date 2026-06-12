@@ -71,6 +71,16 @@ TRANSFER_SPEED_ATTEMPT_TIMEOUT_S = 45
 # yet ~4x above the measured ~0.1s full-page screenshot, so steady windows are never rejected.
 # Default only — override per deployment via transfer.bracket_max_span_s for slow hardware.
 TRANSFER_BRACKET_MAX_SPAN_S = 0.6
+# resource_monitor is the only standard page whose values (CPU 温度 / 设备风扇转速) move, so
+# it alone needs the read->screenshot->read binding + cool-down. Its readings must equal the
+# numbers frozen in the saved image (the recorded MES temperature comes from here).
+RESOURCE_MONITOR_PAGE = "resource_monitor"
+RESOURCE_MONITOR_STABLE_KEYS = ("cpu_temp", "device_fan_rpm")
+# Budget for re-attempting a bound (value==screenshot) capture when the display straddles a
+# refresh edge across the shot. Straddles are rare (the monitor is piecewise-constant ~1s),
+# so this is just a small safety window before falling back to a plain read+shot.
+BOUND_VALUE_SETTLE_BUDGET_S = 6.0
+_CPU_TEMP_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
 TRANSFER_UPLOAD_MIN_SEED_MB = 10 * 1024
 TRANSFER_UPLOAD_SEED_TIMEOUT_S = 180
 TRANSFER_UPLOAD_FINISH_TIMEOUT_S = 30
@@ -170,7 +180,11 @@ def run(
     capture_values: dict[str, dict[str, str]] | None = None,
     cpu_temp_max_c: float = DEFAULT_CPU_TEMP_MAX_C,
     fan_recheck_budget_s: float = DEFAULT_FAN_RECHECK_BUDGET_S,
+    reuse_existing: bool = True,
 ) -> dict[str, str]:
+    # reuse_existing=False forces a fresh capture of every page (a manual retest of an
+    # already-completed run); True reuses valid on-disk captures (resuming an interrupted
+    # run) so completed pages aren't re-shot.
     dismiss_desktop_overlays(page, selectors, max_rounds=2, completion_wait_ms=0)
     desktop_selectors = selectors.get("desktop_launchers", {})
     nav_selectors = selectors.get("capture_nav", {})
@@ -196,14 +210,22 @@ def run(
                     _transfer_speed_threshold_mb_s(page_key, transfer_cfg) if is_transfer_page else None
                 )
                 require_reported_values = _page_requires_reported_values(page_key, spec)
-                existing = _existing_capture_path(
-                    screenshots_dir,
-                    sn,
-                    page_key,
-                    existing_min_rate,
-                    require_reported_values=require_reported_values,
-                    fan_mode_max_c=cpu_temp_max_c if page_key in FAN_CAPTURE_KEYS else None,
+                existing = (
+                    _existing_capture_path(
+                        screenshots_dir,
+                        sn,
+                        page_key,
+                        existing_min_rate,
+                        require_reported_values=require_reported_values,
+                        fan_mode_max_c=cpu_temp_max_c if page_key in FAN_CAPTURE_KEYS else None,
+                    )
+                    if reuse_existing
+                    else None
                 )
+                if not reuse_existing:
+                    # Force-fresh retest: drop the previous run's screenshots for this page
+                    # before re-shooting so the 图片 folder shows only this run's captures.
+                    _purge_stale_page_captures(screenshots_dir, sn, page_key)
                 if existing is not None:
                     logger.info(f"Skipping {page_key}; existing screenshot found -> {existing.name}")
                     saved[page_key] = str(existing)
@@ -279,6 +301,8 @@ def run(
                         nav_selectors,
                         screenshots_dir,
                         capture_values,
+                        cpu_temp_max_c=cpu_temp_max_c,
+                        recheck_budget_s=fan_recheck_budget_s,
                     )
                 saved[page_key] = str(path)
                 _emit_capture_event(
@@ -415,6 +439,122 @@ def _valid_existing_capture(path: Path) -> bool:
         return False
 
 
+def _purge_stale_page_captures(screenshots_dir: Path, sn: str, page_key: str) -> None:
+    """Delete the previous run's non-FAIL screenshots for one page before a force-fresh
+    retest re-shoots it, so the 图片 folder shows only the current run's captures. FAIL_
+    diagnostics are kept. Best-effort — a locked/missing file just stays."""
+    try:
+        stale = list(screenshots_dir.glob(f"{sn}_{page_key}_*.png"))
+    except OSError:
+        return
+    for path in stale:
+        if path.is_file() and "_FAIL_" not in path.name:
+            _unlink_quietly(path)
+
+
+def _cpu_temp_c(values: dict[str, str]) -> float | None:
+    match = _CPU_TEMP_RE.search(str(values.get("cpu_temp") or ""))
+    return float(match.group(0)) if match else None
+
+
+def _bound_value_capture(
+    page: "Page",
+    frame: "Frame",
+    spec: dict,
+    sn: str,
+    page_key: str,
+    screenshots_dir: Path,
+    *,
+    stable_keys: tuple[str, ...],
+    max_span_s: float = TRANSFER_BRACKET_MAX_SPAN_S,
+) -> tuple[dict[str, str], Path] | None:
+    """Bind a temp/RPM reading to its screenshot exactly like _bound_transfer_capture binds a
+    transfer rate: read the key values, screenshot, re-read, and accept only when every
+    ``stable_key`` held identical across the shot and the bracket was brief enough that at most
+    one display refresh could fall inside it. Returns ``(values, shot)`` or ``None`` (the
+    reading straddled a refresh — caller resamples). This binding, not OCR of the pixels, is
+    what guarantees the recorded number equals the one frozen in the image (温度/转速 == 截图)."""
+    dismiss_desktop_overlays(page, max_rounds=2, completion_wait_ms=0)
+    page.wait_for_timeout(SHORT_UI_WAIT_MS)
+    span_start = time.perf_counter()
+    pre = _log_key_values(frame, spec, page_key)
+    shot = capture_page(page, sn, page_key, screenshots_dir)
+    try:
+        post = _log_key_values(frame, spec, page_key)
+    except Exception:
+        _unlink_quietly(shot)  # don't orphan an unbound screenshot if the re-read fails
+        raise
+    span = time.perf_counter() - span_start
+    if span < max_span_s and all(str(pre.get(k, "")) == str(post.get(k, "")) for k in stable_keys):
+        return post, shot
+    _unlink_quietly(shot)
+    return None
+
+
+def _capture_bound_value_page(
+    page: "Page",
+    frame: "Frame",
+    spec: dict,
+    sn: str,
+    page_key: str,
+    screenshots_dir: Path,
+    *,
+    stable_keys: tuple[str, ...],
+    settle_budget_s: float = BOUND_VALUE_SETTLE_BUDGET_S,
+) -> tuple[dict[str, str], Path]:
+    """Keep attempting a bound (value==screenshot) capture until one lands, or ``settle_budget_s``
+    runs out — then fall back to a plain read+shot so the page still yields an artifact. The
+    discrete ~1s display makes a straddle rare, so this almost always binds on the first try."""
+    deadline = time.monotonic() + max(0.0, settle_budget_s)
+    while True:
+        captured = _bound_value_capture(
+            page, frame, spec, sn, page_key, screenshots_dir, stable_keys=stable_keys
+        )
+        if captured is not None:
+            return captured
+        if time.monotonic() >= deadline:
+            # Could not bind within the budget — the display kept changing across every shot,
+            # pathological for a piecewise-constant ~1s monitor. Take the shot and record the
+            # reading taken immediately AFTER it (closest to the frozen frame), and warn loudly
+            # so this rare unbound capture is visible rather than silently trusted as exact.
+            shot = capture_page(page, sn, page_key, screenshots_dir)
+            values = _log_key_values(frame, spec, page_key)
+            logger.warning(
+                f"{page_key}: reading would not hold steady across the shot within "
+                f"{settle_budget_s:.0f}s; recorded the post-shot read, which may differ slightly "
+                f"from the number in the image"
+            )
+            return values, shot
+        page.wait_for_timeout(SHORT_UI_WAIT_MS)
+
+
+def _wait_for_cpu_temp_within_limit(
+    page: "Page",
+    frame: "Frame",
+    spec: dict,
+    page_key: str,
+    max_c: float,
+    budget_s: float,
+) -> None:
+    """Wait (up to ``budget_s``) for cpu_temp to settle <= ``max_c`` before the screenshot.
+
+    The resource-monitor reading is the load-tail spike captured right after the 4 SMB
+    transfers; a healthy unit cools below the limit within the budget, so MES records a
+    representative temperature instead of the spike (实测过曾上传 80℃). A genuinely hot unit
+    times out and is captured as-is — the fan-mode pages, read at steady state, remain the
+    actual thermal pass/fail criterion."""
+    if budget_s <= 0:
+        return
+    deadline = time.monotonic() + budget_s
+    while time.monotonic() < deadline:
+        temp = _cpu_temp_c(_collect_key_values(frame, spec, page_key))
+        if temp is None or temp <= max_c:
+            return
+        logger.info(f"{page_key}: CPU {temp:.0f}°C > {max_c:.0f}°C limit; waiting to cool before capture")
+        page.wait_for_timeout(FAN_RECHECK_INTERVAL_MS)
+    logger.info(f"{page_key}: CPU still above {max_c:.0f}°C after {budget_s:.0f}s; capturing as-is")
+
+
 def _capture_standard_page(
     page: "Page",
     sn: str,
@@ -424,6 +564,8 @@ def _capture_standard_page(
     nav_selectors: dict,
     screenshots_dir: Path,
     capture_values: dict[str, dict[str, str]] | None,
+    cpu_temp_max_c: float = DEFAULT_CPU_TEMP_MAX_C,
+    recheck_budget_s: float = DEFAULT_FAN_RECHECK_BUDGET_S,
 ) -> Path:
     app = _require_meta(spec.get("app"), f"capture_pages.{page_key}.app")
     logger.info(f"Capturing {page_key} via desktop app '{app}'")
@@ -432,11 +574,20 @@ def _capture_standard_page(
     _wait_for_landmark(frame, spec, page_key)
     dismiss_desktop_overlays(page, max_rounds=2, completion_wait_ms=0)
     page.wait_for_timeout(SHORT_UI_WAIT_MS)
-    # 读数必须和截图背靠背：resource_monitor 在 4 个 SMB 传输刚结束时打开，CPU 正快速降温，
-    # 若先读数、再关弹窗+等待+截图，上传的数值会比图里冻住的数值偏高（实测上传 70℃ vs 截图 52℃）。
-    # 与风扇页 _capture_fan_mode 同理——读完立刻截，保证上传值 == 截图里的数字。
-    values = _log_key_values(frame, spec, page_key)
-    shot = capture_page(page, sn, page_key, screenshots_dir)
+    if page_key == RESOURCE_MONITOR_PAGE:
+        # resource_monitor opens right after the 4 SMB transfers with the CPU on its load
+        # tail. #2: let it cool to <= the limit first (a healthy unit does) so MES records a
+        # representative temperature, not the spike. #1: then bind the reading to the
+        # screenshot so the recorded 温度/转速 equals the numbers frozen in the image.
+        _wait_for_cpu_temp_within_limit(page, frame, spec, page_key, cpu_temp_max_c, recheck_budget_s)
+        values, shot = _capture_bound_value_page(
+            page, frame, spec, sn, page_key, screenshots_dir, stable_keys=RESOURCE_MONITOR_STABLE_KEYS
+        )
+    else:
+        # Static pages (version / link speed / RAID) — the value can't drift, so a plain
+        # read+shot is enough.
+        values = _log_key_values(frame, spec, page_key)
+        shot = capture_page(page, sn, page_key, screenshots_dir)
     if capture_values is not None and values:
         capture_values[page_key] = values
     return shot
@@ -1107,15 +1258,20 @@ def _capture_fan_mode(
         shot: Path | None = None
         while True:
             attempt += 1
-            dismiss_desktop_overlays(page, max_rounds=2, completion_wait_ms=0)
-            page.wait_for_timeout(SHORT_UI_WAIT_MS)
-            # Read the RPM back-to-back with the screenshot. The fan is still
-            # ramping after a mode switch, and dismissing overlays / grabbing the
-            # screenshot spikes the CPU (and fan), so any gap between the read and
-            # the shot makes the reported RPM diverge from the number frozen in the
-            # screenshot (observed 508 reported vs 1044 on screen).
-            values = _log_key_values(monitor_frame, monitor_spec, page_key)
-            shot = capture_page(page, sn, page_key, screenshots_dir)
+            # Bind the reading to the screenshot. The fan is still ramping after a mode
+            # switch, and dismissing overlays / grabbing the shot spikes the CPU (and fan),
+            # so a plain read-then-shoot diverged from the frozen number (observed 954
+            # reported vs 2177 on screen). _capture_bound_value_page reads -> shoots ->
+            # re-reads and keeps only a shot whose temp+RPM held identical across it.
+            values, shot = _capture_bound_value_page(
+                page,
+                monitor_frame,
+                monitor_spec,
+                sn,
+                page_key,
+                screenshots_dir,
+                stable_keys=RESOURCE_MONITOR_STABLE_KEYS,
+            )
             failures = fan_mode_value_failures(page_key, values, cpu_temp_max_c)
             if not failures:
                 break

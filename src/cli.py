@@ -149,16 +149,23 @@ def _read_report_file(report_path: Path) -> dict:
 def _merge_resume_report(report: dict, previous: dict) -> None:
     if not previous:
         return
-    captured = previous.get("captured")
-    if isinstance(captured, dict):
-        report["captured"] = dict(captured)
-    captured_values = previous.get("captured_values")
-    if isinstance(captured_values, dict):
-        report["captured_values"] = {
-            str(page_key): dict(values)
-            for page_key, values in captured_values.items()
-            if isinstance(values, dict)
-        }
+    previous_status = str(previous.get("status") or "").strip()
+    # Carry the previous run's captures forward ONLY when resuming an interrupted run
+    # (it was left "running"). A retest of a completed run (failed / success) re-shoots
+    # every page, so its stale captures must NOT be seeded — otherwise _existing_capture_path
+    # would reuse them off disk. Decided from `previous` itself so every caller (including the
+    # post-SN-upgrade merge, which reads the relocated full-SN report) stays consistent.
+    if previous_status.lower() == "running":
+        captured = previous.get("captured")
+        if isinstance(captured, dict):
+            report["captured"] = dict(captured)
+        captured_values = previous.get("captured_values")
+        if isinstance(captured_values, dict):
+            report["captured_values"] = {
+                str(page_key): dict(values)
+                for page_key, values in captured_values.items()
+                if isinstance(values, dict)
+            }
     form_result = previous.get("form_result")
     if isinstance(form_result, dict):
         report["form_result"] = dict(form_result)
@@ -166,7 +173,6 @@ def _merge_resume_report(report: dict, previous: dict) -> None:
         report["provisioned"] = True
     if previous.get("provision_started"):
         report["provision_started"] = True
-    previous_status = str(previous.get("status") or "").strip()
     if previous_status and previous_status != "success":
         report["resumed_from_status"] = previous_status
         if previous.get("current_stage"):
@@ -511,6 +517,11 @@ def run_test(
     output_root = (PROJECT_ROOT / config["output_dir"]).resolve()
     dirs = session_dirs(output_root, sn)
     previous_report = _read_report_file(dirs["base"] / "test_report.json")
+    # A previous report left in "running" means the last run was interrupted (app closed /
+    # crashed) mid-test: resume it and reuse the pages it already completed. Any other prior
+    # status (failed / success) makes this a deliberate retest — re-capture every page fresh
+    # so the operator sees a real new run instead of the previous run's cached screenshots.
+    resume_in_progress = str((previous_report or {}).get("status") or "").strip().lower() == "running"
     if setup_file_log:
         setup_logger(dirs["sn_root"], sn=sn)
 
@@ -802,6 +813,7 @@ def run_test(
                         capture_values=captured_values,
                         cpu_temp_max_c=cpu_temp_max_c,
                         fan_recheck_budget_s=fan_recheck_budget_s,
+                        reuse_existing=resume_in_progress,
                     )
                     report["captured"] = saved
                     report["captured_values"] = captured_values

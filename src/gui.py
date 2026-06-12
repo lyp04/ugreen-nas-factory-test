@@ -3086,11 +3086,37 @@ class FactoryTestGUI:
         return path
 
     def _open_output(self) -> None:
-        output_dir = self._output_root()
+        # Jump straight to the selected machine's screenshot folder instead of the
+        # whole output root; fall back to the root when nothing usable is selected.
+        target = self._selected_machine_image_dir() or self._output_root()
         if sys.platform.startswith("win"):
-            os.startfile(str(output_dir))
+            os.startfile(str(target))
         else:
-            subprocess.Popen(["xdg-open", str(output_dir)])
+            subprocess.Popen(["xdg-open", str(target)])
+
+    def _selected_machine_image_dir(self):
+        """Return the 图片 folder of the queue's currently selected machine, or None.
+
+        Resolves the SN from the selected task(s); if the output folder is named by a
+        different SN form (tail vs full, after a mid-test SN upgrade) it matches by SN
+        identity. Returns the machine's 图片 subfolder, or its root if 图片 is absent."""
+        ids = list(self.selected_task_ids or ([self.selected_task_id] if self.selected_task_id else []))
+        root = self._output_root()
+        for tid in ids:
+            task = self.devices.get(tid)
+            sn = normalize_sn(task.sn or "") if task is not None else ""
+            if not sn or is_auto_sn_placeholder(sn):
+                continue
+            sn_root = root / sn
+            if not sn_root.is_dir():
+                # SN-identity match (tail vs full) — but only when exactly one folder
+                # matches, so a shared-tail collision opens the root instead of guessing.
+                matches = [p for p in root.iterdir() if p.is_dir() and same_sn_identity(p.name, sn)]
+                sn_root = matches[0] if len(matches) == 1 else None
+            if sn_root and sn_root.is_dir():
+                images = sn_root / "图片"
+                return images if images.is_dir() else sn_root
+        return None
 
     def _on_print_label(self) -> None:
         """Open the label-type chooser for the current SN(s)."""

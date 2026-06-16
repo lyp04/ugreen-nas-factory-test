@@ -3392,14 +3392,19 @@ class FactoryTestGUI:
         strip_xy = list(cfg.get("strip_top_left_mm") or label_util.NAMEPLATE_STRIP_TOP_LEFT_MM)
 
         try:
-            zpl = label_util.build_nameplate_zpl(
-                normalized,
-                pn,
-                dpi=dpi,
-                quantity=quantity,
-                qr_top_left_mm=(float(qr_xy[0]), float(qr_xy[1])),
-                strip_top_left_mm=(float(strip_xy[0]), float(strip_xy[1])),
-            )
+            if model_key_from_sn(normalized) in ("4800", "4800Plus"):
+                zpl = label_util.build_nameplate_zpl_4800(
+                    normalized, pn, quantity=quantity
+                )
+            else:
+                zpl = label_util.build_nameplate_zpl(
+                    normalized,
+                    pn,
+                    dpi=dpi,
+                    quantity=quantity,
+                    qr_top_left_mm=(float(qr_xy[0]), float(qr_xy[1])),
+                    strip_top_left_mm=(float(strip_xy[0]), float(strip_xy[1])),
+                )
         except ValueError as exc:
             if silent:
                 logger.error(f"auto-print nameplate: build failed for SN={normalized}: {exc}")

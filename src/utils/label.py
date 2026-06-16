@@ -503,6 +503,98 @@ def build_zpl(
     return ("\n".join(parts) + "\n").encode("utf-8")
 
 
+# ---------------------------------------------------------------------------
+# 4800 / 4800Plus nameplate - 100x37mm supplier stock, printed REVERSED (^POI).
+# Different stock from the 2800 (83.7mm, ^PON): wider, and it feeds so the
+# label must be flipped 180 deg to land in the pre-printed reserved areas.
+# Coordinates are 600dpi printer dots, tuned on the ZT610 against the stock.
+# ---------------------------------------------------------------------------
+NAMEPLATE_4800_PW_DOTS = 2362        # 100.0mm @600dpi (full stock width)
+NAMEPLATE_4800_LL_DOTS = 874         # 37.0mm
+NAMEPLATE_4800_QR_FO = (1783, 17)    # QR field origin (pre-^POI dots)
+NAMEPLATE_4800_QR_MODEL = 2
+NAMEPLATE_4800_QR_MAG = 10           # ^BQ magnification caps at 10
+NAMEPLATE_4800_QR_ECC = "H"          # High -> URL becomes QR v8 ~20.75mm at mag10
+NAMEPLATE_4800_BARCODE_FO = (125, 498)
+NAMEPLATE_4800_BARCODE_W = 904       # 38.3mm
+NAMEPLATE_4800_BARCODE_H = 94        # 4.0mm
+NAMEPLATE_4800_PN_FO = (125, 607)
+NAMEPLATE_4800_SN_FO = (491, 607)
+NAMEPLATE_4800_TEXT_H_DOTS = 42      # ~1.78mm em-height
+
+
+def build_nameplate_zpl_4800(
+    sn: str,
+    pn: str,
+    *,
+    quantity: int = 1,
+    darkness: int | None = None,
+) -> bytes:
+    """ZPL for the 4800 / 4800Plus nameplate (100x37mm, printed reversed ^POI).
+
+    The supplier stock is pre-printed; we fill three reserved regions:
+      - QR (error-correction H so the URL becomes a v8 symbol ~20.75mm wide;
+        ^BQ magnification caps at 10 and ECC=Q would only reach ~17mm)
+      - Code 128 barcode of the SN (38mm)
+      - "P/N: <pn>" and "SN: <sn>" text
+
+    pn is resolved by the caller via lookup_pn(model_key, grade) so it tracks
+    model (4800/4800Plus) and refurb grade (A/B); sn drives the barcode, the QR
+    payload and the SN text. Coordinates are 600dpi dots tuned against the
+    physical stock; the whole label is flipped via ^POI.
+    """
+    normalized = normalize_sn(sn)
+    if not normalized:
+        raise ValueError(f"SN is empty after normalization: {sn!r}")
+    if len(normalized) > 80:
+        raise ValueError(f"SN too long for Code 128 label: {normalized!r}")
+    pn_clean = (pn or "").strip()
+    if not pn_clean:
+        raise ValueError("P/N must be supplied (use a placeholder for layout tests)")
+
+    qr_payload = NAMEPLATE_QR_URL_TEMPLATE.format(sn=normalized)
+    qx, qy = NAMEPLATE_4800_QR_FO
+    bx, by = NAMEPLATE_4800_BARCODE_FO
+    pnx, pny = NAMEPLATE_4800_PN_FO
+    snx, sny = NAMEPLATE_4800_SN_FO
+
+    parts: list[str] = [
+        "^XA",
+        "^CI28",
+        f"^PW{NAMEPLATE_4800_PW_DOTS}",
+        f"^LL{NAMEPLATE_4800_LL_DOTS}",
+        "^LH0,0",
+        "^LS0",
+        "^POI",
+    ]
+    if darkness is not None:
+        parts.append(f"~SD{max(0, min(30, int(darkness))):02d}")
+    parts.extend(
+        [
+            f"^FO{qx},{qy}",
+            f"^BQN,{NAMEPLATE_4800_QR_MODEL},{NAMEPLATE_4800_QR_MAG}",
+            f"^FD{NAMEPLATE_4800_QR_ECC}A,{qr_payload}^FS",
+        ]
+    )
+    parts.append(
+        _render_barcode_gfa(
+            normalized,
+            origin_x=bx,
+            origin_y=by,
+            target_w_dots=NAMEPLATE_4800_BARCODE_W,
+            target_h_dots=NAMEPLATE_4800_BARCODE_H,
+        )
+    )
+    pn_img = _render_text_image(f"P/N: {pn_clean}", NAMEPLATE_4800_TEXT_H_DOTS, bold=True)
+    sn_img = _render_text_image(f"SN: {normalized}", NAMEPLATE_4800_TEXT_H_DOTS, bold=True)
+    parts.append(_image_to_gfa(pn_img, pnx, pny))
+    parts.append(_image_to_gfa(sn_img, snx, sny))
+
+    parts.append(f"^PQ{max(1, int(quantity))},0,1,Y")
+    parts.append("^XZ")
+    return ("\n".join(parts) + "\n").encode("utf-8")
+
+
 def build_nameplate_zpl(
     sn: str,
     pn: str,

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import ipaddress
@@ -1891,14 +1891,19 @@ def print_nameplate(
         raise click.UsageError(f"Refusing to print AUTO placeholder SN: {normalized}")
 
     try:
-        zpl = label_util.build_nameplate_zpl(
-            normalized,
-            pn,
-            dpi=dpi,
-            quantity=quantity,
-            qr_top_left_mm=(float(qr_xy[0]), float(qr_xy[1])),
-            strip_top_left_mm=(float(strip_xy[0]), float(strip_xy[1])),
-        )
+        if model_key_from_sn(sn) in ("4800", "4800Plus"):
+            zpl = label_util.build_nameplate_zpl_4800(
+                normalized, pn, quantity=quantity
+            )
+        else:
+            zpl = label_util.build_nameplate_zpl(
+                normalized,
+                pn,
+                dpi=dpi,
+                quantity=quantity,
+                qr_top_left_mm=(float(qr_xy[0]), float(qr_xy[1])),
+                strip_top_left_mm=(float(strip_xy[0]), float(strip_xy[1])),
+            )
     except ValueError as exc:
         raise click.ClickException(str(exc))
 
@@ -1927,7 +1932,7 @@ def print_nameplate(
     label_util.send_to_windows_printer(target, zpl, job_name=f"Nameplate {normalized}")
     click.echo(
         f"Sent {quantity} nameplate(s) for SN={normalized} P/N={pn} to '{target}' "
-        f"(QR@{qr_xy[0]},{qr_xy[1]} strip@{strip_xy[0]},{strip_xy[1]})"
+        + ("(4800/4800Plus reversed layout)" if model_key_from_sn(sn) in ("4800", "4800Plus") else f"(QR@{qr_xy[0]},{qr_xy[1]} strip@{strip_xy[0]},{strip_xy[1]})")
     )
 
 

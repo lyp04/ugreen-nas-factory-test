@@ -172,7 +172,10 @@ def _build_chunked_copy_script(src: str, dst: str, progress_file: Path) -> str:
         "$buffer = New-Object byte[] (8 * 1024 * 1024); "
         "$total = [Int64]0; "
         "$inputStream = [System.IO.FileStream]::new($src, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read, $buffer.Length, [System.IO.FileOptions]::SequentialScan); "
-        "$outputStream = [System.IO.FileStream]::new($dst, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read, $buffer.Length, [System.IO.FileOptions]::WriteThrough); "
+        # Create (overwrite), not CreateNew: the Remove-Item above can lose to a leftover/locked
+        # file (interrupted prior transfer, AV scan), and CreateNew then aborts with
+        # "文件...已经存在". Create truncates whatever survives, matching the delete-then-write intent.
+        "$outputStream = [System.IO.FileStream]::new($dst, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read, $buffer.Length, [System.IO.FileOptions]::WriteThrough); "
         "try { "
         "while (($read = $inputStream.Read($buffer, 0, $buffer.Length)) -gt 0) { "
         "$outputStream.Write($buffer, 0, $read); "

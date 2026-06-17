@@ -27,6 +27,10 @@ UPDATE_HTTP_PROBE_TIMEOUT_MS = 3_000
 UPDATE_NOTICE_SELECTOR = '.ivu-notice:has-text("立即更新"), .ivu-notice:has-text("已经下载并准备好")'
 UPDATE_NOTICE_LINK_SELECTOR = '.ivu-notice:has-text("立即更新") .notice-link'
 LOGIN_PASSWORD_SELECTOR = 'input[type="password"]'
+SETUP_WIZARD_START_SELECTOR = "button.start-btn"
+# A reboot can briefly serve the first-run page before the config DB is restored; only treat
+# the setup wizard as a real reset after it survives this long (≈3 of the 30s reloads).
+SETUP_WIZARD_CONFIRM_S = 90
 LATEST_TEXT = "\u5df2\u7ecf\u662f\u6700\u65b0\u7248\u672c"
 CHECK_UPDATE_TEXTS = ("\u68c0\u6d4b\u66f4\u65b0", "\u68c0\u67e5\u66f4\u65b0")
 INSTALL_UPDATE_TEXTS = (
@@ -667,6 +671,7 @@ def _wait_for_updated_desktop(page: "Page", nas_url: str, admin: dict, selectors
     update_started = _wait_for_update_to_start(page)
     saw_installing_page = update_started and _update_installing_visible(page)
     stable_desktop_seen_at: float | None = None
+    setup_wizard_seen_at: float | None = None
     deadline = time.monotonic() + UPDATE_WAIT_S
     last_retry_log = 0.0
     last_progress_log = time.monotonic()
@@ -730,6 +735,24 @@ def _wait_for_updated_desktop(page: "Page", nas_url: str, admin: dict, selectors
                 time.sleep(10)
                 continue
 
+            if _setup_wizard_visible(page):
+                # An initialized unit returns to login/desktop after an update; the first-run
+                # setup wizard means the update re-initialized/reset the unit, so the desktop
+                # will never come back. Confirm it persists (across the periodic reloads) before
+                # failing, so a boot transient doesn't false-fail a good unit — then fail fast
+                # instead of spinning until UPDATE_WAIT_S.
+                if setup_wizard_seen_at is None:
+                    setup_wizard_seen_at = time.monotonic()
+                    note_progress("System update: setup wizard seen post-update; confirming it persists")
+                elif time.monotonic() - setup_wizard_seen_at >= SETUP_WIZARD_CONFIRM_S:
+                    raise SystemUpdateError(
+                        "Device returned to the setup wizard after the update "
+                        "(likely re-initialized/reset); re-run setup for this unit"
+                    )
+                time.sleep(5)
+                continue
+            setup_wizard_seen_at = None
+
             if _login_page_visible(page):
                 login_flow.run(page, nas_url, admin, selectors)
                 dismiss_desktop_overlays(
@@ -755,6 +778,7 @@ def _wait_for_updated_desktop(page: "Page", nas_url: str, admin: dict, selectors
         except Exception as exc:
             update_started = True
             stable_desktop_seen_at = None
+            setup_wizard_seen_at = None
             now = time.monotonic()
             if now - last_retry_log >= 30:
                 note_progress(f"System update: desktop wait retrying after UI issue: {exc}")
@@ -795,6 +819,15 @@ def _nas_home_looks_ready(page: "Page", nas_url: str) -> bool:
 def _login_page_visible(page: "Page") -> bool:
     try:
         return page.locator(LOGIN_PASSWORD_SELECTOR).first.is_visible(timeout=1_000)
+    except Exception:
+        return False
+
+
+def _setup_wizard_visible(page: "Page") -> bool:
+    # The welcome page's start button ("开始" / 欢迎使用绿联云存储) is unique to an uninitialized
+    # unit, so a top-level match unambiguously means the device fell back to first-run setup.
+    try:
+        return page.locator(SETUP_WIZARD_START_SELECTOR).first.is_visible(timeout=1_000)
     except Exception:
         return False
 

@@ -191,8 +191,12 @@ powershell -ExecutionPolicy Bypass -File .\build-exe.ps1
 powershell -ExecutionPolicy Bypass -File .\build-packages.ps1
 ```
 
-- `dist-public\`：入口 `src/gui_no_form.py`，硬关录表（设 `UGREEN_DISABLE_FORM_ENTRY=1`），只带 `config.example.yml`、不带上传器，登录 / 上传 / 录表 UI 永远隐藏。给外部 / 公开发布用。
-- `dist-full\`：入口 `src/gui.py`，自动探测同级 `ugreen-nas-autoupdate` 上传器，带真实 `config.yml` + 完整功能（含自动录表）。仅供内部产线用。
+两个包的**软件本体（exe）完全一样**，区别只在带不带 `ugreen-nas-autoupdate` 模块：
+
+- `dist-public\`：exe + `config.example.yml` + `update-config.json`，**不带**上传器模块 → 探测不到上传器，登录 / 上传 / 录表 UI 自动隐藏。给外部 / 公开发布用。
+- `dist-full\`：**同一个 exe** + 真实 `config.yml` + `update-config.json` + `ugreen-nas-autoupdate` 模块 + 启动器（`启动-完整版.bat`，把 `UGREEN_AUTOUPDATE_ROOT` 指向随包模块）→ 探测到模块，显示完整功能（含自动录表）。仅供内部产线用。
+
+两个包都带 `update-config.json`（指向公开库、token 留空），会**自动更新软件本体（exe）**；`ugreen-nas-autoupdate` 模块是独立的，不随自更新变动。
 
 ## 配置
 

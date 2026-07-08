@@ -32,12 +32,22 @@ def test_load_config_returns_disabled_when_file_missing(tmp_path: Path) -> None:
     assert cfg.manifest_asset == DEFAULT_MANIFEST_ASSET
 
 
-def test_load_config_disables_when_secrets_missing(tmp_path: Path) -> None:
+def test_load_config_token_optional_for_public_repo(tmp_path: Path) -> None:
+    # Public repo serves release assets unauthenticated: a missing token no longer
+    # disables updates — only a missing owner/repo does.
     mgr = _make_manager(tmp_path)
     mgr._config_path().write_text(json.dumps({"enabled": True, "owner": "o", "repo": "r"}))
     cfg = mgr._load_config()
-    assert cfg.enabled is False  # token missing → forced off
+    assert cfg.enabled is True  # token optional now
     assert cfg.owner == "o"
+    assert cfg.token == ""
+
+
+def test_load_config_disables_when_owner_or_repo_missing(tmp_path: Path) -> None:
+    mgr = _make_manager(tmp_path)
+    mgr._config_path().write_text(json.dumps({"enabled": True, "repo": "r"}))  # no owner
+    cfg = mgr._load_config()
+    assert cfg.enabled is False
 
 
 def test_load_config_keeps_enabled_when_complete(tmp_path: Path) -> None:

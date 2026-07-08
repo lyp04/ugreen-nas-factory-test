@@ -24,6 +24,58 @@ def find_nas(subnet: str, port: int, discovery_timeout: float, exclude: Collecti
     raise RuntimeError(f"No UGOS NAS found on {subnet}:{port}")
 
 
+def _primary_ipv4() -> str | None:
+    """本机默认出口网卡的 IPv4——只问路由、不实际发包。比 gethostname() 在多网卡 / 主机名
+    没配好的机器上更可靠。"""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("10.255.255.255", 1))  # 目的地址不必可达，只用来让内核选出口网卡
+        return sock.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        sock.close()
+
+
+def _local_scan_subnets(prefix: int = 24) -> list[str]:
+    """本机各网卡 IPv4 所在的 /prefix 网段，供端口扫描兜底用（广播 / mDNS 都没命中时）。
+    这样换到任意网段都能扫，而不是写死某个网段。默认出口网卡优先。"""
+    addrs: list[str] = []
+    primary = _primary_ipv4()
+    if primary:
+        addrs.append(primary)
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            addrs.append(info[4][0])
+    except OSError:
+        pass
+    subnets: list[str] = []
+    for addr in addrs:
+        if not addr or addr.startswith("127."):
+            continue
+        try:
+            cidr = str(ipaddress.ip_network(f"{addr}/{prefix}", strict=False))
+        except ValueError:
+            continue
+        if cidr not in subnets:
+            subnets.append(cidr)
+    return subnets
+
+
+def _resolve_scan_subnets(subnet: str | None) -> list[str]:
+    """把 config 的 network.subnet 解释成端口扫描要覆盖的网段列表：
+    写死的 CIDR（如 192.168.0.0/24）→ 就用它；'auto' / 空 / 非法 → 自动探测本机网段。
+    这样默认就是通版：换到别人的产线 / 网段也能扫，而不必先改 config。"""
+    raw = (subnet or "").strip()
+    if raw and raw.lower() != "auto":
+        try:
+            ipaddress.ip_network(raw, strict=False)
+            return [raw]
+        except ValueError:
+            logger.warning(f"network.subnet={subnet!r} 不是合法网段，改用自动探测的本机网段做端口扫描")
+    return _local_scan_subnets()
+
+
 def find_nas_candidates(
     subnet: str,
     port: int,
@@ -56,12 +108,17 @@ def find_nas_candidates(
             logger.info(f"Found UGOS via mDNS: {hit.address}")
             candidates.append(hit.address)
 
+    scan_targets = _resolve_scan_subnets(subnet)
+    targets_desc = ", ".join(scan_targets) if scan_targets else "(未探测到本机网段)"
     if candidates:
-        logger.info(f"mDNS found {len(candidates)} usable candidate(s). Scanning {subnet}:{port} for any others...")
+        logger.info(f"mDNS found {len(candidates)} usable candidate(s). Scanning {targets_desc}:{port} for any others...")
     else:
-        logger.info(f"mDNS found nothing usable. Falling back to port scan on {subnet}:{port}...")
+        logger.info(f"mDNS found nothing usable. Falling back to port scan on {targets_desc}:{port}...")
 
-    for ip in _sort_ips(port_scanner.scan_subnet(subnet, port=port, timeout=0.5)):
+    scanned_ips: list[str] = []
+    for target in scan_targets:
+        scanned_ips.extend(port_scanner.scan_subnet(target, port=port, timeout=0.5))
+    for ip in _sort_ips(scanned_ips):
         if ip in excluded:
             logger.info(f"Skipping UGOS already assigned to another active task: {ip}")
             continue
@@ -76,8 +133,8 @@ def find_nas_candidates(
         return candidates
 
     if excluded:
-        raise RuntimeError(f"No unused UGOS NAS found on {subnet}:{port}; excluded active IPs: {sorted(excluded)}")
-    raise RuntimeError(f"No UGOS NAS found on {subnet}:{port}")
+        raise RuntimeError(f"No unused UGOS NAS found on {targets_desc}:{port}; excluded active IPs: {sorted(excluded)}")
+    raise RuntimeError(f"No UGOS NAS found on {targets_desc}:{port}")
 
 
 def _sort_ips(ips: list[str]) -> list[str]:

@@ -1,6 +1,6 @@
 """FaultReporter：把一条未分类失败 → 去重 → 落盘队列 → 异步上传成 GitHub Issue。
 
-对应 anker 的 FailureReporter。流程：
+对应内部的 FailureReporter。流程：
   report_async() 同步做（极快）：算指纹、去重窗口、append 到 JSONL 队列，然后起后台线程。
   后台线程 _flush()：逐条上传——先把该 SN 整目录打包传成 Release 资产，再
   按指纹 找/建 Issue（重复出现就 PATCH 计数器 + 追加「最近记录」，不刷评论）。

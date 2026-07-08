@@ -21,6 +21,22 @@ from loguru import logger
 
 FORM_ENTRY_ENABLED = True
 
+
+def _resolve_form_entry_enabled() -> bool:
+    """录表 / 登录 / 上传 相关 UI 是否启用（决定它们显示还是整块隐藏）：
+    1. 显式关闭优先：gui_no_form.py 设 UGREEN_DISABLE_FORM_ENTRY=1 → 关。
+    2. 否则自动探测：找不到自动录表系统（ugreen-nas-autoupdate 的 automation/runner.py）就关。
+    这样「只带 factory-test、不带上传器」的分发包会自动进入纯测试模式，隐藏全部登录/上传按钮。"""
+    if os.environ.get("UGREEN_DISABLE_FORM_ENTRY") == "1":
+        return False
+    if not FORM_ENTRY_ENABLED:
+        return False
+    try:
+        return form_entry.autoupdate_available()
+    except Exception:
+        return False
+
+
 if __package__ in {None, ""}:
     package_root = Path(__file__).resolve().parent.parent
     if str(package_root) not in sys.path:
@@ -751,7 +767,7 @@ class FactoryTestGUI:
         self.root.minsize(1040, 620)
 
         self.project_root = get_project_root()
-        self.form_entry_enabled = FORM_ENTRY_ENABLED
+        self.form_entry_enabled = _resolve_form_entry_enabled()
         try:
             self.config, _ = load_configs(self.project_root)
         except Exception:
@@ -771,7 +787,7 @@ class FactoryTestGUI:
         self.flow_mode_var = tk.StringVar(value="setup")
         self.cleanup_before_finish_var = tk.BooleanVar(value=True)
         self.factory_reset_before_finish_var = tk.BooleanVar(value=True)
-        self.auto_form_entry_var = tk.BooleanVar(value=FORM_ENTRY_ENABLED)
+        self.auto_form_entry_var = tk.BooleanVar(value=self.form_entry_enabled)
         _label_cfg = (self.config.get("label_printer") or {}) if isinstance(self.config, dict) else {}
         self.auto_print_label_var = tk.BooleanVar(value=bool(_label_cfg.get("auto_print_on_pass", False)))
         self.auto_seed_previous_step_var = tk.BooleanVar(value=False)
@@ -1702,7 +1718,9 @@ class FactoryTestGUI:
         self.materials_tab_frame = ttk.Frame(self.log_notebook)
         self.materials_tab_frame.columnconfigure(0, weight=1)
         self.materials_tab_frame.rowconfigure(1, weight=1)
-        self.log_notebook.add(self.materials_tab_frame, text=self._t("tab_materials"))
+        # 录表物料是上传/录表流程的一部分——没接上传器时不显示这个标签页（控件仍创建，避免别处引用报错）。
+        if self.form_entry_enabled:
+            self.log_notebook.add(self.materials_tab_frame, text=self._t("tab_materials"))
         self.materials_status_label = ttk.Label(
             self.materials_tab_frame,
             textvariable=self.materials_status_var,
@@ -3824,7 +3842,7 @@ class FactoryTestGUI:
 
     def _scan_ugreen_nas_devices(self, known_ips: set[str]) -> list[dict[str, str]]:
         network = self.config.get("network") or {}
-        subnet = str(network.get("subnet") or "192.168.0.0/24")
+        subnet = str(network.get("subnet") or "auto")
         port = int(network.get("ugos_http_port") or 9999)
         discovery_timeout = float(network.get("discovery_timeout") or 30)
         allowed_network = self._auto_scan_network(subnet)
@@ -3862,10 +3880,15 @@ class FactoryTestGUI:
         return self._auto_scan_devices_from_candidates(candidate_ips, hits_by_ip, known_ips)
 
     def _auto_scan_network(self, subnet: str):
-        try:
-            return ipaddress.ip_network(subnet, strict=False)
-        except ValueError:
-            return None
+        # 通版：不再把自动扫描的结果限制在 config 的某个网段内。广播 / mDNS 能在任意网段
+        # 发现 UGREEN NAS，硬卡 192.168.0.0/24 会把别的网段（如 192.168.1.x / 10.x）已经
+        # 发现到的设备全部误过滤掉。返回 None 表示不设网段白名单——_auto_scan_ip_allowed
+        # 仍会挡掉回环 / 链路本地 / 组播 / 未指定这些明显无效的地址。
+        # （要重新按网段限制，把下面两行注释打开即可。）
+        # try:
+        #     return ipaddress.ip_network(subnet, strict=False)
+        # except ValueError:
+        return None
 
     def _auto_scan_ip_allowed(self, ip: str, network) -> bool:
         try:
@@ -4131,7 +4154,7 @@ class FactoryTestGUI:
                     self._refresh_action_states()
                     return
             network = self.config.get("network") or {}
-            allowed_network = self._auto_scan_network(str(network.get("subnet") or "192.168.0.0/24"))
+            allowed_network = self._auto_scan_network(str(network.get("subnet") or "auto"))
             for device in event.get("devices") or []:
                 ip = str(device.get("ip") or "").strip()
                 sn = normalize_sn(str(device.get("sn") or ""))

@@ -129,24 +129,17 @@ jobs:
 
       - name: Stage dist/config for downstream packaging
         shell: pwsh
-        env:
-          CLIENT_UPDATE_PAT: ${{ secrets.CLIENT_UPDATE_PAT }}
         run: |
           if (Test-Path dist\config) { Remove-Item -Recurse -Force dist\config }
           New-Item -ItemType Directory -Force dist\config | Out-Null
           Copy-Item -Recurse -Force config\* dist\config\
-          # Replace the example with a real config the customer can use.
-          if ([string]::IsNullOrWhiteSpace($env:CLIENT_UPDATE_PAT)) {
-            Write-Host "::warning::CLIENT_UPDATE_PAT secret is empty — release will ship with a placeholder token."
-            $token = "github_pat_xxx"
-          } else {
-            $token = $env:CLIENT_UPDATE_PAT
-          }
+          # Public repo: release assets download without auth, so the client needs
+          # no token. Ship an empty token — never embed a PAT in a build here.
           $cfg = [ordered]@{
             enabled       = $true
             owner         = "${{ github.repository_owner }}"
             repo          = "$(($env:GITHUB_REPOSITORY -split '/')[1])"
-            token         = $token
+            token         = ""
             manifestAsset = "update.json"
             releaseTag    = ""
           }
@@ -196,7 +189,6 @@ jobs:
           path: |
             dist/UGREEN-NAS-Test.exe
             dist/update.json
-            dist/config/update-config.json
           if-no-files-found: warn
           retention-days: 7
 

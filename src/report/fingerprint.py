@@ -1,6 +1,6 @@
 """把一条故障折叠成稳定的 8 位 hex 指纹，用于「同一类故障合并到一个 Issue」。
 
-对应 anker 的 Fingerprint。易变字段（IP / MAC / 时间戳 / 路径 / 具体数字 / SN 尾号）
+对应内部的 Fingerprint。易变字段（IP / MAC / 时间戳 / 路径 / 具体数字 / SN 尾号）
 在算指纹前先归一化掉，这样不同机器、不同时间出现的同一类问题会得到相同指纹。
 """
 from __future__ import annotations

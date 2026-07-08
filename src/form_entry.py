@@ -10,8 +10,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 
 DEFAULT_SELECTED_MATERIAL_GROUPS = {"补充包材", "补充配件"}
 
@@ -41,9 +39,12 @@ def _project_root() -> Path:
 
 
 def _config_autoupdate_root() -> Path | None:
-    config_path = _project_root() / "config" / "config.yml"
+    # 用 config_loader 读：它会 (1) 在没有真实 config.yml 时回退到 config.example.yml，
+    # (2) 展开 ${USERPROFILE} 等环境变量——直接 yaml.safe_load 拿到的是未展开的字面量。
     try:
-        data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        from .utils.config_loader import load_yaml, resolve_config_path
+
+        data = load_yaml(resolve_config_path(_project_root(), "config.yml")) or {}
     except Exception:
         return None
     raw = ((data.get("paths") or {}).get("autoupdate_root") or "").strip()
@@ -65,6 +66,17 @@ def autoupdate_root() -> Path:
         "找不到自动录表系统，请设置 UGREEN_AUTOUPDATE_ROOT 或在 config/config.yml 的 "
         "paths.autoupdate_root 里配置正确路径"
     )
+
+
+def autoupdate_available(project_root: Path | None = None) -> bool:
+    """能否探测到自动录表系统（ugreen-nas-autoupdate 的 automation/runner.py）。
+    探测不到就返回 False —— GUI 据此隐藏全部登录/上传/录表相关 UI。绝不抛异常。
+    这样「只带 factory-test、不带上传器」的分发包会自动进入纯测试模式。"""
+    try:
+        autoupdate_root()  # 成功返回即代表 runner.py 存在（见上）
+        return True
+    except Exception:
+        return False
 
 
 def resolve_config_path(_project_root: Path | None, name: str) -> Path:

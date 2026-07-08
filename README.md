@@ -2,6 +2,8 @@
 
 Windows 桌面工具，自动化完成 UGREEN NAS 的出厂全流程测试：系统初始化、固件更新、建池建共享、SMB 传输测速、截图采集、标签打印和恢复出厂设置。测试结果通过桥接接口交给独立的 `ugreen-nas-autoupdate` 项目自动录入 内部系统 表单。
 
+环境要求：Windows 10/11、Python 3.10+、系统自带 Microsoft Edge（无需额外下载 Chromium）。
+
 已支持机型：DXP2800（SN 前缀 `HB`）、DXP4800（前缀 `EC671`）、DXP4800Plus（前缀 `EC752`，含 M.2）。机型由 SN 前缀自动识别（见 `src/utils/sn.py` 的 `SN_MODEL_PREFIXES`）。
 
 版本号不在本文档硬编码；以 git tag（形如 `v0.1.23`）和 GitHub Release 为准。CI 在打 tag 时把 tag 名 stamp 进 `src/version.py`。
@@ -38,18 +40,11 @@ Windows 桌面工具，自动化完成 UGREEN NAS 的出厂全流程测试：系
 
 ### P/N 和 EAN-13 自动查表
 
-SN 前缀自动识别机型（2800 / 4800 / 4800Plus），结合 A/B 等级从内置查表得到 P/N 和 EAN-13：
+SN 前缀自动识别机型（2800 / 4800 / 4800Plus），结合 A/B 等级从查表得到 P/N 和 EAN-13。
 
-| 机型 | 等级 | P/N | EAN-13 |
-|------|------|-----|--------|
-| DXP2800 | A | 00000 | 6900000000000 |
-| DXP2800 | B | 00001 | 6900000000001 |
-| DXP4800 | A | 00002 | 6900000000002 |
-| DXP4800 | B | 00003 | 6900000000003 |
-| DXP4800Plus | A | 00004 | 6900000000004 |
-| DXP4800Plus | B | 00005 | 6900000000005 |
-
-新机型上线时需要在 `src/utils/label.py` 的 `NAMEPLATE_PN_TABLE` 和 `NAMEPLATE_EAN13_TABLE` 字典中添加对应条目。
+> 真实的 P/N / EAN-13 对照表属于产品专有数据，**不随公开库发布**。`src/utils/label.py` 里的
+> `NAMEPLATE_PN_TABLE` / `NAMEPLATE_EAN13_TABLE` 默认是空表——按你自己的机型/等级填入即可；
+> 表为空时 `lookup_pn` 返回 `None`，铭牌打印回退到 `config` 的 `placeholder_pn` 或命令行 `--pn`。
 
 ### 周转箱标贴特殊逻辑
 
@@ -110,7 +105,7 @@ carton_printer:
   quantity: 2
   auto_print_on_pass: false
   po_default: "XXXXXXXXXXX"  # PO 占位，后续接真实订单时改
-  warehouse: "收料仓"       # 收料仓名称
+  warehouse: "收料仓"         # 收料仓名称，按你自己的仓库填
 ```
 
 **关键注意事项：**
@@ -147,6 +142,15 @@ powershell -ExecutionPolicy Bypass -File .\run-cli.ps1 print-label --sn TEST1234
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
+复制配置模板，再按自己的机器/产线改（管理员账号密码、打印机名、扫描网段等）：
+
+```powershell
+copy config\config.example.yml config\config.yml
+notepad config\config.yml
+```
+
+> 不复制也能启动：找不到 `config.yml` 时代码会回退到 `config.example.yml`，但里面 `admin.username / password` 是 `CHANGE_ME` 占位——初始化向导会把 NAS 管理员密码设成这个占位值。请务必先改成真实凭据。
+
 启动 GUI（推荐）：
 
 ```powershell
@@ -181,6 +185,15 @@ powershell -ExecutionPolicy Bypass -File .\run-cli.ps1 print-carton --sn SN1 SN2
 powershell -ExecutionPolicy Bypass -File .\build-exe.ps1
 ```
 
+发布 / 分发用 `build-packages.ps1`，一次打两个包：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build-packages.ps1
+```
+
+- `dist-public\`：入口 `src/gui_no_form.py`，硬关录表（设 `UGREEN_DISABLE_FORM_ENTRY=1`），只带 `config.example.yml`、不带上传器，登录 / 上传 / 录表 UI 永远隐藏。给外部 / 公开发布用。
+- `dist-full\`：入口 `src/gui.py`，自动探测同级 `ugreen-nas-autoupdate` 上传器，带真实 `config.yml` + 完整功能（含自动录表）。仅供内部产线用。
+
 ## 配置
 
 所有配置在 `config/config.yml`，关键项：
@@ -199,7 +212,7 @@ powershell -ExecutionPolicy Bypass -File .\build-exe.ps1
 | `nameplate_printer` | 铭牌标贴打印机（模版一） |
 | `ean13_printer` | 69 码 EAN-13 打印机（模版五） |
 | `carton_printer` | 周转箱标贴打印机（模版六） |
-| `fault_report` | 故障自动上报（GitHub Issue + 日志打包），token 留空即停用 |
+| `fault_report` | 故障自动上报（GitHub Issue + 日志打包）。token 从环境变量 `FAULT_REPORT_TOKEN` 读取（不写进配置文件 / 不进 git），未设置即自动停用；fork 自用请把 `owner`/`repo` 改成你自己的仓库 |
 | `output_dir` | 截图、日志、报告输出目录 |
 | `paths.autoupdate_root` | 自动录表系统目录（可被 `UGREEN_AUTOUPDATE_ROOT` 覆盖；缺省找同级 `ugreen-nas-autoupdate`） |
 
@@ -431,7 +444,13 @@ CI 会自动把 tag 名当 `versionName`、`git rev-list --count HEAD` 当 `vers
 ## 验证
 
 ```powershell
-python -m pip install -r requirements-dev.txt
-python -m pytest tests
-python -m src.cli --help
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pytest tests
+.\.venv\Scripts\python.exe -m src.cli --help
 ```
+
+完整测试套件依赖 pywin32（打印 / 窗口控制等），只在 Windows 上能跑全；macOS/Linux 上部分用例会自动跳过或收集失败。
+
+## 许可 / License
+
+本项目以 Apache-2.0 许可发布，详见仓库根目录的 `LICENSE` 文件。

@@ -1,0 +1,190 @@
+# -----------------------------------------------------------------------------
+# 通版示例配置。复制成同目录的 config.yml 再按你自己的机器/产线改。
+#   copy config/config.example.yml -> config/config.yml
+# config.yml 不进 git（见 .gitignore），所以真实凭据 / token / 打印机名只留在本地。
+# 代码在找不到 config.yml 时会回退到本示例，方便全新克隆也能起得来。
+# -----------------------------------------------------------------------------
+
+admin:
+  # 出厂测试时写入 NAS 的管理员账号/密码（setup_wizard 会把 NAS 管理员密码设成这里的值）。
+  # 换成你自己的；公开模板里用占位符，真实值放本地 config.yml（不进 git）。
+  username: "CHANGE_ME"
+  password: "CHANGE_ME"
+  email: "you@example.com"
+
+network:
+  # 端口扫描兜底用的网段。auto = 自动探测本机所在网段（通版默认，换到任意产线/网段都能用）；
+  # 也可写死某个 CIDR（如 192.168.0.0/24）把扫描固定在该网段。
+  # 注意：广播 / mDNS 发现本就不受此项限制，改成 auto 只影响「广播都没命中」时的端口扫描兜底。
+  subnet: auto
+  discovery_timeout: 30
+  auto_discovery_timeout: 900
+  service_ready_timeout: 90
+  ugos_http_port: 9999
+
+pages:
+  - system_update
+  - network_interface
+  - storage_pool
+  - hdd_write
+  - hdd_read
+  - ssd_write
+  - ssd_read
+  - resource_monitor
+  - fan_normal
+  - fan_silent
+  - fan_full_speed
+
+provision:
+  pools:
+    - key: hdd
+      share_name: hdd
+      pool_name: 存储池1
+      storage_space: 存储空间1
+      raid: RAID 0
+      disk_summary: 硬盘1、2、3、4
+      disks:
+        - 硬盘1
+        - 硬盘2
+        - 硬盘3
+        - 硬盘4
+    - key: ssd
+      share_name: ssd
+      pool_name: 存储池2
+      storage_space: 存储空间2
+      raid: RAID 0
+      disk_summary: M.2硬盘1、2
+      disks:
+        - M.2硬盘1
+        - M.2硬盘2
+
+transfer:
+  # Local source files for hdd_write / ssd_write. Model is inferred from SN prefix.
+  source_files:
+    "2800": "./测试5G.rar"
+    "4800": "./测试10G.rar"
+    "4800Plus": "./测试20G.rar"
+  source_file_sizes_gib:
+    "2800": 5
+    "4800": 10
+    "4800Plus": 20
+  # Local-only temp folder for SMB download/progress files. Keep this off synced folders.
+  work_dir: "./transfer_work"
+  # Legacy fallback only; transfer screenshots now prefer speed-threshold sampling below.
+  midpoint_ratio: 0.5
+  # Sample Task Manager transfer speed while SMB copy is running.
+  speed_sample_interval_ms: 500
+  speed_stable_samples: 1
+  speed_attempt_timeout_s: 45
+  speed_max_retries: 1
+  # For upload screenshots, keep at least this much remote data for the following read test.
+  upload_min_seed_mb:
+    "2800": 5120
+    "4800": 10240
+    "4800Plus": 20480
+  # Once a passing upload speed screenshot is captured, keep the same transfer
+  # running until the model-sized seed file is complete.
+  upload_seed_timeout_s:
+    "2800": 90
+    "4800": 120
+    "4800Plus": 180
+  upload_finish_timeout_s: 30
+  # After upload finishes, wait for NAS disk write activity to settle before read screenshots.
+  post_upload_settle_timeout_s: 30
+  post_upload_settle_interval_ms: 1000
+  post_upload_settle_samples: 2
+  # Values are MB/s. Adjust here instead of changing Python code.
+  speed_thresholds_mb_s:
+    default: 200
+    models:
+      "2800":
+        default: 100
+      "4800":
+        default: 100
+      "4800Plus":
+        default: 200
+
+validation:
+  # 所有机型通用：截图采集时若任一页 CPU 温度（℃）> cpu_temp_max_c 则测试判失败，
+  # 失败原因里会写明实测值与阈值。设为更高的数字可放宽，或留空走 DEFAULT_CPU_TEMP_MAX_C。
+  cpu_temp_max_c: 70
+  # 抓风扇模式页时，若 CPU 温度超标或风扇转速异常，最多在这么多秒内反复重读+重抓，
+  # 等读数进入合格区间再定格截图；超时仍不合格才按失败记录（与传输速度重试同理）。
+  # 每张风扇模式页各享一份预算；设为 0 则关闭重抓（抓一次定生死）。
+  cpu_temp_recheck_seconds: 30
+
+retry:
+  network_max: 3
+  ui_max: 2
+  backoff_base: 2
+
+browser:
+  headless: false
+  hidden: true
+  viewport: [1920, 1080]
+  language: zh-CN
+  default_timeout_ms: 30000
+  channel: msedge    # msedge | chrome | chromium. msedge uses system Edge (no download needed on Win10+)
+
+# Screenshots, logs, and reports. This can be a synced folder.
+# 用 ${USERPROFILE} 而不是写死某个账户：换任何 Windows 账户都指向该用户自己的桌面。
+output_dir: "${USERPROFILE}/Desktop/NAS/Automatic"
+
+paths:
+  # 自动录表系统所在目录。可被环境变量 UGREEN_AUTOUPDATE_ROOT 覆盖；
+  # 若两者都没有，会在 factory-test 项目同级目录里找 ugreen-nas-autoupdate。
+  autoupdate_root: "${USERPROFILE}/ugreen-nas-autoupdate"
+
+# 故障自动上报（GitHub Issue + 完整日志打包）。仅当一次测试「失败」且故障不属于
+# 读写速度 / 转速 / 温度 / 存储池 这四类硬件检测（即「其他/未分类」问题）时，自动把该
+# SN 的全部日志（run.log + test_report.json + 图片/截图）打成 zip 传到 release_tag 对应的
+# Release 资产，并按指纹去重地创建/更新一个 GitHub Issue。
+# 默认开启（可在此关掉）。token 从环境变量 FAULT_REPORT_TOKEN 读取，不写进任何文件 / 不进 git。
+# 生效条件：enabled=true 且 owner/repo 填成你自己的仓库 且 环境里设了 FAULT_REPORT_TOKEN。
+# 三者任一缺失（尤其没设该环境变量）= 自动停用，不影响任何测试流程。
+fault_report:
+  enabled: true
+  # 默认指向本仓库（所有产线机的故障都汇到这里）；fork 自用请改成你自己的 owner/repo。
+  owner: lyp04
+  repo: ugreen-nas-factory-test
+  # 从环境变量读，避免把 PAT 写进配置文件 / 提交进 git。
+  token: "${FAULT_REPORT_TOKEN}"
+  release_tag: "fault-reports"
+  run_log_tail_lines: 200
+  dedup_window_minutes: 5
+
+# SN 标签打印（模版二：42×25mm，Code 128，12mm 条码高度）。
+# name 留空 = 按 Zebra 名称/驱动自动识别（单打印机机器够用）；
+# 多打印机机器请填 Windows 打印队列的精确名字（跑 `run-cli print-label --list-printers` 看实际名字）。
+label_printer:
+  name: ""
+  dpi: 203            # ZD220/ZD420/GK420t = 203；ZD420-300dpi = 300
+  quantity: 2         # 规格 2PCS（彩盒 + 中箱各一张）
+  auto_print_on_pass: false
+
+# 铭牌标贴（模版一：83.7×36.7mm，QR + 条码 + P/N/SN 文字）。
+nameplate_printer:
+  name: ""            # 例：ZDesigner ZT610-600dpi ZPL；留空则自动识别
+  dpi: 600
+  quantity: 1
+  auto_print_on_pass: false
+  qr_top_left_mm: [65.0, 5.0]
+  strip_top_left_mm: [6.0, 25.0]
+  # P/N 占位（CLI 未传 --pn 且无法按 SN/grade 查表时使用）。
+  placeholder_pn: "000000"
+
+# 69 码（EAN-13）彩盒/中箱标贴（模版五：50×30mm）。名字必须与 Windows 打印队列完全一致。
+ean13_printer:
+  name: ""            # 例：DeliDL-888T；留空则自动识别
+  dpi: 203
+  quantity: 2
+  auto_print_on_pass: false
+
+# 周转箱标贴（模版六：102×152mm）。二维码内容：SN*{PID}*{QTY}*{PO}*{DATE}*{流水号}。
+carton_printer:
+  name: ""            # 留空则自动识别
+  dpi: 203
+  quantity: 2
+  auto_print_on_pass: false
+  po_default: "XXXXXXXXXXX"   # PO 占位，接真实订单 PO 时改这里或由界面传入
+  warehouse: "收料仓"          # 按订单/预约送货的收料仓填

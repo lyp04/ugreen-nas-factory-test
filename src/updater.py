@@ -52,7 +52,7 @@ class UpdateInfo:
 
 
 class UpdateManager:
-    """Background GitHub-release updater modelled after a prior internal UpdateManager.
+    """Background GitHub-release updater modelled after an internal UpdateManager.
 
     The check runs on a daemon thread so a slow network never blocks the GUI.
     When a newer release is found, a `update_available` event is pushed onto
@@ -132,7 +132,10 @@ class UpdateManager:
             manifest_asset = DEFAULT_MANIFEST_ASSET
         release_tag = str(data.get("releaseTag", "")).strip()
         enabled = bool(data.get("enabled", False))
-        if not (owner and repo and token):
+        # token is optional: a public repo serves release assets unauthenticated,
+        # so updates work without one. When present it's still used (Bearer auth
+        # for a private repo); when empty, requests just go out anonymous.
+        if not (owner and repo):
             enabled = False
         return _Config(enabled, owner, repo, token, manifest_asset, release_tag)
 
@@ -294,7 +297,7 @@ class UpdateManager:
         Private-repo release-asset URLs (``api.github.com/.../releases/assets/<id>``)
         302 to ``objects.githubusercontent.com``; that S3-backed host rejects
         requests that arrive with both AWS-signed query params and an
-        ``Authorization: Bearer`` header. an internal Java UpdateManager handles this
+        ``Authorization: Bearer`` header. An internal Java UpdateManager handles this
         the same way: disable auto-redirect, then re-decide on each hop whether
         the new host is ``api.github.com`` (token attached) or anything else
         (token stripped).

@@ -1,6 +1,6 @@
 """故障上报（自动 GitHub Issue + 日志打包）。
 
-对应隔壁 internal-factory-test 的 `report` 包，但用纯 stdlib（urllib/zipfile）实现，
+对应内部的 `report` 包，但用纯 stdlib（urllib/zipfile）实现，
 不引入任何新依赖，且整个包在 macOS 上也能 import（不碰 Windows-only 的 ctypes）。
 
 只在「测试失败且归类为其他/未分类」时由 cli.run_test 自动触发：

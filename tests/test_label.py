@@ -266,9 +266,16 @@ def test_write_zpl_file_roundtrips(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_lookup_pn_table_covers_all_us_refurb_sku() -> None:
-    # Sourced from 内部 NAS SKU 汇总 internal rows; 2800 not in
-    # the table so hardcoded per factory spec.
+def test_lookup_pn_table_covers_all_us_refurb_sku(monkeypatch) -> None:
+    # NAMEPLATE_PN_TABLE ships empty in the public repo (real SKU data is
+    # internal/proprietary); install a synthetic table here to exercise the
+    # lookup logic itself.
+    monkeypatch.setitem(label_util.NAMEPLATE_PN_TABLE, ("2800", "A"), "00000")
+    monkeypatch.setitem(label_util.NAMEPLATE_PN_TABLE, ("2800", "B"), "00001")
+    monkeypatch.setitem(label_util.NAMEPLATE_PN_TABLE, ("4800", "A"), "00002")
+    monkeypatch.setitem(label_util.NAMEPLATE_PN_TABLE, ("4800", "B"), "00003")
+    monkeypatch.setitem(label_util.NAMEPLATE_PN_TABLE, ("4800Plus", "A"), "00004")
+    monkeypatch.setitem(label_util.NAMEPLATE_PN_TABLE, ("4800Plus", "B"), "00005")
     assert label_util.lookup_pn("2800", "A") == "00000"
     assert label_util.lookup_pn("2800", "B") == "00001"
     assert label_util.lookup_pn("4800", "A") == "00002"
@@ -277,7 +284,9 @@ def test_lookup_pn_table_covers_all_us_refurb_sku() -> None:
     assert label_util.lookup_pn("4800Plus", "B") == "00005"
 
 
-def test_lookup_pn_normalizes_grade_case() -> None:
+def test_lookup_pn_normalizes_grade_case(monkeypatch) -> None:
+    monkeypatch.setitem(label_util.NAMEPLATE_PN_TABLE, ("2800", "A"), "00000")
+    monkeypatch.setitem(label_util.NAMEPLATE_PN_TABLE, ("2800", "B"), "00001")
     assert label_util.lookup_pn("2800", "a") == "00000"
     assert label_util.lookup_pn("2800", " b ") == "00001"
 
@@ -289,8 +298,15 @@ def test_lookup_pn_returns_none_when_anything_missing() -> None:
     assert label_util.lookup_pn("2800", "C") is None
 
 
-def test_lookup_ean13_table_covers_us_refurb_skus() -> None:
-    # 2800 supplied directly by factory; 4800 / 4800Plus from internal source.
+def test_lookup_ean13_table_covers_us_refurb_skus(monkeypatch) -> None:
+    # NAMEPLATE_EAN13_TABLE ships empty in the public repo; install a
+    # synthetic table here to exercise the lookup logic itself.
+    monkeypatch.setitem(label_util.NAMEPLATE_EAN13_TABLE, ("2800", "A"), "6900000000000")
+    monkeypatch.setitem(label_util.NAMEPLATE_EAN13_TABLE, ("2800", "B"), "6900000000001")
+    monkeypatch.setitem(label_util.NAMEPLATE_EAN13_TABLE, ("4800", "A"), "6900000000002")
+    monkeypatch.setitem(label_util.NAMEPLATE_EAN13_TABLE, ("4800", "B"), "6900000000003")
+    monkeypatch.setitem(label_util.NAMEPLATE_EAN13_TABLE, ("4800Plus", "A"), "6900000000004")
+    monkeypatch.setitem(label_util.NAMEPLATE_EAN13_TABLE, ("4800Plus", "B"), "6900000000005")
     assert label_util.lookup_ean13("2800", "A") == "6900000000000"
     assert label_util.lookup_ean13("2800", "B") == "6900000000001"
     assert label_util.lookup_ean13("4800", "A") == "6900000000002"

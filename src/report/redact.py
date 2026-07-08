@@ -1,6 +1,6 @@
 """把密码 / token / MAC 等敏感串从将要上传到 GitHub 的文本里抹掉。
 
-对应 anker 的 Redactor。SN、邮箱、机型这类排障必需的信息保留；只去掉
+对应内部的 Redactor。SN、邮箱、机型这类排障必需的信息保留；只去掉
 真正的密钥材料（admin 密码、PAT、Bearer、长 base64 blob）和设备唯一的 MAC。
 """
 from __future__ import annotations

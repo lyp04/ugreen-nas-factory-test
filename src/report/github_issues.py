@@ -1,6 +1,6 @@
 """极薄的 GitHub REST 客户端（纯 urllib，无第三方依赖）。
 
-对应 anker 的 GitHubIssuesClient，多了 Release 资产上传（用来放含截图的日志 zip，
+对应内部的 GitHubIssuesClient，多了 Release 资产上传（用来放含截图的日志 zip，
 因为 Issues REST 不支持直接传二进制附件）。只实现本功能用得到的几个端点：
 - 按指纹搜索 open issue
 - 创建 / 读取 / 整体改写 issue body
@@ -67,7 +67,7 @@ class GitHubIssuesClient:
             else:
                 body = json.dumps(data).encode("utf-8")
                 headers["Content-Type"] = "application/json"
-        # urllib.request 直接支持自定义 method（含 PATCH），不需要 内部那套
+        # urllib.request 直接支持自定义 method（含 PATCH），不需要内部那套
         # X-HTTP-Method-Override 隧道。
         request = urllib.request.Request(full, data=body, headers=headers, method=method)
         try:

@@ -1,6 +1,6 @@
 """SN label generation for Zebra ZPL printers.
 
-Spec (from 绿联DXP2800 整机标贴通用模版 模版二):
+Spec (from 内部标贴模版规格 模版二):
 - Label: 42mm × 25mm, white background / black ink
 - Barcode print area: 38mm × 14mm
 - Margins: 2mm left/right, 5.5mm top, 4.5mm bottom
@@ -88,8 +88,7 @@ EAN13_WIDTH_MM = 50.0
 EAN13_HEIGHT_MM = 30.0
 EAN13_DPI = 203  # Deli DL-888T thermal printer is 203 dpi.
 
-# Layout taken from "2800 69码 50x30mm用.ddl" (the supplier-shipped DLabel
-# template). Three drawobjs, top to bottom: bold header, regular subtitle,
+# Layout: three drawobjs, top to bottom — bold header, regular subtitle,
 # EAN-13 barcode + human-readable interpretation line.
 EAN13_HEADER_TOP_LEFT_MM = (4.44, 4.56)
 EAN13_HEADER_SIZE_MM = (42.76, 3.60)
@@ -112,17 +111,13 @@ EAN13_MODEL_DISPLAY = {
     "4800Plus": "4800 Plus",
 }
 
-# P/N lookup for the US-region refurbished SKU lineup (the only stock currently
-# in factory test). A class = refurb level L0, B class = L1.
-# 2800 is hardcoded — not in the 内部 NAS SKU 汇总 spreadsheet.
-# 4800 / 4800Plus values match rows 67/68/97/98 of the 海外 sheet.
+# P/N lookup by (model_key, grade). The factory's real SKU table is proprietary
+# and is NOT shipped in the public repo. Populate it from your own data — either
+# fill this dict, or set nameplate_printer.pn_table in a local config.yml (which
+# is gitignored). Empty = lookup_pn returns None and callers fall back to the
+# config placeholder_pn / an explicit --pn.
 NAMEPLATE_PN_TABLE: dict[tuple[str, str], str] = {
-    ("2800", "A"): "00000",
-    ("2800", "B"): "00001",
-    ("4800", "A"): "00002",
-    ("4800", "B"): "00003",
-    ("4800Plus", "A"): "00004",
-    ("4800Plus", "B"): "00005",
+    # ("2800", "A"): "00000",
 }
 
 
@@ -137,17 +132,12 @@ def lookup_pn(model_key: str | None, grade: str | None) -> str | None:
     return NAMEPLATE_PN_TABLE.get((str(model_key), str(grade).strip().upper()))
 
 
-# 13-digit EAN-13 (a.k.a. "69 码", as Chinese factory parlance reflects the
-# 690-699 country code prefix) for the same SKU lineup. 4800 / 4800Plus
-# sourced from the 海外 sheet column G; 2800 supplied directly by the
-# factory (not in the spreadsheet).
+# 13-digit EAN-13 ("69 码") by (model_key, grade). Real barcodes are proprietary
+# product data and are NOT shipped publicly — populate from your own data (this
+# dict, or ean13_printer.ean13_table in a local config.yml). Empty = lookup
+# returns None.
 NAMEPLATE_EAN13_TABLE: dict[tuple[str, str], str] = {
-    ("2800", "A"): "6900000000000",
-    ("2800", "B"): "6900000000001",
-    ("4800", "A"): "6900000000002",
-    ("4800", "B"): "6900000000003",
-    ("4800Plus", "A"): "6900000000004",
-    ("4800Plus", "B"): "6900000000005",
+    # ("2800", "A"): "6900000000000",
 }
 
 
@@ -995,7 +985,7 @@ def build_ean13_zpl(
 ) -> bytes:
     """Generate ZPL for the 模版五 EAN-13 (69 码) carton/middle-box label.
 
-    50×30mm. Layout follows the supplier-shipped ``2800 69码 50x30mm用.ddl``
+    50×30mm. Layout follows the internal EAN-13 carton-label spec
     DLabel template: bold header line on top, regular subtitle below it, and
     a Code EAN-13 barcode with HRI line at the bottom.
     """

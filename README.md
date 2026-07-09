@@ -1,460 +1,260 @@
-# UGREEN NAS 出厂测试工具
+# ugreen-nas-factory-test
 
-Windows 桌面工具，自动化完成 UGREEN NAS 的出厂全流程测试：系统初始化、固件更新、建池建共享、SMB 传输测速、截图采集、标签打印和恢复出厂设置。测试结果通过桥接接口交给独立的 `ugreen-nas-autoupdate` 项目自动录入 内部系统 表单。
+Automated end-to-end factory testing for UGREEN NAS — a Windows desktop tool that drives the UGOS web UI through the full production checklist.
 
-环境要求：Windows 10/11、Python 3.10+、系统自带 Microsoft Edge（无需额外下载 Chromium）。
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](./LICENSE)
 
-已支持机型：DXP2800（SN 前缀 `HB`）、DXP4800（前缀 `EC671`）、DXP4800Plus（前缀 `EC752`，含 M.2）。机型由 SN 前缀自动识别（见 `src/utils/sn.py` 的 `SN_MODEL_PREFIXES`）。
+[English](#ugreen-nas-factory-test) · [中文](#中文)
 
-版本号不在本文档硬编码；以 git tag（形如 `v0.1.23`）和 GitHub Release 为准。CI 在打 tag 时把 tag 名 stamp 进 `src/version.py`。
+An operator scans a serial number and the tool takes over: it finds the NAS on the LAN and runs it through first-time setup, firmware update, storage-pool and share creation, an SMB read/write speed test, and a page-by-page screenshot pass (with temperature and fan-speed checks). On success it submits the results to a separate module for 内部系统 (the factory's internal business system) form entry, then cleans up and factory-resets the unit. Label printing (SN sticker, nameplate, EAN-13) is a separate, opt-in step — run by hand or turned on to auto-print on pass. It drives real hardware through a real browser, so most of the code is about surviving a UI that shifts between firmware versions and a Windows host that fails in quiet ways.
 
-## 功能
+Model is inferred from the SN prefix: DXP2800 (`HB`), DXP4800 (`EC671`), DXP4800Plus (`EC752`).
 
-- 局域网自动发现 NAS（UGREEN 广播 → mDNS → 端口扫描三级），扫到即测
-- 浏览器自动驾驶 UGOS 管理页面（Playwright + Edge），完成向导 → 登录 → 固件更新 → 建池建共享
-- SMB 传输测速（上传 + 下载），抓取 Windows 任务管理器实时速率截图，低于阈值自动判定失败
-- 逐页截图采集（系统更新、网口、存储池、HDD/SSD 读写速率、资源监控、风扇三模式），绑定 CPU 温度 / 风扇转速等指标
-- 风扇三模式页 CPU 温度超限（默认 > 70 ℃）即判失败；超标时会在预算时间内反复重读+重抓等读数回到合格区间再定格（风扇安静模式转速可为 0，不判失败；resource_monitor 页是满载尾巴瞬时读数，不参与判定）
-- 标签打印：SN 条码标签（模版二）、铭牌标贴（模版一）、69 码 EAN-13（模版五）、周转箱标贴（模版六）
-- 测试通过后自动录表到 内部系统（通过同级 `ugreen-nas-autoupdate` 项目桥接）
-- 故障自动上报：非硬件类失败自动打包日志上传 Release 资产并按指纹去重创建/更新 GitHub Issue（见 `config.yml` 的 `fault_report`，token 留空即停用）
-- GUI 支持多台 NAS 排队并发测试，扫码枪扫一个排一个
-- App 自更新（从 GitHub Release 拉取新版本，SHA-256 校验后原地替换）
+> Every account, password, printer name, repo, token, IP, and serial number in this repo and its config examples is a placeholder — swap in your own.
 
-## 标签打印功能
+## Features
 
-本工具支持 4 种标签模版，覆盖从单机到整箱的全部标贴需求：
+- LAN auto-discovery of unprovisioned UGREEN NAS (UDP broadcast → mDNS → port scan), then test-on-detect.
+- Drives the UGOS Pro web UI end to end with Playwright + system Edge: setup wizard → login → firmware update → pools and shares.
+- SMB transfer speed test (upload + download) with Task-Manager throughput screenshots bound to the exact reading; below-threshold auto-fails.
+- Page-by-page screenshot capture (system update, network, storage, HDD/SSD read/write, resource monitor, three fan modes) with CPU-temperature and fan-RPM validation.
+- Label printing — SN barcode, nameplate, EAN-13 carton, and turnover-box labels (ZPL/TSPL, rendered as bitmaps for exact sizing and font control).
+- Fault auto-report: an unclassified failure packages its logs and screenshots and opens a de-duplicated GitHub Issue (opt-in; token from an env var).
+- Multi-device queue — scan one and it enqueues and tests while others run.
+- Self-update from a public GitHub repo you control (no token needed).
 
-| 模版 | 尺寸 | 内容 | 打印机 | 每次份数 |
-|------|------|------|--------|----------|
-| 模版二（SN 标签） | 42×25mm | Code 128 条码 + SN 文字 | Zebra ZD888 (203dpi) | 2（彩盒+中箱） |
-| 模版一（铭牌标贴） | 83.7×36.7mm | QR 码 + Code 128 + P/N + SN | Zebra ZT610 (600dpi) | 1 |
-| 模版五（69 码） | 50×30mm | EAN-13 条码 + Model + P/N 标题 | Deli DL-888T (203dpi) | 2（彩盒+中箱） |
-| 模版六（周转箱） | 102×152mm | PID + QR + 4×SN 条码 + PO + 日期 | Zebra ZD888 (203dpi) | 2 |
+## Architecture
 
-### 触发方式
-
-- **手动打印：** GUI 选中设备 → 点击「打印标签」→ 勾选需要的模版 → 确认
-- **自动打印：** 勾选「自动打印标签」复选框后，测试通过即自动打印已勾选的模版
-- **CLI 打印：** `run-cli print-label --sn xxx`、`print-nameplate`、`print-ean13`、`print-carton`
-
-### P/N 和 EAN-13 自动查表
-
-SN 前缀自动识别机型（2800 / 4800 / 4800Plus），结合 A/B 等级从查表得到 P/N 和 EAN-13。
-
-> 真实的 P/N / EAN-13 对照表属于产品专有数据，**不随公开库发布**。`src/utils/label.py` 里的
-> `NAMEPLATE_PN_TABLE` / `NAMEPLATE_EAN13_TABLE` 默认是空表——按你自己的机型/等级填入即可；
-> 表为空时 `lookup_pn` 返回 `None`，铭牌打印回退到 `config` 的 `placeholder_pn` 或命令行 `--pn`。
-
-### 周转箱标贴特殊逻辑
-
-- 必须选中恰好 4 个**同机型**的 SN 才能打印（否则按钮灰色不可选）
-- QR 码内容格式：`SN*{PID}*{QTY}*{PO}*{DATE}*{流水号}`
-- 流水号按天计数、跨天清零，存储在 `output_dir` 下的 `carton_seq.json`
-- 打印失败不会消耗序号（`peek_carton_seq` 只读，`commit_carton_print` 才提交）
-- 审计日志写入 `carton_log.jsonl`
-
-### 添加 / 更换打印机
-
-**第一步：查看当前 Windows 打印队列**
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\run-cli.ps1 print-label --list-printers
-```
-
-输出示例：
+The tool is a self-contained Windows app. On its own it runs the full test and, optionally, reports faults to a GitHub repo you own and self-updates from that repo's releases. One thing is external and optional: a separate `ugreen-nas-autoupdate` module that submits results to a 内部系统 backend. When that module sits next to the app, the app detects it and shows the form-entry UI; when it doesn't, that UI is hidden and the app is test-only.
 
 ```
-ZDesigner ZD888-203dpi ZPL (副本 1)    driver=ZDesigner ZD888-203dpi ZPL    port=USB004
-ZDesigner ZD888-203dpi ZPL             driver=ZDesigner ZD888-203dpi ZPL    port=USB002
-ZDesigner ZT610-600dpi ZPL             driver=ZDesigner ZT610-600dpi ZPL    port=USB001
-DeliDL-888T                            driver=Deli DL-888T                  port=USB003
+                 scan SN
+   [ operator ] --------> +------------------------------+   drives UGOS web UI    +------------------+
+                          |  ugreen-nas-factory-test     | ----------------------> |  UGREEN NAS      |
+                          |  (this repo, Windows app)    | <---------------------- |  (UGOS) on LAN   |
+                          +--+--------+--------+---------+   Playwright + Edge     +------------------+
+                             |        |        |
+                       ZPL   |        |        | release .exe (self-update) + fault issues
+                             v        |        v
+                   [ Zebra / Deli ]   |     +---------------------+
+                      printers        |     | GitHub repo (yours) |
+                                      |     +---------------------+
+            optional, form entry —    |
+            shown only if present ----+--> +----------------------+   submit    +----------------+
+                                          | ugreen-nas-autoupdate | ----------> | 内部系统 backend    |
+                                          |  module (separate)    |             | (you provide)  |
+                                          +----------------------+             +----------------+
 ```
 
-**第二步：在 `config/config.yml` 中写入精确名字**
+## Quick start
 
-```yaml
-# SN 标签（模版二）—— 找到 USB004 上的 ZD888 副本
-label_printer:
-  name: "ZDesigner ZD888-203dpi ZPL (副本 1)"  # 必须和 --list-printers 输出完全一致
-  dpi: 203
-  quantity: 2
-  auto_print_on_pass: false
+Windows 10/11 with Python 3.10+ and Microsoft Edge (bundled since Win10). In order:
 
-# 铭牌（模版一）—— ZT610 工业机
-nameplate_printer:
-  name: "ZDesigner ZT610-600dpi ZPL"
-  dpi: 600
-  quantity: 1
-  auto_print_on_pass: false
-  qr_top_left_mm: [65.0, 5.0]       # QR 码左上角坐标（mm）
-  strip_top_left_mm: [6.0, 25.0]    # 条码带左上角坐标（mm）
-  placeholder_pn: "000000"           # 查不到 P/N 时的占位
+1. Install dependencies (creates a `.venv`, installs Playwright):
 
-# 69 码（模版五）—— Deli 热敏机
-ean13_printer:
-  name: "DeliDL-888T"
-  dpi: 203
-  quantity: 2
-  auto_print_on_pass: false
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\install.ps1
+   ```
 
-# 周转箱（模版六）—— 第二台 ZD888（不带副本后缀）
-carton_printer:
-  name: "ZDesigner ZD888-203dpi ZPL"
-  dpi: 203
-  quantity: 2
-  auto_print_on_pass: false
-  po_default: "XXXXXXXXXXX"  # PO 占位，后续接真实订单时改
-  warehouse: "收料仓"         # 收料仓名称，按你自己的仓库填
-```
+2. Copy the config template and edit it — **this is where you set the admin account, printer names, and scan subnet**:
 
-**关键注意事项：**
+   ```powershell
+   copy config\config.example.yml config\config.yml
+   notepad config\config.yml
+   ```
 
-- `name` 字段**大小写不敏感但必须精确匹配**，不做子串匹配。写错一个字符就会找不到打印机
-- 同一型号打印机如果装了多个驱动实例（如 "副本 1"、"副本 2"），必须区分清楚哪个接了哪根 USB 线
-- `dpi` 必须和打印机实际分辨率一致，否则标签会整体缩放变形
-- `auto_print_on_pass: true` 会在测试通过后立刻打印，适合流水线无人看管场景
+   Without a `config.yml` the app falls back to the example, whose admin credentials are the `CHANGE_ME` placeholder — the setup wizard would write *that* to the NAS, so edit it first.
 
-**第三步：试打验证**
+3. Run the GUI (recommended), or the CLI:
 
-```powershell
-# 干跑（不发打印机），生成 PNG 预览
-powershell -ExecutionPolicy Bypass -File .\run-cli.ps1 print-label --sn TEST1234 --preview ./test.png --no-print
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\run-gui.ps1
+   powershell -ExecutionPolicy Bypass -File .\run-cli.ps1 test --sn <SN> --nas-ip auto
+   ```
 
-# 实际打印一份
-powershell -ExecutionPolicy Bypass -File .\run-cli.ps1 print-label --sn TEST1234 --quantity 1
+CLI subcommands: `test`, `cleanup`, and the label commands `print-label` (SN barcode), `print-nameplate`, `print-ean13` (carton / middle-box EAN-13), `print-carton` (turnover-box). `print-label --list-printers` lists Windows print-queue names.
 
-# 导出 ZPL 原始指令（排查打印机不吃指令的问题）
-powershell -ExecutionPolicy Bypass -File .\run-cli.ps1 print-label --sn TEST1234 --zpl-out ./test.zpl --no-print
-```
+**Not building from source?** Grab a pre-built release: download the zip from [Releases](https://github.com/lyp04/ugreen-nas-factory-test/releases), unzip, do the same `config.example.yml` → `config.yml` copy-and-edit (step 2), and double-click the exe. It's unsigned, so Windows SmartScreen warns on first launch — click **More info** → **Run anyway**.
 
-### 跨平台开发说明
+## Distribution: two packages
 
-标签渲染（生成 ZPL/TSPL 指令 + PNG 预览）在 macOS/Linux 上也能跑，只是无法发送到 Windows 打印队列。开发调试时用 `--preview` + `--no-print` 即可在任何平台上预览效果。
-
----
-
-## 快速使用
-
-安装依赖：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1
-```
-
-复制配置模板，再按自己的机器/产线改（管理员账号密码、打印机名、扫描网段等）：
-
-```powershell
-copy config\config.example.yml config\config.yml
-notepad config\config.yml
-```
-
-> 不复制也能启动：找不到 `config.yml` 时代码会回退到 `config.example.yml`，但里面 `admin.username / password` 是 `CHANGE_ME` 占位——初始化向导会把 NAS 管理员密码设成这个占位值。请务必先改成真实凭据。
-
-启动 GUI（推荐）：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\run-gui.ps1
-```
-
-运行 CLI：
-
-```powershell
-# 完整测试流程
-powershell -ExecutionPolicy Bypass -File .\run-cli.ps1 test --sn SN123 --nas-ip auto
-
-# 仅清理存储池
-powershell -ExecutionPolicy Bypass -File .\run-cli.ps1 cleanup --sn SN123 --nas-ip auto
-
-# 打印 SN 标签（模版二）
-powershell -ExecutionPolicy Bypass -File .\run-cli.ps1 print-label --sn SN123
-
-# 打印铭牌标贴（模版一）
-powershell -ExecutionPolicy Bypass -File .\run-cli.ps1 print-nameplate --sn SN123
-
-# 打印 69 码 EAN-13（模版五）
-powershell -ExecutionPolicy Bypass -File .\run-cli.ps1 print-ean13 --sn SN123
-
-# 打印周转箱标贴（模版六）
-powershell -ExecutionPolicy Bypass -File .\run-cli.ps1 print-carton --sn SN1 SN2 SN3 SN4
-```
-
-打包可执行文件：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\build-exe.ps1
-```
-
-发布 / 分发用 `build-packages.ps1`，一次打两个包：
+`build-packages.ps1` builds two variants that **share one exe** — the only difference is whether the `ugreen-nas-autoupdate` module rides along:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build-packages.ps1
 ```
 
-两个包的**软件本体（exe）完全一样**，区别只在带不带 `ugreen-nas-autoupdate` 模块：
+- `dist-public/` — exe + `config.example.yml`, **no module** → form-entry/upload UI stays hidden. For external / public use.
+- `dist-full/` — the same exe + real `config.yml` + the module + a launcher → full features (内部系统 form entry). Internal only.
 
-- `dist-public\`：exe + `config.example.yml` + `update-config.json`，**不带**上传器模块 → 探测不到上传器，登录 / 上传 / 录表 UI 自动隐藏。给外部 / 公开发布用。
-- `dist-full\`：**同一个 exe** + 真实 `config.yml` + `update-config.json` + `ugreen-nas-autoupdate` 模块 + 启动器（`启动-完整版.bat`，把 `UGREEN_AUTOUPDATE_ROOT` 指向随包模块）→ 探测到模块，显示完整功能（含自动录表）。仅供内部产线用。
+Both carry an `update-config.json`, so they self-update the exe from your GitHub releases; the module and the proprietary label data don't change on update. The self-update target repo is baked in at build time — `build-packages.ps1 -UpdateOwner <you> -UpdateRepo <your-repo>` (defaults to the placeholder above), separate from `fault_report.owner`/`repo` in `config.yml`. (`build-exe.ps1` builds just the bare exe.)
 
-两个包都带 `update-config.json`（指向公开库、token 留空），会**自动更新软件本体（exe）**；`ugreen-nas-autoupdate` 模块是独立的，不随自更新变动。
+## Configuration
 
-## 配置
+Everything lives in `config/config.yml` (copied from `config.example.yml`). The real file is gitignored — credentials, tokens, and printer names stay local; the repo ships only the example. Points you'll customize:
 
-所有配置在 `config/config.yml`，关键项：
+| Setting | What to change |
+|---|---|
+| `admin.username` / `password` | UGOS admin account the setup wizard writes to the NAS |
+| `network.subnet` | `auto` (detect the local subnet) or a fixed CIDR like `192.168.0.0/24` |
+| `*_printer.name` | exact Windows print-queue name (blank = auto-detect by driver); `label` / `nameplate` / `ean13` / `carton` |
+| `output_dir` | where screenshots, logs, and reports go (`${USERPROFILE}` expands per user) |
+| `fault_report` | GitHub-issue auto-report; token comes from the `FAULT_REPORT_TOKEN` env var (unset = off); set `owner`/`repo` to your own fork |
+| `label_data_file` | path to a gitignored file holding your real P/N + EAN-13 tables — proprietary data, ships only in the internal package |
+| `paths.autoupdate_root` | where the optional `ugreen-nas-autoupdate` module lives (also settable via `UGREEN_AUTOUPDATE_ROOT`) |
+| `transfer.source_files` | per-model local file for the SMB write test (5 / 10 / 20 GiB); gitignored, not shipped — provide your own or the tool auto-generates one on first run (slow, and needs ~2× that size in free disk) |
 
-| 配置项 | 说明 |
-|--------|------|
-| `admin.username / password` | UGOS 登录账号 |
-| `network.subnet` | NAS 发现的扫描网段 |
-| `pages` | 需要截图采集的页面列表（system_update / network_interface / storage_pool / hdd_write / hdd_read / ssd_write / ssd_read / resource_monitor / fan_normal / fan_silent / fan_full_speed） |
-| `provision.pools` | 自动建池方案（RAID 级别、磁盘选择） |
-| `transfer.source_files` | 各机型测速源文件路径（按 SN 前缀区分机型：2800=5G / 4800=10G / 4800Plus=20G） |
-| `transfer.speed_thresholds_mb_s` | 传输速率通过阈值（MB/s）。默认 200，按机型覆盖：2800=100、4800=100、4800Plus=200 |
-| `validation.cpu_temp_max_c` | 风扇三模式页 CPU 温度上限（℃），超过即判失败（默认 70；resource_monitor 页不参与判定） |
-| `validation.cpu_temp_recheck_seconds` | 温度/转速超标时的重读+重抓预算（秒，默认 30；0 = 抓一次定生死） |
-| `label_printer` | SN 条码标签打印机（模版二） |
-| `nameplate_printer` | 铭牌标贴打印机（模版一） |
-| `ean13_printer` | 69 码 EAN-13 打印机（模版五） |
-| `carton_printer` | 周转箱标贴打印机（模版六） |
-| `fault_report` | 故障自动上报（GitHub Issue + 日志打包）。token 从环境变量 `FAULT_REPORT_TOKEN` 读取（不写进配置文件 / 不进 git），未设置即自动停用；fork 自用请把 `owner`/`repo` 改成你自己的仓库 |
-| `output_dir` | 截图、日志、报告输出目录 |
-| `paths.autoupdate_root` | 自动录表系统目录（可被 `UGREEN_AUTOUPDATE_ROOT` 覆盖；缺省找同级 `ugreen-nas-autoupdate`） |
+Page selectors are in `config/selectors.yml`; update them when the UGOS front end changes.
 
-页面选择器在 `config/selectors.yml`，跟随 UGOS 前端变化更新。
-
-## 项目结构
+## Repository layout
 
 ```
 src/
-├── gui.py                     GUI 主窗口（Tkinter），多任务排队
-├── gui_no_form.py             GUI 变体：不触发自动录表
-├── cli.py                     CLI 入口（Click），test / cleanup / print-*
-├── form_entry.py              内部系统 自动录表桥接（文件 payload + 子进程 runner）
-├── measurements.py            温度/转速判定规则（与界面标红共用）
-├── updater.py                 App 自更新（GitHub Release）
-├── version.py                 版本号（CI 在打 tag 时覆写）
-├── report/
-│   ├── collector.py           失败日志/截图采集打包
-│   ├── fingerprint.py         故障指纹（同类问题去重）
-│   ├── github_issues.py       GitHub Issue 创建/更新
-│   ├── redact.py              敏感信息脱敏
-│   └── reporter.py            故障上报编排
-├── flows/
-│   ├── login.py               UGOS 登录
-│   ├── setup_wizard.py        初始化向导
-│   ├── provision.py           建池建共享
-│   ├── capture.py             截图采集 + 传输测速（最复杂的模块）
-│   ├── cleanup.py             存储池清理
-│   ├── system_update.py       固件更新（30 分钟状态机）
-│   └── reset_factory.py       恢复出厂设置
-├── discovery/
-│   ├── discover.py            NAS 发现调度（广播 → mDNS → 端口扫描三级）
-│   ├── mdns_scanner.py        mDNS 扫描
-│   ├── port_scanner.py        端口扫描
-│   └── ugreen_broadcast.py    UGREEN 广播协议
-└── utils/
-    ├── browser_control.py     Playwright 浏览器管理（隐藏窗口、PID 追踪）
-    ├── screenshot.py          截图工具（SN 变更时目录迁移）
-    ├── smb_transfer.py        SMB 传输测速（分块拷贝 + 进度文件）
-    ├── label.py               ZPL/TSPL 标签渲染（位图条码 + 字体回退 + P/N·EAN-13 查表）
-    ├── sn.py                  SN 解析（机型前缀、等级、尾号匹配）
-    ├── app_guides.py          UGOS App 弹窗/引导关闭策略
-    ├── desktop.py             桌面/窗口辅助
-    ├── config_loader.py       配置加载
-    ├── logger.py              日志
-    └── retry.py               重试装饰器（指数退避）
-config/
-├── config.yml                 主配置
-├── selectors.yml              UGOS 页面 CSS 选择器
-└── update-config.example.json 自更新配置模板
-tests/                         单元测试 + smoke 测试
-scripts/                       调试辅助脚本（DOM 分析、页面探测）
+├── gui.py            GUI main window (Tkinter), multi-device queue
+├── cli.py            CLI entry (Click): test / cleanup / print-*
+├── updater.py        self-update from GitHub Releases
+├── form_entry.py     bridge to the ugreen-nas-autoupdate module (内部系统 form entry)
+├── flows/            login · setup wizard · provision · capture · cleanup · system update · factory reset
+├── discovery/        NAS discovery (broadcast → mDNS → port scan)
+├── report/           fault-report packaging, fingerprinting, GitHub Issues, redaction
+└── utils/            browser control, SMB speed test, ZPL/TSPL label rendering, SN parsing, config
+config/               config.yml (yours) + config.example.yml + selectors.yml
+docs/                 implementation notes
+tests/                unit + smoke tests
 ```
+
+Implementation notes and the hard-won gotchas — self-update on Windows, keeping speed readings and screenshots in sync, UGOS selector hell, the 30-minute firmware state machine — are in [docs/implementation-notes.md](./docs/implementation-notes.md).
+
+## Requirements
+
+- Windows 10/11, Python 3.10+, system Microsoft Edge (no Chromium download).
+- For label printing: a Zebra/Deli printer and its Windows queue name.
+- Optional: fault reporting needs a GitHub token in `FAULT_REPORT_TOKEN`; 内部系统 form entry needs the separate `ugreen-nas-autoupdate` module alongside the app.
+
+The full test suite is pywin32-backed (printing, window control), so it only runs completely on Windows; parts skip or fail collection on macOS/Linux.
+
+## Contributing
+
+Issues and pull requests are welcome. Please keep changes focused and describe the motivation in the PR.
+
+## License
+
+[Apache-2.0](./LICENSE). © 2026 UGREEN.
 
 ---
 
-## 踩坑记录与实现细节
+## 中文
 
-以下是在工厂实机调试中积累的坑点，改一行可能全盘崩盘，务必通读。
+**ugreen-nas-factory-test** 是一个 Windows 桌面工具，自动化完成 UGREEN NAS 的整机出厂测试——驱动 UGOS 网页管理界面，跑完整条产线检查流程。
 
-### 1. 自动更新：Windows 上最难搞的部分
+操作员扫一个序列号，工具就接管后续：在局域网里找到这台 NAS，依次跑初始化向导、固件更新、建存储池和共享、SMB 读写测速、逐页截图采集（含温度和风扇转速判定）。通过后把结果交给一个独立模块去录 内部系统（工厂内部业务系统）表单，再清理、恢复出厂。标签打印（SN 标贴、铭牌、EAN-13）是可选的单独一步——手动打，或开启「通过即自动打印」。它驱动的是真机、走的是真浏览器，所以大部分代码都在应付两件事：跨固件版本会变的 UGOS 界面，和一个各种静默失败的 Windows 环境。
 
-自动更新经历了至少 5 轮迭代，每轮修一个静默失败：
+机型由 SN 前缀自动识别：DXP2800（`HB`）、DXP4800（`EC671`）、DXP4800Plus（`EC752`）。
 
-**`DETACHED_PROCESS` 会让 PowerShell 的文件 I/O 彻底失效。** 最初用 `DETACHED_PROCESS` 标志启动 swap 脚本（为了不弹控制台窗口），结果脚本根本没执行——PowerShell 在 `DETACHED_PROCESS` 下的 `Add-Content`、文件读写全部静默失败。改用 `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP` 组合：前者隐藏窗口，后者让子进程在父进程退出后继续运行。
+> 仓库和示例配置里出现的账号、密码、打印机名、仓库名、token、IP、序列号都是占位示例，换成你自己的。
 
-**`Move-Item -Force` 会假装成功。** PowerShell 的 `Move-Item -Force` 在作为 detached 子进程运行时，被观察到 cmdlet 层面报告成功，但底层 NTFS 重命名实际没动——新旧 exe 都原封不动。改用 .NET API `[System.IO.File]::Delete()` + `[System.IO.File]::Move()`，失败会直接抛异常。swap 前后都记录 SHA-256 前缀用于事后核对。
+### 功能
 
-**Windows Defender 首次执行扫描和自动重启之间的竞态。** PyInstaller `--onefile` 打包的 exe 启动时会解压 `python312.dll` 到 `_MEI*` 临时目录。Defender 对一个刚写入的 50MB 可执行文件做首次扫描，扫描期间 DLL 被锁住，PyInstaller 的引导程序加载不到 DLL 就报 `ERROR_MOD_NOT_FOUND`（"找不到指定的模块"）。第一版修复加了 3 秒 `Start-Sleep`，但 Defender 扫描时间没有安全上界。最终方案：swap 完成后**不自动重启**，弹窗提示用户手动双击 exe——此时 Defender 已经扫描完毕，再启动不会出错。
+- 局域网自动发现未初始化的 UGREEN NAS（UDP 广播 → mDNS → 端口扫描），扫到即测。
+- 用 Playwright + 系统 Edge 端到端驱动 UGOS Pro 网页：初始化向导 → 登录 → 固件更新 → 建池建共享。
+- SMB 传输测速（上传 + 下载），任务管理器实时速率截图与读数严格绑定，低于阈值自动判失败。
+- 逐页截图采集（系统更新、网口、存储池、HDD/SSD 读写、资源监控、风扇三模式），带 CPU 温度和风扇转速判定。
+- 标签打印——SN 条码、铭牌、EAN-13 彩盒、周转箱标贴（ZPL/TSPL，用位图渲染保证精确尺寸和字体）。
+- 故障自动上报：未归类的失败会打包日志和截图，按指纹去重地开一个 GitHub Issue（可选，token 走环境变量）。
+- 多机排队——扫一个入队一个，边测边扫。
+- 从你掌控的公开 GitHub 仓库自更新（不需要 token）。
 
-**`versionCode` 可能重复。** CI 用 `git rev-list --count HEAD` 算 `versionCode`，对同一个 commit 重新打 tag（比如只改了配置）会产生两个 `versionCode` 相同的 release，updater 会跳过新版本。修复：用 `versionName` 的语义化版本号做 tiebreaker。
+### 架构
 
-> 教训：桌面自更新在 Windows 上是一个雷区。进程创建标志、文件移动、杀毒软件、版本号，每一层都有静默失败模式。一定要记日志、验哈希、宁可失败也不要假装成功。
+工具本身是自包含的 Windows App，单独就能跑完整测试，并可选地把故障上报到你自己的 GitHub 仓库、从该仓库的 release 自更新。唯一外部且可选的部分是一个独立的 `ugreen-nas-autoupdate` 模块，负责把结果录到 内部系统 后端：模块放在 App 旁边时，App 探测到就显示录表界面；没有模块时，界面隐藏，App 就是纯测试模式。完整数据流见上面英文小节的 ASCII 图。
 
-### 2. 传输测速：截图和数值必须是同一瞬间
+### 快速开始
 
-**先读值再截图 = 必然对不上。** 磁盘传输速率是突发性的：代码在 A 时刻读到 344.8 MB/s，下一个刷新周期截图时任务管理器已经显示 26.4 MB/s。QA 拿到的截图上写着 26.4，但报告里记着 344.8——无法自圆其说。
+Windows 10/11，Python 3.10+，系统自带 Microsoft Edge。按顺序来：
 
-修复：**先截图，再从截图对应的 DOM 状态重新读值**。只接受截图后立即读到的数值，确保报告数字和截图画面严格一致。
+1. 安装依赖（建 `.venv`、装 Playwright）：
 
-**风扇转速同理。** 关闭 UI 浮层、截图的过程会引起 CPU 峰值从而拉高风扇转速。如果在关浮层之前读 RPM，截图上显示的是峰值后的高转速，而报告里记的是峰值前的低转速（实测：508 vs 1044 RPM）。修复：先关浮层、等稳定，再读 RPM + 截图。
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\install.ps1
+   ```
 
-**测速文件不能用全零数据。** 生成测试文件时用 `os.urandom` 填充，每个 chunk 开头还打了递增的 8 字节计数器。全零或可压缩数据会被 SMB 压缩优化，导致测出虚高速率。`st_size` 检查也会被稀疏文件骗过，所以额外在 5 个偏移量位置抽样验证非零。
+2. 复制配置模板再改——**管理员账号密码、打印机名、扫描网段都在这里改**：
 
-**SMB 拷贝用 `WriteThrough` 禁止写缓存。** 输出流的 `FileOptions` 带 `WriteThrough`，否则 OS 写缓存会虚高写入速率。
+   ```powershell
+   copy config\config.example.yml config\config.yml
+   notepad config\config.yml
+   ```
 
-### 3. UGOS 页面自动化：选择器地狱
+   不复制也能起：找不到 `config.yml` 时会回退到示例，但示例里管理员账号是 `CHANGE_ME` 占位——初始化向导会把它写成 NAS 管理员密码，所以先改。
 
-UGOS 的前端跨固件版本变化很大，同一个功能在不同版本用不同的 HTML 结构、CSS 框架（ivu/arco）和 iframe 命名方式。代码里充满了多级 fallback：
+3. 启动 GUI（推荐），或用 CLI：
 
-**iframe 选择器要试三种模式。** 存储管理器和文件管理器的 iframe 在不同固件版本用不同命名：`iframe[name^="storagemgr"]`、`iframe[name*="storagemgr"]`、`iframe[src*="/storagemgr/"]`，代码按顺序尝试，命中任何一个即可。
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\run-gui.ps1
+   powershell -ExecutionPolicy Bypass -File .\run-cli.ps1 test --sn <SN> --nas-ip auto
+   ```
 
-**"立即更新" 按钮有 6 种写法。** 不同 UGOS 版本的更新通知用不同的标签（链接 / 按钮 / 纯文本）和措辞（"立即更新"、"已经下载并准备好"），代码逐一尝试 6 种定位策略。
+   CLI 子命令：`test`、`cleanup`，以及标签命令 `print-label`（SN 条码）、`print-nameplate`（铭牌）、`print-ean13`（彩盒/中箱 EAN-13）、`print-carton`（周转箱）。`print-label --list-printers` 列出 Windows 打印队列名。
 
-**文件管理器有三层弹窗要关。** 首次打开文件管理器可能依次弹出：欢迎引导、"个人文件夹"提示、操作教程。不同固件版本弹出顺序不同，代码做了两轮关闭（第二轮用更短的等待时间），并在教程关不掉时直接通过 JS 删除 `div.mask`、`div.stepElem` 等 DOM 节点。
+**不想从源码构建**的话，直接用打好的发布包：从 [Releases](https://github.com/lyp04/ugreen-nas-factory-test/releases) 下 zip、解压，同样做一遍 `config.example.yml` → `config.yml` 复制改配置（第 2 步），双击 exe 即可。exe 未签名，首次运行 SmartScreen 会拦——点**更多信息** → **仍要运行**。
 
-**共享文件夹名称输入框换过 5 次选择器。** `_fill_share_name` 先试配置的选择器、再试 fallback CSS，最后用 JS 在 `.folder-share-create` 容器里找任何 placeholder 含 "文件夹" 的 input，通过 `focus/value/dispatchEvent(input+change)/blur` 填值。
+### 分发：两个包
 
-**任务管理器打开有三级 fallback。** (1) 点击顶栏 CPU/RAM 状态组件；(2) 在顶栏右侧按多个像素偏移量盲点；(3) 直接往 DOM 注入一个 `section.cloud-window-main` iframe 容器强行打开。
+`build-packages.ps1` 一次打两个包，**软件本体（exe）完全一样**，区别只在带不带 `ugreen-nas-autoupdate` 模块：
 
-**初始化向导页面有两种布局。** 设备名和管理员账号在有的固件版本分两页，在有的版本合在一页。代码检测当前布局后走不同分支。
+- `dist-public\`：exe + `config.example.yml`，**不带模块** → 探测不到上传器，录表/上传界面自动隐藏。给外部 / 公开用。
+- `dist-full\`：**同一个 exe** + 真实 `config.yml` + 模块 + 启动器 → 完整功能（含 内部系统 录表）。仅供内部产线。
 
-**更新确认弹窗要勾 checkbox。** 某些固件版本要求在确认更新前勾选"我已阅读"复选框。代码先试 `input[type="checkbox"]`，再按中文关键词（我已、同意、知晓）搜索关联的 label。
+两个包都带 `update-config.json`，会自动更新软件本体（exe）；模块和专有打印数据不随更新变动。自更新指向哪个仓库是构建时定死的——`build-packages.ps1 -UpdateOwner <你> -UpdateRepo <你的仓库>`（默认是上面那个占位仓库），和 `config.yml` 里的 `fault_report.owner`/`repo` 是两套。（`build-exe.ps1` 只打裸 exe。）
 
-### 4. 固件更新：30 分钟状态机
+### 配置
 
-`system_update.py` 的核心是一个 1800 秒（30 分钟）超时的状态机，处理以下状态转换：
+所有配置在 `config/config.yml`（从 `config.example.yml` 复制）。真实文件不进 git——凭据、token、打印机名只留本地，仓库只带示例。要改的点：
 
-- 登录页出现 → 重新登录
-- 下载进度 → 轮询等待
-- 安装画面 → HTTP 探测 NAS 是否重启完毕（连续 2 次 200 响应才算）
-- 桌面出现 → **持续可见 20 秒**才算稳定（防止重启中途短暂闪过桌面的假阳性）
-- 更新通知再次弹出 → 点击确认
-- 3 分钟无进展 → 刷新页面（先 `page.reload()`，失败则 `page.goto()`）
+| 配置项 | 改什么 |
+|---|---|
+| `admin.username` / `password` | 初始化向导写进 NAS 的 UGOS 管理员账号 |
+| `network.subnet` | `auto`（自动探测本机网段）或写死某个 CIDR（如 `192.168.0.0/24`） |
+| `*_printer.name` | Windows 打印队列的精确名字（留空则按驱动自动识别）；`label` / `nameplate` / `ean13` / `carton` |
+| `output_dir` | 截图、日志、报告的输出目录（`${USERPROFILE}` 按用户展开） |
+| `fault_report` | 故障自动上报；token 从 `FAULT_REPORT_TOKEN` 环境变量读（不设=停用）；fork 自用把 `owner`/`repo` 改成你自己的 |
+| `label_data_file` | 指向一个不进 git 的文件，里面是你真实的 P/N + EAN-13 对照表——专有数据，只随内部完整包分发 |
+| `paths.autoupdate_root` | 可选 `ugreen-nas-autoupdate` 模块所在目录（也可用 `UGREEN_AUTOUPDATE_ROOT` 覆盖） |
+| `transfer.source_files` | SMB 写测速用的本机源文件，按机型 5 / 10 / 20 GiB；不进 git、不随包——自己放，或首次运行时工具自动生成（慢，需约 2 倍大小的空闲磁盘） |
 
-> 不要缩短 `UPDATE_WAIT_S`（30 分钟）。大版本固件更新 + 重启实测需要 15-20 分钟。
+页面选择器在 `config/selectors.yml`，跟随 UGOS 前端变化更新。
 
-### 5. GUI 队列持久化：四个独立的坑
+### 目录结构
 
-**队列顺序在升级后乱序。** 老版本没有 `queue_added_at` 时间戳，升级后所有恢复的任务都打上同一个 `NOW`，导致随机排序。修复：用 SN 文件夹的 `st_ctime`（文件系统创建时间）作为主排序键，与操作员在 Windows 资源管理器里看到的顺序一致。
-
-**恢复的队列条目缺日志、物料、重试按钮。** 队列恢复只重建了行项目，没加载 `run.log`，不探测设备是否还在线，也不显示重试按钮。
-
-**午夜翻转丢设备。** 清理函数按文件夹 ctime 判断"昨天的记录"要删掉，但午夜翻转逻辑明确保留了跨天的有效设备。App 重启后这些设备消失了。修复：信任当天快照中的所有记录，只对真正过期的文件做严格截断。
-
-**设置在入队时冻结。** 操作员在队列运行中途切换了 A/B 等级复选框，但测试用的是入队时捕获的旧设置。修复：在 `run_test` 实际开始前从 GUI 实时变量重新同步设置。
-
-### 6. 标签打印：位图渲染而非原生 ZPL 指令
-
-**原生 ZPL `^BC` 做不到精确尺寸。** 对 16 位 SN，Code 128 在 203 dpi 下模块宽度只有整数选项：module=1 出来 26.4mm，module=2 出来 52.8mm，规格要求 38mm。代码改用 python-barcode 高分辨率渲染后缩放到精确尺寸，嵌入 `^GFA` 位图指令。
-
-**位图行末填充位会打出黑边。** Pillow 1-bit 模式按字节对齐行，末尾填充位默认为 0。ZPL 极性是反的（0=白 1=黑），反转后填充位变成 1，右侧会出现一条黑色细线。代码手动清零这些填充位。TSPL 极性又和 ZPL 相反，填充位处理也相反。
-
-**EAN-13 用全位图渲染而非 TSPL 原生指令。** 原生 `BARCODE EAN13` 无法精确控制护栏线延伸长度、HRI 数字字体和位置。代码自绘整个条码符号以满足零售包装的外观规格。
-
-**字体 fallback 链跨三个平台。** 优先用规格指定的汉仪康黑45S，然后 Windows 字体（微软雅黑、黑体、Arial）→ macOS 字体（华文黑体、冬青黑体、苹方）→ Linux 字体（DejaVu）→ Pillow 内置。注意 PIL 打不开 `PingFang.ttc`，所以 CJK 字体用其他替代。
-
-**打印机名必须精确匹配。** 工厂机上有多台 Zebra 和 Deli 打印机，早期用模糊匹配曾静默选到错误的打印队列。现在配置了打印机名后只做大小写不敏感的精确匹配，不做子串匹配。想换打印机先跑 `run-cli print-label --list-printers` 看实际队列名。
-
-**周转箱标贴的序号按天计数、跨天清零。** `peek_carton_seq` 只读不提交，`commit_carton_print` 才递增计数并写 JSONL 审计日志。这样打印失败不会浪费序号。
-
-### 7. Windows 子进程：每个调用点都要处理
-
-PyInstaller `--windowed` 打包的 exe 没有控制台，但 `subprocess.run()` 默认会弹一个 cmd 窗口。项目里有三个独立的调用点（git 拉取、autoupdate 桥接、forms refresh）曾经各自漏掉了 `CREATE_NO_WINDOW` 标志，导致操作员面前不停闪烁黑色窗口。
-
-统一解法：`_hidden_process_kwargs()` 辅助函数，同时设置 `CREATE_NO_WINDOW` 创建标志和 `STARTUPINFO(dwFlags=STARTF_USESHOWWINDOW, wShowWindow=SW_HIDE)`。两者都要——某些 Windows 版本上只有一个不够。所有 `subprocess.run()` 调用点必须使用这个辅助函数。
-
-### 8. 浏览器管理：隐藏但可控
-
-**浏览器隐藏靠离屏定位。** Playwright 的 persistent context 不支持真正的 headless + 有状态，所以用 `--window-position=-32000,-32000` 把窗口移到屏幕外。改成 `(0, 0)` 浏览器就会显示出来干扰操作员。
-
-**PID 查找用 WMI + 命令行过滤。** 通过 PowerShell 查询 `Win32_Process`，按进程名（msedge.exe）和用户数据目录标记匹配，同时排除 `--type=` 的子进程（renderer、GPU 进程）。如果不排除，拿到的 PID 是渲染进程而非主进程，窗口显示/隐藏操作会失效。
-
-**窗口类名过滤。** 用 `EnumWindows` 遍历主进程的所有顶层窗口时，只取 `Chrome_WidgetWin_1` 类名的窗口，过滤掉 DevTools 和 Chromium 内部窗口。
-
-### 9. NAS 发现：三级 fallback + 并发隔离
-
-发现策略按速度递减尝试：UGREEN 广播（2 秒）→ mDNS（5 秒）→ TCP 端口扫描（最慢）。每个发现到的 IP 都做 HTTP 探测确认是 UGOS 而非同端口的其他服务。
-
-**SN 尾号匹配防止测错机。** 同一网段上可能有多台 NAS，用 SN 末四位匹配确保测到对的那台。浏览器存储里可能残留上一台设备的 SN，所以只在有扫码枪输入的预期 SN 尾号时才做存储抽取验证。
-
-**并发测试的 IP 隔离。** GUI 并发跑多台 NAS 时，`exclude` 参数防止同一台 NAS 被两个任务同时认领。`DEVICE_LOCKS` 字典按 IP 加锁，锁获取用 `timeout=1.0` 以便在等待间隙检查取消事件，防止死锁。
-
-### 10. autoupdate 仓库同步：不要用 merge
-
-早期用 `git merge --ff-only --autostash` 同步 `ugreen-nas-autoupdate` 仓库。内部系统 refresh 会本地修改 `materials.json`，上游也经常改这个文件，`--autostash` 的 stash pop 经常冲突，留下合并标记导致下次 refresh 失败。
-
-改用 `git reset --hard <upstream>`：反正 `materials.json` 在 sync 之后立刻就会被 内部系统 refresh 整个重写，本地修改是短命的，丢了无所谓。
-
-另一个教训：工厂机上任何需要手动操作的步骤（比如 `git pull`）都会被遗忘。autoupdate 仓库的 carton 扣减功能发布了好几个版本都"静悄悄地没人用"，因为没有人在工厂机上手动 pull。修复：启动时自动拉取。
-
-### 11. Tkinter 的静默吞异常
-
-**`self` vs `self.root`。** `FactoryTestGUI` 是普通 Python 类不是 `tk.Widget`。把 `self` 传给 `tk.Toplevel()` / `transient()` / `winfo_*()` 会抛 `AttributeError`——但 Tkinter 会静默吞掉这个异常。结果是打印标签按钮点了没反应、没报错、没日志，排查半天。必须用 `self.root`。
-
-**关键输入不能有默认值。** A/B 等级的选择如果默认为 A，操作员不选直接开测，就会用错误的 P/N 打标签发货。修复：弹一个阻塞的模态对话框，不选就不让继续。
-
-### 12. PowerShell 序列化陷阱
-
-**多行字符串变数组。** git 输出的 release notes 是多行的，PowerShell 自动把它变成字符串数组。`ConvertTo-Json` 序列化出 `["line1", "line2"]`，Python 端 `str()` 之后变成 `"['line1', ...]"` 字面量。必须先 `| Out-String` 展平。
-
-### 13. 截图目录与 SN 变更
-
-扫码枪有时先扫到 SN 尾号，后续通过 UGOS 页面或 localStorage 才拿到完整 SN。此时需要迁移截图目录：如果目标目录已存在，做文件级合并，按 `st_mtime` 保留较新的文件。如果源和目标解析到同一路径则跳过。
-
-失败截图文件名含 `_FAIL_` 标记，`capture.py` 靠这个标记判断"已有成功截图则跳过"。删掉标记会导致失败截图被误认为成功，跳过重拍。
-
-Playwright traces 目录在每次会话开始时清空，否则会在工厂机上累积 GB 级文件。
-
----
-
-## 自动录表
-
-GUI 启动时会自动调用 `ugreen-nas-autoupdate` 的 `forms refresh` 刷新表单物料。录表桥接路径按优先级查找：
-
-1. 环境变量 `UGREEN_AUTOUPDATE_ROOT`
-2. `config/config.yml` 里的 `paths.autoupdate_root`
-3. 项目同级目录 `ugreen-nas-autoupdate`
-
-录表提交通过文件桥接：把 JSON payload 写到 `state/bridge_requests/`，再调用 autoupdate runner 子进程读取。这样绕开了管道大小限制和包含截图路径的大 payload 编码问题。
-
-PyInstaller 冻结的 exe 里 `sys.executable` 指向 exe 本身而非 Python 解释器，调用 autoupdate 桥接时需要用 `UGREEN_AUTOUPDATE_PYTHON` 环境变量或 fallback 到 `"python"` 找解释器。
-
-## 自动更新
-
-GUI 启动时按 `config/update-config.json` 去 GitHub Releases 拉取新版本。配置模板见 `config/update-config.example.json`。
-
-**私有仓库的下载需要手动处理重定向。** GitHub release asset URL 从 `api.github.com` 302 跳转到 `objects.githubusercontent.com`（AWS S3 后端），S3 拒绝同时带 `Authorization: Bearer` 和 AWS 签名参数的请求。代码手动走最多 5 跳重定向，只在 `api.github.com` 域名的跳转上带 token，跳到其他域名时去掉。
-
-发版只需打 tag：
-
-```bash
-git tag v0.2.0 && git push --tags
+```
+src/
+├── gui.py            GUI 主窗口（Tkinter），多机排队
+├── cli.py            CLI 入口（Click）：test / cleanup / print-*
+├── updater.py        从 GitHub Release 自更新
+├── form_entry.py     对接 ugreen-nas-autoupdate 模块（内部系统 录表）
+├── flows/            登录 · 初始化向导 · 建池建共享 · 截图采集 · 清理 · 固件更新 · 恢复出厂
+├── discovery/        NAS 发现（广播 → mDNS → 端口扫描）
+├── report/           故障日志打包、指纹去重、GitHub Issue、脱敏
+└── utils/            浏览器控制、SMB 测速、ZPL/TSPL 标签渲染、SN 解析、配置
+config/               config.yml（你的）+ config.example.yml + selectors.yml
+docs/                 实现细节
+tests/                单元 + smoke 测试
 ```
 
-CI 会自动把 tag 名当 `versionName`、`git rev-list --count HEAD` 当 `versionCode`，stamp 进 `src/version.py` 后打包发布。
+工厂实机调试积累的坑点和实现取舍——Windows 自更新、测速读数与截图同步、UGOS 选择器地狱、30 分钟固件状态机——在 [docs/implementation-notes.md](./docs/implementation-notes.md)。
 
-已部署的 v0.1.0 / v0.1.1 无法自动升级（早期 swap 脚本用 `Move-Item -Force` 会静默 no-op），首次需手动替换 exe。v0.1.6 起 swap 完成后不再自动重启，弹窗提示用户手动双击。
+### 环境要求
 
-## 工具脚本
+- Windows 10/11、Python 3.10+、系统 Microsoft Edge（无需下载 Chromium）。
+- 标签打印：Zebra/Deli 打印机 + 它的 Windows 队列名。
+- 可选：故障上报需要在 `FAULT_REPORT_TOKEN` 里放 GitHub token；内部系统 录表需要 App 旁边有独立的 `ugreen-nas-autoupdate` 模块。
 
-`scripts/` 下有几个调试辅助脚本：
+完整测试套件依赖 pywin32（打印、窗口控制），只在 Windows 上能跑全；macOS/Linux 上部分用例会跳过或收集失败。
 
-- `analyze_html.py` — 分析 UGOS 页面 HTML 结构
-- `find_pages.py` — 查找 UGOS 可用页面路径
-- `inspect_dom.py` — 检查页面 DOM 元素
-- `map_captures.py` — 映射截图采集点
+### 贡献
 
-## 验证
+欢迎提 Issue 和 PR。改动请保持聚焦，并在 PR 里说明动机。
 
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-.\.venv\Scripts\python.exe -m pytest tests
-.\.venv\Scripts\python.exe -m src.cli --help
-```
+### 许可证
 
-完整测试套件依赖 pywin32（打印 / 窗口控制等），只在 Windows 上能跑全；macOS/Linux 上部分用例会自动跳过或收集失败。
-
-## 许可 / License
-
-本项目以 Apache-2.0 许可发布，详见仓库根目录的 `LICENSE` 文件。
+[Apache-2.0](./LICENSE)。© 2026 UGREEN。

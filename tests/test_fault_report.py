@@ -55,7 +55,7 @@ def test_mask_mac_and_hash_short() -> None:
 
 
 def test_signature_normalizes_volatile_bits() -> None:
-    a = fingerprint.normalize_signature("UGOS at 192.168.0.50:9999 did not become ready within 90s")
+    a = fingerprint.normalize_signature("UGOS at 192.0.2.50:9999 did not become ready within 90s")
     b = fingerprint.normalize_signature("UGOS at 10.0.0.7:9999 did not become ready within 120s")
     assert a == b  # IP / 数字 归一化后一致
     assert "<ip>" in a and "<n>" in a
@@ -75,7 +75,7 @@ def test_signature_strips_volatile_context_suffix() -> None:
     # 候选 IP 列表长度变化也不该打散指纹
     c = fingerprint.normalize_signature(
         "No unused UGOS NAS matching SN tail 00D3 became available before timeout: "
-        "No discovered UGOS NAS matched SN tail 00D3; candidates: ['192.168.0.1', '192.168.0.2']"
+        "No discovered UGOS NAS matched SN tail 00D3; candidates: ['192.0.2.1', '192.0.2.2']"
     )
     d = fingerprint.normalize_signature(
         "No unused UGOS NAS matching SN tail 00D3 became available before timeout: "

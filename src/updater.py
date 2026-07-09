@@ -299,7 +299,7 @@ class UpdateManager:
         Private-repo release-asset URLs (``api.github.com/.../releases/assets/<id>``)
         302 to ``objects.githubusercontent.com``; that S3-backed host rejects
         requests that arrive with both AWS-signed query params and an
-        ``Authorization: Bearer`` header. An internal Java UpdateManager handles this
+        ``Authorization: Bearer`` header. An internal UpdateManager handles this
         the same way: disable auto-redirect, then re-decide on each hop whether
         the new host is ``api.github.com`` (token attached) or anything else
         (token stripped).

@@ -73,7 +73,7 @@ TRANSFER_SPEED_ATTEMPT_TIMEOUT_S = 45
 TRANSFER_BRACKET_MAX_SPAN_S = 0.6
 # resource_monitor is the only standard page whose values (CPU 温度 / 设备风扇转速) move, so
 # it alone needs the read->screenshot->read binding + cool-down. Its readings must equal the
-# numbers frozen in the saved image (the recorded MES temperature comes from here).
+# numbers frozen in the saved image (the recorded internal-system temperature comes from here).
 RESOURCE_MONITOR_PAGE = "resource_monitor"
 RESOURCE_MONITOR_STABLE_KEYS = ("cpu_temp", "device_fan_rpm")
 # Budget for re-attempting a bound (value==screenshot) capture when the display straddles a
@@ -539,7 +539,7 @@ def _wait_for_cpu_temp_within_limit(
     """Wait (up to ``budget_s``) for cpu_temp to settle <= ``max_c`` before the screenshot.
 
     The resource-monitor reading is the load-tail spike captured right after the 4 SMB
-    transfers; a healthy unit cools below the limit within the budget, so MES records a
+    transfers; a healthy unit cools below the limit within the budget, so the internal system records a
     representative temperature instead of the spike (实测过曾上传 80℃). A genuinely hot unit
     times out and is captured as-is — the fan-mode pages, read at steady state, remain the
     actual thermal pass/fail criterion."""
@@ -576,7 +576,7 @@ def _capture_standard_page(
     page.wait_for_timeout(SHORT_UI_WAIT_MS)
     if page_key == RESOURCE_MONITOR_PAGE:
         # resource_monitor opens right after the 4 SMB transfers with the CPU on its load
-        # tail. #2: let it cool to <= the limit first (a healthy unit does) so MES records a
+        # tail. #2: let it cool to <= the limit first (a healthy unit does) so the internal system records a
         # representative temperature, not the spike. #1: then bind the reading to the
         # screenshot so the recorded 温度/转速 equals the numbers frozen in the image.
         _wait_for_cpu_temp_within_limit(page, frame, spec, page_key, cpu_temp_max_c, recheck_budget_s)
@@ -699,7 +699,7 @@ def _capture_transfer_page(
                 # On a below-threshold page this records a diagnostic rate (clearly marked
                 # below_threshold / no_sample) and then raises just below, so the run fails
                 # and the value never ships — it is only ever read back for the failure
-                # report, never auto-filled into MES as a passing measurement.
+                # report, never auto-filled into the internal system as a passing measurement.
                 capture_values[page_key] = values
             if not best_result.reached_threshold:
                 raise CaptureError(_transfer_threshold_error(page_key, values, threshold_mb_s, attempts_run))

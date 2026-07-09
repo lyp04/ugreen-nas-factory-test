@@ -270,10 +270,10 @@ def test_sync_autoupdate_repo_fast_forwards_when_upstream_ahead(monkeypatch, tmp
 
 
 def test_sync_autoupdate_repo_discards_dirty_materials_when_upstream_ahead(monkeypatch, tmp_path: Path) -> None:
-    """内部系统 refresh writes materials.json on every startup; upstream may also
+    """internal-system refresh writes materials.json on every startup; upstream may also
     advance materials.json (e.g. a new selected_material_codes opt-in). v0.1.14
     tried --autostash which left the tree conflicted in that case. The new
-    behavior: discard the dirty edits with reset --hard, then let the 内部系统
+    behavior: discard the dirty edits with reset --hard, then let the internal-system
     refresh that runs immediately after rewrite materials.json cleanly."""
     _git_required()
     upstream = tmp_path / "upstream"
@@ -295,7 +295,7 @@ def test_sync_autoupdate_repo_discards_dirty_materials_when_upstream_ahead(monke
     _git(upstream, "commit", "--quiet", "-m", "bump materials")
     _git(upstream, "push", "--quiet", "origin", "main")
 
-    # Clone has dirty materials.json (内部系统-refresh-style local writes).
+    # Clone has dirty materials.json (internal-system-refresh-style local writes).
     (clone / "materials.json").write_text('{"version": 1, "last_refreshed_at": "2026-05-27"}\n')
 
     monkeypatch.setattr(form_entry, "autoupdate_root", lambda: clone)
@@ -304,7 +304,7 @@ def test_sync_autoupdate_repo_discards_dirty_materials_when_upstream_ahead(monke
     # Working tree is clean — no merge markers, no stash debris.
     status_proc = subprocess.run(["git", "status", "--porcelain"], cwd=clone, capture_output=True, text=True)
     assert status_proc.stdout == "", f"work tree not clean after sync: {status_proc.stdout!r}"
-    # Upstream version present, local dirt is gone (内部系统 refresh will rewrite).
+    # Upstream version present, local dirt is gone (internal-system refresh will rewrite).
     assert (clone / "materials.json").read_text().strip() == '{"version": 2, "selected": ["NEW_CODE"]}'
 
 

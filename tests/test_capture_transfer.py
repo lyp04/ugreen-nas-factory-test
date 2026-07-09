@@ -72,7 +72,7 @@ def test_build_transfer_config_falls_back_to_existing_10g_rar(tmp_path, monkeypa
     work_dir = tmp_path / "local-work"
 
     cfg = capture._build_transfer_config(
-        "http://192.168.0.168:9999",
+        "http://192.0.2.168:9999",
         "hdd",
         output_run_dir,
         {"username": "admin", "password": "pw"},
@@ -100,7 +100,7 @@ def test_build_transfer_config_selects_model_source_file(tmp_path, monkeypatch) 
     source_20g.write_bytes(b"20" * 10)
 
     cfg = capture._build_transfer_config(
-        "http://192.168.0.168:9999",
+        "http://192.0.2.168:9999",
         "hdd",
         tmp_path / "output" / "SN123",
         {"username": "admin", "password": "pw"},
@@ -158,7 +158,7 @@ def test_default_transfer_work_dir_is_local_to_runtime_root(tmp_path, monkeypatc
     monkeypatch.setattr(capture, "_runtime_root", lambda: runtime_root)
 
     cfg = capture._build_transfer_config(
-        "http://192.168.0.168:9999",
+        "http://192.0.2.168:9999",
         "ssd",
         tmp_path / "synced-output" / "SN456",
         {"username": "admin", "password": "pw"},
@@ -185,7 +185,7 @@ def test_cleanup_transfer_run_dir_keeps_source_file_outside_workdir(tmp_path) ->
 
 def test_chunked_transfer_script_creates_progress_directory(tmp_path) -> None:
     cfg = SmbTransferConfig(
-        unc_share=r"\\192.168.0.168\hdd",
+        unc_share=r"\\192.0.2.168\hdd",
         local_dir=tmp_path / "missing" / "smb",
         drive_letter="H",
         source_file=tmp_path / "source.bin",
@@ -200,7 +200,7 @@ def test_chunked_transfer_script_creates_progress_directory(tmp_path) -> None:
 
 def test_download_transfer_uses_chunked_copy_with_progress(tmp_path) -> None:
     cfg = SmbTransferConfig(
-        unc_share=r"\\192.168.0.168\hdd",
+        unc_share=r"\\192.0.2.168\hdd",
         local_dir=tmp_path / "smb",
         drive_letter="H",
         source_file=tmp_path / "source.bin",
@@ -282,7 +282,7 @@ def test_upload_capture_passes_when_full_seed_completes_after_speed_sample(tmp_p
     shot = tmp_path / "speed.png"
     shot.write_bytes(b"png")
     text = f"{READ_MARKER} 0 B/s {WRITE_MARKER} 560 MB/s"
-    cfg = SmbTransferConfig(unc_share=r"\\192.168.0.168\hdd", local_dir=tmp_path)
+    cfg = SmbTransferConfig(unc_share=r"\\192.0.2.168\hdd", local_dir=tmp_path)
     process_checks = iter([False, True, True])
     progress_values = iter([10 * 1024 * 1024 * 1024])
 
@@ -327,7 +327,7 @@ def test_upload_capture_waits_for_seed_after_speed_sample_window(tmp_path, monke
     shot = tmp_path / "speed.png"
     shot.write_bytes(b"png")
     text = f"{READ_MARKER} 0 B/s {WRITE_MARKER} 560 MB/s"
-    cfg = SmbTransferConfig(unc_share=r"\\192.168.0.168\hdd", local_dir=tmp_path)
+    cfg = SmbTransferConfig(unc_share=r"\\192.0.2.168\hdd", local_dir=tmp_path)
     seed_bytes = 20 * 1024 * 1024
     process_checks = [False, False, True]
     progress_values = [0, seed_bytes]
@@ -397,7 +397,7 @@ def test_transfer_capture_records_bracketed_stable_rate(tmp_path, monkeypatch) -
         ]
     )
     process_checks = iter([False, True])
-    cfg = SmbTransferConfig(unc_share=r"\\192.168.0.168\hdd", local_dir=tmp_path)
+    cfg = SmbTransferConfig(unc_share=r"\\192.0.2.168\hdd", local_dir=tmp_path)
 
     class FakePage:
         def wait_for_timeout(self, _ms: int) -> None:
@@ -450,7 +450,7 @@ def test_transfer_capture_rejects_unstable_screenshot(tmp_path, monkeypatch) -> 
     )
     shots = iter([reject_shot, accept_shot])
     process_checks = iter([False, True])
-    cfg = SmbTransferConfig(unc_share=r"\\192.168.0.168\hdd", local_dir=tmp_path)
+    cfg = SmbTransferConfig(unc_share=r"\\192.0.2.168\hdd", local_dir=tmp_path)
 
     class FakePage:
         def wait_for_timeout(self, _ms: int) -> None:
@@ -499,7 +499,7 @@ def test_below_threshold_logs_bound_value_not_running_max(tmp_path, monkeypatch)
         ]
     )
     process_checks = iter([False, True])
-    cfg = SmbTransferConfig(unc_share=r"\\192.168.0.168\hdd", local_dir=tmp_path)
+    cfg = SmbTransferConfig(unc_share=r"\\192.0.2.168\hdd", local_dir=tmp_path)
 
     class FakePage:
         def wait_for_timeout(self, _ms: int) -> None:
@@ -552,7 +552,7 @@ def test_transfer_capture_replaces_lower_bound_with_higher(tmp_path, monkeypatch
     )
     shots = iter([shot200, shot300])
     process_checks = iter([False, True])
-    cfg = SmbTransferConfig(unc_share=r"\\192.168.0.168\hdd", local_dir=tmp_path)
+    cfg = SmbTransferConfig(unc_share=r"\\192.0.2.168\hdd", local_dir=tmp_path)
 
     class FakePage:
         def wait_for_timeout(self, _ms: int) -> None:
@@ -600,7 +600,7 @@ def test_capture_on_low_straddle_yields_no_shot(tmp_path, monkeypatch) -> None:
         ]
     )
     process_checks = iter([False, True])
-    cfg = SmbTransferConfig(unc_share=r"\\192.168.0.168\hdd", local_dir=tmp_path)
+    cfg = SmbTransferConfig(unc_share=r"\\192.0.2.168\hdd", local_dir=tmp_path)
 
     class FakePage:
         def wait_for_timeout(self, _ms: int) -> None:
@@ -672,7 +672,7 @@ def test_transfer_capture_records_bracketed_gbps(tmp_path, monkeypatch) -> None:
     shot.write_bytes(b"png")
     text = f"{READ_MARKER} 1.2 GB/s {WRITE_MARKER} 0 B/s"
     process_checks = iter([False, True])
-    cfg = SmbTransferConfig(unc_share=r"\\192.168.0.168\hdd", local_dir=tmp_path)
+    cfg = SmbTransferConfig(unc_share=r"\\192.0.2.168\hdd", local_dir=tmp_path)
 
     class FakePage:
         def wait_for_timeout(self, _ms: int) -> None:
@@ -985,7 +985,7 @@ def test_transfer_capture_does_not_retry_when_first_attempt_passes(tmp_path, mon
     captured: dict[str, dict[str, str]] = {}
     result = capture._capture_transfer_page(
         object(),
-        "http://192.168.0.168:9999",
+        "http://192.0.2.168:9999",
         "SN123",
         "ssd_write",
         {"app": "taskmgr", "transfer": {"share": "ssd", "direction": "upload"}},
@@ -1029,7 +1029,7 @@ def test_transfer_capture_retries_low_attempt_and_uses_passing_attempt(tmp_path,
     captured: dict[str, dict[str, str]] = {}
     result = capture._capture_transfer_page(
         object(),
-        "http://192.168.0.168:9999",
+        "http://192.0.2.168:9999",
         "SN123",
         "ssd_write",
         {"app": "taskmgr", "transfer": {"share": "ssd", "direction": "upload"}},
@@ -1077,7 +1077,7 @@ def test_transfer_capture_fails_when_all_attempts_are_below_threshold(tmp_path, 
     with pytest.raises(capture.CaptureError, match="speed did not reach screenshot threshold"):
         capture._capture_transfer_page(
             object(),
-            "http://192.168.0.168:9999",
+            "http://192.0.2.168:9999",
             "SN123",
             "ssd_write",
             {"app": "taskmgr", "transfer": {"share": "ssd", "direction": "upload"}},
@@ -1122,7 +1122,7 @@ def test_transfer_capture_fails_on_no_sample_instead_of_uploading_zero(tmp_path,
     with pytest.raises(capture.CaptureError, match="no_sample"):
         capture._capture_transfer_page(
             object(),
-            "http://192.168.0.168:9999",
+            "http://192.0.2.168:9999",
             "SN123",
             "hdd_read",
             {"app": "taskmgr", "transfer": {"share": "hdd", "direction": "download"}},
@@ -1142,7 +1142,7 @@ def test_transfer_capture_fails_on_no_sample_instead_of_uploading_zero(tmp_path,
 
 
 def _patch_transfer_page_dependencies(monkeypatch, attempts: list[int], results: list[capture.TransferAttemptResult]) -> None:
-    cfg = SmbTransferConfig(unc_share=r"\\192.168.0.168\ssd", local_dir=Path("."))
+    cfg = SmbTransferConfig(unc_share=r"\\192.0.2.168\ssd", local_dir=Path("."))
     monkeypatch.setattr(capture, "_open_app", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(capture, "_navigate", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(capture, "_wait_for_landmark", lambda *_args, **_kwargs: None)

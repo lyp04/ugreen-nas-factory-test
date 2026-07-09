@@ -112,9 +112,9 @@ PyInstaller `--windowed` 打包的 exe 没有控制台，但 `subprocess.run()` 
 
 ### 10. autoupdate 仓库同步：不要用 merge
 
-早期用 `git merge --ff-only --autostash` 同步 `ugreen-nas-autoupdate` 仓库。内部系统 refresh 会本地修改 `materials.json`，上游也经常改这个文件，`--autostash` 的 stash pop 经常冲突，留下合并标记导致下次 refresh 失败。
+早期用 `git merge --ff-only --autostash` 同步 `ugreen-nas-autoupdate` 仓库。内部业务系统刷新 会本地修改 `materials.json`，上游也经常改这个文件，`--autostash` 的 stash pop 经常冲突，留下合并标记导致下次 refresh 失败。
 
-改用 `git reset --hard <upstream>`：反正 `materials.json` 在 sync 之后立刻就会被 内部系统 refresh 整个重写，本地修改是短命的，丢了无所谓。
+改用 `git reset --hard <upstream>`：反正 `materials.json` 在 sync 之后立刻就会被 内部业务系统刷新 整个重写，本地修改是短命的，丢了无所谓。
 
 另一个教训：工厂机上任何需要手动操作的步骤（比如 `git pull`）都会被遗忘。autoupdate 仓库的 carton 扣减功能发布了好几个版本都"静悄悄地没人用"，因为没有人在工厂机上手动 pull。修复：启动时自动拉取。
 

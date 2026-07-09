@@ -181,7 +181,7 @@ def test_classify_failure_category_operator_conditions() -> None:
 def test_classify_failure_category_other_triggers_report() -> None:
     # 非四类硬件、非 operator 条件 → other（唯一会触发自动上报的桶）。
     assert (
-        cli.classify_failure_category("UGOS at 192.168.0.50:9999 did not become ready within 90s")
+        cli.classify_failure_category("UGOS at 192.0.2.50:9999 did not become ready within 90s")
         == "other"
     )
     assert cli.classify_failure_category("测试失败 something totally unexpected") == "other"

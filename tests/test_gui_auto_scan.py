@@ -138,16 +138,16 @@ def test_success_report_blocks_auto_scan_by_sn_not_reused_ip(tmp_path) -> None:
             {
                 "status": "success",
                 "sn": "HB670EE07251E54E",
-                "nas_ip": "192.168.0.214",
-                "nas_reserved_ips": ["192.168.0.215"],
+                "nas_ip": "192.0.2.214",
+                "nas_reserved_ips": ["192.0.2.215"],
             }
         ),
         encoding="utf-8",
     )
 
     assert gui._has_completed_output_for_sn("E54E")
-    assert not gui._has_known_ip("192.168.0.214")
-    assert not gui._has_known_ip("192.168.0.215")
+    assert not gui._has_known_ip("192.0.2.214")
+    assert not gui._has_known_ip("192.0.2.215")
 
 
 def test_auto_form_success_report_requires_successful_upload(tmp_path) -> None:
@@ -190,7 +190,7 @@ def test_materials_tab_shows_fresh_full_retry_mode(tmp_path) -> None:
     task = DeviceTask(
         task_id="task-1",
         sn="HB670EE07251E54E",
-        requested_ip="192.168.0.214",
+        requested_ip="192.0.2.214",
         mode="setup",
         cleanup_before_finish=True,
         factory_reset_before_finish=True,
@@ -235,7 +235,7 @@ def test_materials_tab_resubmit_not_shown_as_full_deduct(tmp_path) -> None:
     # Duplicate-SN re-submission → form_result.status == "already_submitted" with
     # no removed_material_codes. The materials tab must NOT mark every item as
     # deducted (the old "假全扣" bug); it shows a neutral "已录表" state plus a note
-    # pointing to 内部系统, so an originally out-of-stock unit isn't misread as 全扣.
+    # pointing to the internal system, so an originally out-of-stock unit isn't misread as 全扣.
     gui = _gui_for_output(tmp_path)
     gui.language_var = SimpleNamespace(get=lambda: "中文")
     gui.materials_tree = _Tree()
@@ -243,7 +243,7 @@ def test_materials_tab_resubmit_not_shown_as_full_deduct(tmp_path) -> None:
     task = DeviceTask(
         task_id="task-1",
         sn="HB670EE52241F8CD",
-        requested_ip="192.168.0.214",
+        requested_ip="192.0.2.214",
         mode="setup",
         cleanup_before_finish=True,
         factory_reset_before_finish=True,
@@ -297,14 +297,14 @@ def test_failed_report_does_not_block_auto_scan(tmp_path) -> None:
             {
                 "status": "failed",
                 "sn": "HB670EE07251E54E",
-                "nas_ip": "192.168.0.214",
+                "nas_ip": "192.0.2.214",
             }
         ),
         encoding="utf-8",
     )
 
     assert not gui._has_completed_output_for_sn("E54E")
-    assert not gui._has_known_ip("192.168.0.214")
+    assert not gui._has_known_ip("192.0.2.214")
 
 
 def test_current_queue_ip_still_blocks_auto_scan_duplicate(tmp_path) -> None:
@@ -313,14 +313,14 @@ def test_current_queue_ip_still_blocks_auto_scan_duplicate(tmp_path) -> None:
         "task-1": DeviceTask(
             task_id="task-1",
             sn="HB670EE072512F12",
-            requested_ip="192.168.0.191",
+            requested_ip="192.0.2.191",
             mode="setup",
             cleanup_before_finish=True,
             factory_reset_before_finish=True,
         )
     }
 
-    assert gui._has_known_ip("192.168.0.191")
+    assert gui._has_known_ip("192.0.2.191")
 
 
 def test_cancelling_task_is_still_active(tmp_path) -> None:
@@ -328,7 +328,7 @@ def test_cancelling_task_is_still_active(tmp_path) -> None:
     task = DeviceTask(
         task_id="task-1",
         sn="HB670EE072512F12",
-        requested_ip="192.168.0.191",
+        requested_ip="192.0.2.191",
         mode="setup",
         cleanup_before_finish=True,
         factory_reset_before_finish=True,
@@ -346,7 +346,7 @@ def test_success_and_latest_failure_rows_are_tagged(tmp_path) -> None:
     success = DeviceTask(
         task_id="task-1",
         sn="HB670EE072512F12",
-        requested_ip="192.168.0.191",
+        requested_ip="192.0.2.191",
         mode="setup",
         cleanup_before_finish=True,
         factory_reset_before_finish=True,
@@ -355,7 +355,7 @@ def test_success_and_latest_failure_rows_are_tagged(tmp_path) -> None:
     failed = DeviceTask(
         task_id="task-2",
         sn="HB670EE07251E54E",
-        requested_ip="192.168.0.214",
+        requested_ip="192.0.2.214",
         mode="setup",
         cleanup_before_finish=True,
         factory_reset_before_finish=True,
@@ -372,7 +372,7 @@ def test_failed_row_with_later_same_sn_retry_is_not_red(tmp_path) -> None:
     failed = DeviceTask(
         task_id="task-1",
         sn="E54E",
-        requested_ip="192.168.0.214",
+        requested_ip="192.0.2.214",
         mode="setup",
         cleanup_before_finish=True,
         factory_reset_before_finish=True,
@@ -381,7 +381,7 @@ def test_failed_row_with_later_same_sn_retry_is_not_red(tmp_path) -> None:
     retry = DeviceTask(
         task_id="task-2",
         sn="HB670EE07251E54E",
-        requested_ip="192.168.0.214",
+        requested_ip="192.0.2.214",
         mode="setup",
         cleanup_before_finish=True,
         factory_reset_before_finish=True,
@@ -398,7 +398,7 @@ def test_cancel_button_becomes_retry_for_failed_task(tmp_path) -> None:
     failed = DeviceTask(
         task_id="task-1",
         sn="HB670EE07251E54E",
-        requested_ip="192.168.0.214",
+        requested_ip="192.0.2.214",
         mode="setup",
         cleanup_before_finish=True,
         factory_reset_before_finish=True,
@@ -419,7 +419,7 @@ def test_retry_failed_task_adds_later_retry_and_clears_failed_count(monkeypatch,
     failed = DeviceTask(
         task_id="task-1",
         sn="HB670EE07251E54E",
-        requested_ip="192.168.0.214",
+        requested_ip="192.0.2.214",
         mode="setup",
         cleanup_before_finish=True,
         factory_reset_before_finish=True,
@@ -428,7 +428,7 @@ def test_retry_failed_task_adds_later_retry_and_clears_failed_count(monkeypatch,
         form_grade="B",
         form_account_name="operator01",
         state_code="failed",
-        reserved_ips={"192.168.0.214"},
+        reserved_ips={"192.0.2.214"},
     )
     gui.devices = {failed.task_id: failed}
     gui.selected_task_id = failed.task_id
@@ -451,7 +451,7 @@ def test_daily_stats_survive_removed_rows_and_migrate_auto_sn_retry(tmp_path) ->
     failed = DeviceTask(
         task_id="task-1",
         sn="AUTOC0A800D6",
-        requested_ip="192.168.0.214",
+        requested_ip="192.0.2.214",
         mode="setup",
         cleanup_before_finish=True,
         factory_reset_before_finish=True,
@@ -460,7 +460,7 @@ def test_daily_stats_survive_removed_rows_and_migrate_auto_sn_retry(tmp_path) ->
     retry = DeviceTask(
         task_id="task-2",
         sn="HB670EE07251E54E",
-        requested_ip="192.168.0.214",
+        requested_ip="192.0.2.214",
         mode="setup",
         cleanup_before_finish=True,
         factory_reset_before_finish=True,
@@ -483,7 +483,7 @@ def test_daily_stats_survive_removed_rows_and_migrate_auto_sn_retry(tmp_path) ->
     reloaded = _gui_with_daily_stats(tmp_path)
     assert reloaded._daily_status_counts() == (1, 0)
     assert "sn:E54E" in reloaded.daily_stats_devices
-    assert "ip:192.168.0.214" not in reloaded.daily_stats_devices
+    assert "ip:192.0.2.214" not in reloaded.daily_stats_devices
 
 
 def test_daily_rollover_clears_disconnected_records_but_keeps_active_and_present_ips(tmp_path) -> None:
@@ -491,7 +491,7 @@ def test_daily_rollover_clears_disconnected_records_but_keeps_active_and_present
     disconnected = DeviceTask(
         task_id="disconnected-001",
         sn="HB670EE0725123DD",
-        requested_ip="192.168.0.229",
+        requested_ip="192.0.2.229",
         mode="setup",
         cleanup_before_finish=True,
         factory_reset_before_finish=True,
@@ -500,7 +500,7 @@ def test_daily_rollover_clears_disconnected_records_but_keeps_active_and_present
     connected = DeviceTask(
         task_id="connected-002",
         sn="HB670EE022513CDF",
-        requested_ip="192.168.0.143",
+        requested_ip="192.0.2.143",
         mode="setup",
         cleanup_before_finish=True,
         factory_reset_before_finish=True,
@@ -509,7 +509,7 @@ def test_daily_rollover_clears_disconnected_records_but_keeps_active_and_present
     active = DeviceTask(
         task_id="active-003",
         sn="HB670EE022517E15",
-        requested_ip="192.168.0.239",
+        requested_ip="192.0.2.239",
         mode="setup",
         cleanup_before_finish=True,
         factory_reset_before_finish=True,
@@ -526,7 +526,7 @@ def test_daily_rollover_clears_disconnected_records_but_keeps_active_and_present
         "sn:3CDF": {"sn": connected.sn, "status": "success"},
         "sn:7E15": {"sn": active.sn, "status": "failed"},
     }
-    gui._detect_present_task_ips = lambda _tasks: {"192.168.0.143"}
+    gui._detect_present_task_ips = lambda _tasks: {"192.0.2.143"}
 
     gui._handle_daily_rollover()
 
@@ -544,7 +544,7 @@ def test_queue_state_restores_same_day_and_marks_active_cancelled(tmp_path) -> N
     task = DeviceTask(
         task_id="HB670EE07251E54E-001",
         sn="HB670EE07251E54E",
-        requested_ip="192.168.0.214",
+        requested_ip="192.0.2.214",
         mode="setup",
         cleanup_before_finish=True,
         factory_reset_before_finish=True,
@@ -625,9 +625,9 @@ def test_queue_state_bootstraps_today_records_from_output_folders(monkeypatch, t
     )
 
     for sn, status, ip, started_at in (
-        (success_sn, "success", "192.168.0.123", f"{today}T09:00:00"),
-        (failed_sn, "failed", "192.168.0.124", f"{today}T08:00:00"),
-        (stale_sn, "success", "192.168.0.125", f"{today}T07:00:00"),
+        (success_sn, "success", "192.0.2.123", f"{today}T09:00:00"),
+        (failed_sn, "failed", "192.0.2.124", f"{today}T08:00:00"),
+        (stale_sn, "success", "192.0.2.125", f"{today}T07:00:00"),
     ):
         sn_root = tmp_path / sn
         sn_root.mkdir()
@@ -669,7 +669,7 @@ def test_queue_state_bootstraps_today_records_from_output_folders(monkeypatch, t
     assert [record["sn"] for record in records] == [failed_sn, success_sn]
     assert records_by_sn[success_sn]["task_id"] == "kept-042"
     assert records_by_sn[success_sn]["state_code"] == "success"
-    assert records_by_sn[success_sn]["requested_ip"] == "192.168.0.123"
+    assert records_by_sn[success_sn]["requested_ip"] == "192.0.2.123"
     assert records_by_sn[success_sn]["elapsed_seconds"] == 1800
     assert records_by_sn[failed_sn]["state_code"] == "failed"
     assert stale_sn not in records_by_sn
@@ -779,7 +779,7 @@ def test_queue_state_save_merges_existing_same_day_rows(tmp_path) -> None:
                     {
                         "task_id": "old-001",
                         "sn": "HB670EE0725123DD",
-                        "requested_ip": "192.168.0.229",
+                        "requested_ip": "192.0.2.229",
                         "mode": "setup",
                         "state_code": "success",
                     }
@@ -791,7 +791,7 @@ def test_queue_state_save_merges_existing_same_day_rows(tmp_path) -> None:
     task = DeviceTask(
         task_id="new-001",
         sn="HB670EE022513CDF",
-        requested_ip="192.168.0.143",
+        requested_ip="192.0.2.143",
         mode="setup",
         cleanup_before_finish=True,
         factory_reset_before_finish=True,
@@ -810,7 +810,7 @@ def test_queue_state_remove_replaces_instead_of_merging(tmp_path) -> None:
     task = DeviceTask(
         task_id="old-001",
         sn="HB670EE0725123DD",
-        requested_ip="192.168.0.229",
+        requested_ip="192.0.2.229",
         mode="setup",
         cleanup_before_finish=True,
         factory_reset_before_finish=True,
@@ -863,7 +863,7 @@ def test_pool_creation_timeout_fails_without_auto_retry(monkeypatch, tmp_path) -
     task = DeviceTask(
         task_id="task-1",
         sn="EC752JJ21251E4D3",
-        requested_ip="192.168.0.232",
+        requested_ip="192.0.2.232",
         mode="setup",
         cleanup_before_finish=True,
         factory_reset_before_finish=True,
@@ -915,7 +915,7 @@ def test_unflashed_password_error_fails_without_auto_retry(monkeypatch, tmp_path
     task = DeviceTask(
         task_id="task-1",
         sn="EC752JJ21251E4D3",
-        requested_ip="192.168.0.232",
+        requested_ip="192.0.2.232",
         mode="login",
         cleanup_before_finish=True,
         factory_reset_before_finish=True,
@@ -966,7 +966,7 @@ def test_unflashed_password_error_shows_popup_once(monkeypatch, tmp_path) -> Non
     task = DeviceTask(
         task_id="task-1",
         sn="EC752JJ21251E4D3",
-        requested_ip="192.168.0.232",
+        requested_ip="192.0.2.232",
         mode="login",
         cleanup_before_finish=True,
         factory_reset_before_finish=True,
@@ -983,14 +983,14 @@ def test_unflashed_password_error_shows_popup_once(monkeypatch, tmp_path) -> Non
 def test_auto_scan_sn_uses_only_valid_broadcast_sn(tmp_path) -> None:
     gui = _gui_for_output(tmp_path)
 
-    assert gui._auto_scan_sn("192.168.0.244", "HB670EE00000001A", "") == "HB670EE00000001A"
-    assert gui._auto_scan_sn("192.168.0.244", "ECLGGEDQ8TB", "") == "AUTOC0A800F4"
+    assert gui._auto_scan_sn("192.0.2.244", "HB670EE00000001A", "") == "HB670EE00000001A"
+    assert gui._auto_scan_sn("192.0.2.244", "ECLGGEDQ8TB", "") == "AUTOC0A800F4"
 
 
 def test_auto_scan_groups_consecutive_auto_placeholder_ports(tmp_path) -> None:
     gui = _gui_for_output(tmp_path)
 
-    devices = gui._auto_scan_devices_from_candidates(["192.168.0.222", "192.168.0.223"], {}, set())
+    devices = gui._auto_scan_devices_from_candidates(["192.0.2.222", "192.0.2.223"], {}, set())
 
     assert devices == []
 
@@ -998,15 +998,15 @@ def test_auto_scan_groups_consecutive_auto_placeholder_ports(tmp_path) -> None:
 def test_auto_scan_groups_broadcast_pair_ports(tmp_path) -> None:
     gui = _gui_for_output(tmp_path)
     hits = {
-        "192.168.0.222": SimpleNamespace(
+        "192.0.2.222": SimpleNamespace(
             sn="",
             mac="AA:BB:CC:DD:EE:01",
-            data={"pair": {"192.168.0.222": "AA:BB:CC:DD:EE:01", "192.168.0.223": "AA:BB:CC:DD:EE:02"}},
+            data={"pair": {"192.0.2.222": "AA:BB:CC:DD:EE:01", "192.0.2.223": "AA:BB:CC:DD:EE:02"}},
         ),
-        "192.168.0.223": SimpleNamespace(sn="", mac="AA:BB:CC:DD:EE:02", data={}),
+        "192.0.2.223": SimpleNamespace(sn="", mac="AA:BB:CC:DD:EE:02", data={}),
     }
 
-    devices = gui._auto_scan_devices_from_candidates(["192.168.0.222", "192.168.0.223"], hits, set())
+    devices = gui._auto_scan_devices_from_candidates(["192.0.2.222", "192.0.2.223"], hits, set())
 
     assert devices == []
 
@@ -1014,42 +1014,42 @@ def test_auto_scan_groups_broadcast_pair_ports(tmp_path) -> None:
 def test_auto_scan_groups_same_broadcast_sn_and_prefers_4800plus_10g_port(tmp_path) -> None:
     gui = _gui_for_output(tmp_path)
     hits = {
-        "192.168.0.104": SimpleNamespace(
-            address="192.168.0.104",
+        "192.0.2.104": SimpleNamespace(
+            address="192.0.2.104",
             sn="EC752JJ232517D76",
             mac="AA:BB:CC:76:CB:6D",
             data={
                 "interface": "eth0",
                 "model": "DXP4800 Plus",
                 "pair": {
-                    "192.168.0.104": "AA:BB:CC:76:CB:6D",
-                    "192.168.0.105": "AA:BB:CC:76:CB:6E",
+                    "192.0.2.104": "AA:BB:CC:76:CB:6D",
+                    "192.0.2.105": "AA:BB:CC:76:CB:6E",
                 },
             },
         ),
-        "192.168.0.105": SimpleNamespace(
-            address="192.168.0.105",
+        "192.0.2.105": SimpleNamespace(
+            address="192.0.2.105",
             sn="EC752JJ232517D76",
             mac="AA:BB:CC:76:CB:6E",
             data={
                 "interface": "eth1",
                 "model": "DXP4800 Plus",
                 "pair": {
-                    "192.168.0.104": "AA:BB:CC:76:CB:6D",
-                    "192.168.0.105": "AA:BB:CC:76:CB:6E",
+                    "192.0.2.104": "AA:BB:CC:76:CB:6D",
+                    "192.0.2.105": "AA:BB:CC:76:CB:6E",
                 },
             },
         ),
     }
 
-    devices = gui._auto_scan_devices_from_candidates(["192.168.0.104", "192.168.0.105"], hits, set())
+    devices = gui._auto_scan_devices_from_candidates(["192.0.2.104", "192.0.2.105"], hits, set())
 
     assert devices == [
         {
-            "ip": "192.168.0.104",
+            "ip": "192.0.2.104",
             "sn": "EC752JJ232517D76",
             "mac": "AA:BB:CC:76:CB:6D",
-            "reserved_ips": ["192.168.0.104", "192.168.0.105"],
+            "reserved_ips": ["192.0.2.104", "192.0.2.105"],
             "interface": "eth0",
         }
     ]
@@ -1058,29 +1058,29 @@ def test_auto_scan_groups_same_broadcast_sn_and_prefers_4800plus_10g_port(tmp_pa
 def test_auto_scan_can_choose_4800plus_eth0_from_pair_when_only_eth1_replied(tmp_path) -> None:
     gui = _gui_for_output(tmp_path)
     hits = {
-        "192.168.0.213": SimpleNamespace(
-            address="192.168.0.213",
+        "192.0.2.213": SimpleNamespace(
+            address="192.0.2.213",
             sn="EC752JJ38251DFD8",
             mac="AA:BB:CC:A6:34:B1",
             data={
                 "interface": "eth1",
                 "model": "DXP4800 Plus",
                 "pair": {
-                    "192.168.0.212": "AA:BB:CC:A6:34:B0",
-                    "192.168.0.213": "AA:BB:CC:A6:34:B1",
+                    "192.0.2.212": "AA:BB:CC:A6:34:B0",
+                    "192.0.2.213": "AA:BB:CC:A6:34:B1",
                 },
             },
         )
     }
 
-    devices = gui._auto_scan_devices_from_candidates(["192.168.0.213"], hits, set())
+    devices = gui._auto_scan_devices_from_candidates(["192.0.2.213"], hits, set())
 
     assert devices == [
         {
-            "ip": "192.168.0.212",
+            "ip": "192.0.2.212",
             "sn": "EC752JJ38251DFD8",
             "mac": "AA:BB:CC:A6:34:B0",
-            "reserved_ips": ["192.168.0.212", "192.168.0.213"],
+            "reserved_ips": ["192.0.2.212", "192.0.2.213"],
             "interface": "eth0",
         }
     ]
@@ -1089,44 +1089,44 @@ def test_auto_scan_can_choose_4800plus_eth0_from_pair_when_only_eth1_replied(tmp
 def test_auto_scan_prefers_4800plus_eth0_over_explicit_10g_marker(tmp_path) -> None:
     gui = _gui_for_output(tmp_path)
     hits = {
-        "192.168.0.104": SimpleNamespace(
-            address="192.168.0.104",
+        "192.0.2.104": SimpleNamespace(
+            address="192.0.2.104",
             sn="EC752JJ232517D76",
             mac="AA:BB:CC:76:CB:6D",
             data={"interface": "eth0", "model": "DXP4800 Plus"},
         ),
-        "192.168.0.105": SimpleNamespace(
-            address="192.168.0.105",
+        "192.0.2.105": SimpleNamespace(
+            address="192.0.2.105",
             sn="EC752JJ232517D76",
             mac="AA:BB:CC:76:CB:6E",
             data={"interface": "eth1", "model": "DXP4800 Plus", "link": "10000 Mbps"},
         ),
     }
 
-    devices = gui._auto_scan_devices_from_candidates(["192.168.0.104", "192.168.0.105"], hits, set())
+    devices = gui._auto_scan_devices_from_candidates(["192.0.2.104", "192.0.2.105"], hits, set())
 
-    assert devices[0]["ip"] == "192.168.0.104"
+    assert devices[0]["ip"] == "192.0.2.104"
 
 
 def test_auto_scan_pair_blocks_duplicate_when_known_alias_not_candidate(tmp_path) -> None:
     gui = _gui_for_output(tmp_path)
     hits = {
-        "192.168.0.105": SimpleNamespace(
-            address="192.168.0.105",
+        "192.0.2.105": SimpleNamespace(
+            address="192.0.2.105",
             sn="EC752JJ232517D76",
             mac="AA:BB:CC:76:CB:6E",
             data={
                 "interface": "eth1",
                 "model": "DXP4800 Plus",
                 "pair": {
-                    "192.168.0.104": "AA:BB:CC:76:CB:6D",
-                    "192.168.0.105": "AA:BB:CC:76:CB:6E",
+                    "192.0.2.104": "AA:BB:CC:76:CB:6D",
+                    "192.0.2.105": "AA:BB:CC:76:CB:6E",
                 },
             },
         )
     }
 
-    devices = gui._auto_scan_devices_from_candidates(["192.168.0.105"], hits, {"192.168.0.104"})
+    devices = gui._auto_scan_devices_from_candidates(["192.0.2.105"], hits, {"192.0.2.104"})
 
     assert devices == []
 
@@ -1134,7 +1134,7 @@ def test_auto_scan_pair_blocks_duplicate_when_known_alias_not_candidate(tmp_path
 def test_auto_scan_skips_auto_placeholder_without_visible_sn(tmp_path) -> None:
     gui = _gui_for_output(tmp_path)
 
-    devices = gui._auto_scan_devices_from_candidates(["192.168.0.104"], {}, set())
+    devices = gui._auto_scan_devices_from_candidates(["192.0.2.104"], {}, set())
 
     assert devices == []
 
@@ -1150,15 +1150,15 @@ def test_auto_scan_skips_link_local_candidate_even_if_worker_returns_it(tmp_path
 def test_auto_scan_defers_4800plus_eth1_without_eth0_alias(tmp_path) -> None:
     gui = _gui_for_output(tmp_path)
     hits = {
-        "192.168.0.118": SimpleNamespace(
-            address="192.168.0.118",
+        "192.0.2.118": SimpleNamespace(
+            address="192.0.2.118",
             sn="EC752JJ3825155FE",
             mac="AA:BB:CC:A6:83:B7",
             data={"interface": "eth1", "model": "DXP4800 Plus"},
         )
     }
 
-    devices = gui._auto_scan_devices_from_candidates(["192.168.0.117", "192.168.0.118"], hits, set())
+    devices = gui._auto_scan_devices_from_candidates(["192.0.2.117", "192.0.2.118"], hits, set())
 
     assert devices == []
 
@@ -1167,7 +1167,7 @@ def test_auto_scan_rejects_link_local_ip_even_before_queue(tmp_path) -> None:
     gui = _gui_for_output(tmp_path)
     network = gui._auto_scan_network("192.168.0.0/24")
 
-    assert gui._auto_scan_ip_allowed("192.168.0.213", network)
+    assert gui._auto_scan_ip_allowed("192.0.2.213", network)
     assert not gui._auto_scan_ip_allowed("169.254.249.211", network)
 
 
@@ -1177,12 +1177,12 @@ def test_reserved_alias_ip_blocks_future_auto_scan_duplicate(tmp_path) -> None:
         "task-1": DeviceTask(
             task_id="task-1",
             sn="AUTOC0A800DE",
-            requested_ip="192.168.0.222",
-            reserved_ips={"192.168.0.222", "192.168.0.223"},
+            requested_ip="192.0.2.222",
+            reserved_ips={"192.0.2.222", "192.0.2.223"},
             mode="setup",
             cleanup_before_finish=True,
             factory_reset_before_finish=True,
         )
     }
 
-    assert gui._has_known_ip("192.168.0.223")
+    assert gui._has_known_ip("192.0.2.223")

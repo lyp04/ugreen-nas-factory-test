@@ -1,7 +1,7 @@
 """Dump interactive DOM elements of the NAS UI to JSON for selector analysis.
 
 Interactive loop mode:
-    python scripts/inspect_dom.py --url http://192.168.0.152:9999 --out-dir output/wizard
+    python scripts/inspect_dom.py --url http://192.0.2.152:9999 --out-dir output/wizard
 
     A browser opens. Each time you press Enter in the terminal, the current DOM
     is captured as <out-dir>/step_NN.json + .html + .png.

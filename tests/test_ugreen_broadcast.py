@@ -12,13 +12,13 @@ def test_build_query_packet_matches_official_format() -> None:
 def test_decode_response_uses_remote_ip_and_pair_mac() -> None:
     payload = (
         b'{"error_code":0,"data":{"sn":"HB670EE02251AF1F2",'
-        b'"pair":{"192.168.0.103":"AA:BB:CC:DD:EE:FF"}}}'
+        b'"pair":{"192.0.2.103":"AA:BB:CC:DD:EE:FF"}}}'
     )
 
-    hit = ugreen_broadcast._decode_response(payload, ("192.168.0.103", 60000))
+    hit = ugreen_broadcast._decode_response(payload, ("192.0.2.103", 60000))
 
     assert hit is not None
-    assert hit.address == "192.168.0.103"
+    assert hit.address == "192.0.2.103"
     assert hit.sn == "HB670EE02251AF1F2"
     assert hit.mac == "AA:BB:CC:DD:EE:FF"
-    assert hit.data["ip"] == "192.168.0.103"
+    assert hit.data["ip"] == "192.0.2.103"

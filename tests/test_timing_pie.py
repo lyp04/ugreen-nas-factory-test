@@ -32,7 +32,7 @@ def _total(logs: list[str]) -> int:
 
 # 13:27:42 → 14:00:05 的一次真实运行，约 32 分钟。
 _RUN = [f"13:{m:02d}:00 | INFO    | Capturing page" for m in range(28, 60, 2)] + [
-    "14:00:05 | INFO    | NAS 192.168.0.186: device lock released"
+    "14:00:05 | INFO    | NAS 192.0.2.186: device lock released"
 ]
 _RUN_SECONDS = _total(_RUN)
 

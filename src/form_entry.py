@@ -268,7 +268,7 @@ def sync_autoupdate_repo(project_root: Path | None = None) -> dict[str, Any]:
     Mechanics: fetch, then if the local branch is strictly behind upstream,
     ``git reset --hard <upstream>``. The reset is intentional — the only
     tracked file the factory machine touches between startups is
-    ``materials.json`` (re-written wholesale by the 内部系统 refresh that runs
+    ``materials.json`` (re-written wholesale by the internal-system refresh that runs
     right after this function), so blowing away its uncommitted edits is
     cheaper than carrying a merge conflict forward. v0.1.14 used
     ``merge --ff-only --autostash`` instead, which left the work tree in
@@ -453,7 +453,7 @@ def accounts_path(project_root: Path | None = None) -> Path:
 
 
 def get_login_captcha(base: str | None = None) -> dict[str, str]:
-    # The bridge does not authenticate against 内部系统 directly. A tiny transparent
+    # The bridge does not authenticate against the internal business system directly. A tiny transparent
     # PNG keeps the existing GUI dialog usable for registering a display name.
     png = (
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAEElEQVR42mP8"

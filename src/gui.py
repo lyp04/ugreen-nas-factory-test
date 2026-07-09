@@ -451,7 +451,7 @@ UI_TEXT = {
         "materials_summary_missing": "缺料 {count} 项",
         "materials_mode_fresh_full_retry": "每次重取物料，全选后反选缺料",
         "materials_status_resubmit": "已录表",
-        "materials_summary_resubmit": "重复提交·物料以首次录表/内部系统 为准",
+        "materials_summary_resubmit": "重复提交·物料以首次录表/内部系统为准",
         "materials_status_excluded": "不扣",
         "materials_toggle_add_title": "加入扣料列表",
         "materials_toggle_add_body": "确定要将物料「{name}」(编码 {code}) 加入扣料列表？",
@@ -568,7 +568,7 @@ UI_TEXT = {
         "materials_summary_missing": "{count} out of stock",
         "materials_mode_fresh_full_retry": "Fresh material list, submit all then remove out-of-stock items",
         "materials_status_resubmit": "Already recorded",
-        "materials_summary_resubmit": "Duplicate submission · material detail per first entry / 内部系统",
+        "materials_summary_resubmit": "Duplicate submission · material detail per first entry / internal system",
         "materials_status_excluded": "Not deducted",
         "materials_toggle_add_title": "Add to deduction list",
         "materials_toggle_add_body": "Add material \"{name}\" (code {code}) to the deduction list?",
@@ -685,7 +685,7 @@ UI_TEXT = {
         "materials_summary_missing": "{count} sin stock",
         "materials_mode_fresh_full_retry": "Lista actualizada, enviar todo y retirar faltantes",
         "materials_status_resubmit": "Ya registrado",
-        "materials_summary_resubmit": "Reenvío duplicado · detalle según primer registro / 内部系统",
+        "materials_summary_resubmit": "Reenvío duplicado · detalle según primer registro / sistema interno",
         "materials_status_excluded": "No descontado",
         "materials_toggle_add_title": "Agregar a deducción",
         "materials_toggle_add_body": "¿Agregar el material «{name}» (código {code}) a la lista de deducción?",
@@ -2833,7 +2833,7 @@ class FactoryTestGUI:
         # deduction detail — the real deduction happened on the first submission.
         # Without this guard every item renders as "已扣", wrongly showing a unit
         # that was actually short on stock as fully deducted. Fall back to a
-        # neutral "recorded" state and point the operator to 内部系统 instead.
+        # neutral "recorded" state and point the operator to the internal business system instead.
         resubmit_no_detail = form_status == "already_submitted" and not removed_codes
 
         self._clear_materials_tab()
@@ -4245,7 +4245,7 @@ class FactoryTestGUI:
         def worker() -> None:
             # Fast-forward the autoupdate sibling repo first so that any
             # persistent config edits committed there (e.g. selected_material_codes)
-            # land before the 内部系统 refresh that builds on top of them. Silent
+            # land before the internal-system refresh that builds on top of them. Silent
             # no-op when autoupdate_root isn't a git work tree.
             sync_status = form_entry.sync_autoupdate_repo(self.project_root)
             if sync_status.get("status") == "updated":

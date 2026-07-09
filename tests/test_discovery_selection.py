@@ -59,7 +59,7 @@ def test_pool_creation_timeout_uses_pool_failure_stage() -> None:
 
 
 def test_ugos_not_ready_stage() -> None:
-    error = RuntimeError("UGOS at 192.168.0.151:9999 did not become ready within 90s")
+    error = RuntimeError("UGOS at 192.0.2.151:9999 did not become ready within 90s")
     assert cli.failure_stage_for_error(error) == "设备上线超时（90s）"
 
 
@@ -100,17 +100,17 @@ def test_select_candidate_reserves_visible_sn_aliases(monkeypatch) -> None:
         cli,
         "_probe_candidate_identity_texts",
         lambda candidates, port, browser_cfg: {
-            "192.168.0.168": "登录 DXP4800-7046",
-            "192.168.0.169": "登录 DXP4800-7046",
-            "192.168.0.170": "登录 DXP4800-DFFD",
+            "192.0.2.168": "登录 DXP4800-7046",
+            "192.0.2.169": "登录 DXP4800-7046",
+            "192.0.2.170": "登录 DXP4800-DFFD",
         },
     )
 
-    selection = cli._select_candidate_for_sn("7046", ["192.168.0.168", "192.168.0.169", "192.168.0.170"], 9999, {})
+    selection = cli._select_candidate_for_sn("7046", ["192.0.2.168", "192.0.2.169", "192.0.2.170"], 9999, {})
 
     assert selection is not None
-    assert selection.ip == "192.168.0.168"
-    assert selection.reserved_ips == frozenset({"192.168.0.168", "192.168.0.169"})
+    assert selection.ip == "192.0.2.168"
+    assert selection.reserved_ips == frozenset({"192.0.2.168", "192.0.2.169"})
 
 
 def test_select_candidate_prefers_4800plus_eth0_when_visible_sn_matches(monkeypatch) -> None:
@@ -118,17 +118,17 @@ def test_select_candidate_prefers_4800plus_eth0_when_visible_sn_matches(monkeypa
         cli,
         "_probe_candidate_identity_texts",
         lambda candidates, port, browser_cfg: {
-            "192.168.0.107": (
+            "192.0.2.107": (
                 "UGREEN broadcast\n"
-                "IP=192.168.0.107\n"
+                "IP=192.0.2.107\n"
                 "SN=EC752JJ16241A92E\n"
                 "MAC=AA:BB:CC:0C:73:FE\n"
                 "interface=eth1\n"
                 "model=DXP4800 Plus"
             ),
-            "192.168.0.108": (
+            "192.0.2.108": (
                 "UGREEN broadcast\n"
-                "IP=192.168.0.108\n"
+                "IP=192.0.2.108\n"
                 "SN=EC752JJ16241A92E\n"
                 "MAC=AA:BB:CC:0C:73:FD\n"
                 "interface=eth0\n"
@@ -137,11 +137,11 @@ def test_select_candidate_prefers_4800plus_eth0_when_visible_sn_matches(monkeypa
         },
     )
 
-    selection = cli._select_candidate_for_sn("A92E", ["192.168.0.107", "192.168.0.108"], 9999, {})
+    selection = cli._select_candidate_for_sn("A92E", ["192.0.2.107", "192.0.2.108"], 9999, {})
 
     assert selection is not None
-    assert selection.ip == "192.168.0.108"
-    assert selection.reserved_ips == frozenset({"192.168.0.107", "192.168.0.108"})
+    assert selection.ip == "192.0.2.108"
+    assert selection.reserved_ips == frozenset({"192.0.2.107", "192.0.2.108"})
 
 
 def test_auto_placeholder_can_upgrade_to_real_sn(tmp_path) -> None:
@@ -193,11 +193,11 @@ def test_select_candidate_learns_full_ec_sn(monkeypatch) -> None:
         cli,
         "_probe_candidate_identity_texts",
         lambda candidates, port, browser_cfg: {
-            "192.168.0.168": "序列号：EC4800ABCDEF7046",
+            "192.0.2.168": "序列号：EC4800ABCDEF7046",
         },
     )
 
-    selection = cli._select_candidate_for_sn("7046", ["192.168.0.168"], 9999, {})
+    selection = cli._select_candidate_for_sn("7046", ["192.0.2.168"], 9999, {})
 
     assert selection is not None
     assert selection.full_sn == "EC4800ABCDEF7046"
@@ -208,14 +208,14 @@ def test_select_candidate_learns_full_sn_from_ugreen_broadcast(monkeypatch) -> N
         cli,
         "_probe_candidate_identity_texts",
         lambda candidates, port, browser_cfg: {
-            "192.168.0.103": "UGREEN broadcast\nIP=192.168.0.103\nSN=HB670EE02251AF1F2\nMAC=AA:BB:CC:DD:EE:FF",
+            "192.0.2.103": "UGREEN broadcast\nIP=192.0.2.103\nSN=HB670EE02251AF1F2\nMAC=AA:BB:CC:DD:EE:FF",
         },
     )
 
-    selection = cli._select_candidate_for_sn("F1F2", ["192.168.0.103"], 9999, {})
+    selection = cli._select_candidate_for_sn("F1F2", ["192.0.2.103"], 9999, {})
 
     assert selection is not None
-    assert selection.ip == "192.168.0.103"
+    assert selection.ip == "192.0.2.103"
     assert selection.full_sn == "HB670EE02251AF1F2"
 
 
@@ -224,16 +224,16 @@ def test_select_candidate_rejects_uninitialized_candidate_with_mismatched_broadc
         cli,
         "_probe_candidate_identity_texts",
         lambda candidates, port, browser_cfg: {
-            "192.168.0.211": (
+            "192.0.2.211": (
                 "UGREEN broadcast\n"
-                "IP=192.168.0.211\n"
+                "IP=192.0.2.211\n"
                 "SN=EC752JJ1725110A3\n"
                 "绿联云 未初始化 欢迎使用绿联云存储"
             ),
         },
     )
 
-    assert cli._select_candidate_for_sn("E4D3", ["192.168.0.211"], 9999, {}) is None
+    assert cli._select_candidate_for_sn("E4D3", ["192.0.2.211"], 9999, {}) is None
 
 
 def test_select_candidate_matches_truncated_4800_plus_label(monkeypatch) -> None:
@@ -241,14 +241,14 @@ def test_select_candidate_matches_truncated_4800_plus_label(monkeypatch) -> None
         cli,
         "_probe_candidate_identity_texts",
         lambda candidates, port, browser_cfg: {
-            "192.168.0.168": "登录 DXP4800 Plus-704",
+            "192.0.2.168": "登录 DXP4800 Plus-704",
         },
     )
 
-    selection = cli._select_candidate_for_sn("7046", ["192.168.0.168"], 9999, {})
+    selection = cli._select_candidate_for_sn("7046", ["192.0.2.168"], 9999, {})
 
     assert selection is not None
-    assert selection.ip == "192.168.0.168"
+    assert selection.ip == "192.0.2.168"
 
 
 def test_select_candidate_reserves_neighbor_setup_port_without_visible_sn(monkeypatch) -> None:
@@ -256,16 +256,16 @@ def test_select_candidate_reserves_neighbor_setup_port_without_visible_sn(monkey
         cli,
         "_probe_candidate_identity_texts",
         lambda candidates, port, browser_cfg: {
-            "192.168.0.168": "绿联云 命名您的绿联云 序列号： 设备名 下一步",
-            "192.168.0.169": "绿联云 命名您的绿联云 序列号：EC752JJ172517046 设备名 下一步",
+            "192.0.2.168": "绿联云 命名您的绿联云 序列号： 设备名 下一步",
+            "192.0.2.169": "绿联云 命名您的绿联云 序列号：EC752JJ172517046 设备名 下一步",
         },
     )
 
-    selection = cli._select_candidate_for_sn("7046", ["192.168.0.168", "192.168.0.169"], 9999, {})
+    selection = cli._select_candidate_for_sn("7046", ["192.0.2.168", "192.0.2.169"], 9999, {})
 
     assert selection is not None
-    assert selection.ip == "192.168.0.169"
-    assert selection.reserved_ips == frozenset({"192.168.0.168", "192.168.0.169"})
+    assert selection.ip == "192.0.2.169"
+    assert selection.reserved_ips == frozenset({"192.0.2.168", "192.0.2.169"})
     assert selection.full_sn == "EC752JJ172517046"
 
 
@@ -275,16 +275,16 @@ def test_select_candidate_groups_consecutive_uninitialized_ips(monkeypatch) -> N
         cli,
         "_probe_candidate_identity_texts",
         lambda candidates, port, browser_cfg: {
-            "192.168.0.168": uninitialized,
-            "192.168.0.169": uninitialized,
+            "192.0.2.168": uninitialized,
+            "192.0.2.169": uninitialized,
         },
     )
 
-    selection = cli._select_candidate_for_sn("7046", ["192.168.0.168", "192.168.0.169"], 9999, {})
+    selection = cli._select_candidate_for_sn("7046", ["192.0.2.168", "192.0.2.169"], 9999, {})
 
     assert selection is not None
-    assert selection.ip == "192.168.0.168"
-    assert selection.reserved_ips == frozenset({"192.168.0.168", "192.168.0.169"})
+    assert selection.ip == "192.0.2.168"
+    assert selection.reserved_ips == frozenset({"192.0.2.168", "192.0.2.169"})
 
 
 def test_select_candidate_waits_while_service_is_starting(monkeypatch) -> None:
@@ -292,11 +292,11 @@ def test_select_candidate_waits_while_service_is_starting(monkeypatch) -> None:
         cli,
         "_probe_candidate_identity_texts",
         lambda candidates, port, browser_cfg: {
-            "192.168.0.169": "绿联云 服务启动中 您可以尝试手动刷新页面 刷新",
+            "192.0.2.169": "绿联云 服务启动中 您可以尝试手动刷新页面 刷新",
         },
     )
 
-    assert cli._select_candidate_for_sn("7046", ["192.168.0.169"], 9999, {}) is None
+    assert cli._select_candidate_for_sn("7046", ["192.0.2.169"], 9999, {}) is None
 
 
 def test_select_candidate_waits_when_multiple_uninitialized_groups(monkeypatch) -> None:
@@ -305,10 +305,10 @@ def test_select_candidate_waits_when_multiple_uninitialized_groups(monkeypatch) 
         cli,
         "_probe_candidate_identity_texts",
         lambda candidates, port, browser_cfg: {
-            "192.168.0.168": uninitialized,
-            "192.168.0.169": uninitialized,
-            "192.168.0.180": uninitialized,
+            "192.0.2.168": uninitialized,
+            "192.0.2.169": uninitialized,
+            "192.0.2.180": uninitialized,
         },
     )
 
-    assert cli._select_candidate_for_sn("7046", ["192.168.0.168", "192.168.0.169", "192.168.0.180"], 9999, {}) is None
+    assert cli._select_candidate_for_sn("7046", ["192.0.2.168", "192.0.2.169", "192.0.2.180"], 9999, {}) is None

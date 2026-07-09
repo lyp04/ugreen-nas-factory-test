@@ -28,7 +28,7 @@ def test_build_timing_slices_tolerates_small_out_of_order_log_lines() -> None:
     logs = [
         "10:56:28 | INFO    | SN HB670EE022517E15 已加入队列\n",
         "10:56:30 | INFO    | 浏览器已在后台启动，可按“显示浏览器”查看\n",
-        "10:56:29 | INFO    | Setup wizard -> http://192.168.0.239:9999\n",
+        "10:56:29 | INFO    | Setup wizard -> http://192.0.2.239:9999\n",
         "10:57:10 | INFO    | [Page 0] welcome + agreements\n",
         "10:59:16 | INFO    | Setup wizard complete; desktop reached\n",
         "10:59:16 | INFO    | System update: existing update/reboot screen detected; waiting before provisioning\n",

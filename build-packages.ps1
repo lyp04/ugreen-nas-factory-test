@@ -102,6 +102,10 @@ if (Test-Path ".\config\config.yml") {
     Write-Host "   ! 本地没有 config\config.yml，改带 config.example.yml（记得填真实凭据）" -ForegroundColor Yellow
     Copy-Item -Force ".\config\config.example.yml" ".\dist-full\config\config.yml"
 }
+# B 便携化：把 output_dir 强制改成相对（相对 exe 目录）——整包复制走即用，不管源 config 写的是绝对路径。
+$cfgB = ".\dist-full\config\config.yml"
+$cfgText = (Get-Content $cfgB -Raw) -replace '(?m)^output_dir:.*$', 'output_dir: "./screenshot"'
+[System.IO.File]::WriteAllText((Resolve-Path $cfgB), $cfgText)
 # 打印专有数据 + 现有模版文件：现有的直接带进 B（A 公开包不带）。
 # labels.yml = 真实 P/N/EAN 对照表（label_data_file 指向它）；config/labels/ = 现有 .ddl/.btw 等模版文件（若有）。
 if (Test-Path ".\config\labels.yml") { Copy-Item -Force ".\config\labels.yml" ".\dist-full\config\labels.yml" }

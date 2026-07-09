@@ -32,6 +32,7 @@ Your module is a Python package the app calls as a subprocess, from the module r
 |---|---|---|
 | `submit-report --payload <file.json>` | after a unit passes (and, separately, to pre-seed a previous step) | 300 s |
 | `forms refresh [--account <name>]` | on app startup, to pull the latest forms + materials | 180 s |
+| `login-ui` | when the operator clicks the app's 登录 (login) button | until the window closes |
 
 `submit-report` receives a payload file the app first writes to `state/bridge_requests/<timestamp>_<sn>.json`. Dispatch on the payload's `type`:
 
@@ -39,6 +40,8 @@ Your module is a Python package the app calls as a subprocess, from the module r
 - `type: "seed_previous_step"` — `{ "sn", "model" }`. Optional; pre-seed the previous-step lookup for that unit.
 
 `forms refresh` should re-pull your form catalog and **rewrite `config/materials.json` wholesale** (the app treats that file as backend-owned and blows away local edits on the next sync).
+
+`login-ui` should pop up **your own login window** — whatever your company's auth looks like; the app knows nothing about it. Authenticate the operator, write the signed-in account (with its token) into `state/accounts.local.json`, mark it active, and return when the window closes. The app then refreshes its submitter dropdown from that file. This is what the app's 登录 button does: it only asks your module to *show a login window* — you decide what that means (a captcha login, SSO, a pasted token, anything). No credential or backend detail ever lives in the app.
 
 ### Files your module provides
 
@@ -76,7 +79,18 @@ The app reads these to build the form and the 物料 (materials) tab — put the
   }
   ```
 
-- **`state/accounts.local.json`** (optional) — `{ "accounts": [ { "name": "...", "account": "..." } ] }`
+- **`state/accounts.local.json`** — the submitter list the app shows in its dropdown, and where `login-ui` writes the signed-in account:
+
+  ```json
+  {
+    "active": "<name>",
+    "accounts": [
+      { "name": "<display name>", "account": "<login id>", "token": "<your backend token>", "base": "<your API base>", "...": "..." }
+    ]
+  }
+  ```
+
+  The app only reads `active` and each account's `name`/`account` (to fill the dropdown and pass the chosen `--account <name>` to `submit-report` / `forms refresh`). Everything else — `token`, `base`, and any fields you add — is **yours**; your module reads them back when it authenticates. The app never touches your backend.
 
 ### The `submit_report` payload
 
@@ -138,6 +152,7 @@ App 按下面顺序解析模块目录,且只有目录里存在 `automation/runne
 |---|---|---|
 | `submit-report --payload <file.json>` | 一台测试通过后(以及单独预置上一工步) | 300 秒 |
 | `forms refresh [--account <name>]` | App 启动时,拉最新表单 + 物料 | 180 秒 |
+| `login-ui` | 操作员点 App 的「登录」按钮时 | 直到窗口关闭 |
 
 `submit-report` 拿到的 payload 文件,App 会先写到 `state/bridge_requests/<时间戳>_<sn>.json`。按 payload 的 `type` 分派:
 
@@ -146,9 +161,11 @@ App 按下面顺序解析模块目录,且只有目录里存在 `automation/runne
 
 `forms refresh` 应重新拉表单目录,并**整个重写 `config/materials.json`**(App 把它当后端所有,下次同步会清掉本地改动)。
 
+`login-ui` 应弹出**你自己的登录窗口**——你公司用什么认证都行,App 完全不知道。认证操作员后,把登录成功的账号(含 token)写进 `state/accounts.local.json` 并设为 active,窗口关闭后返回;App 随后从该文件刷新提交人下拉框。这就是 App「登录」按钮的全部含义:它只让你的模块*弹个登录窗*,窗里做什么(验证码登录 / SSO / 手贴 token …)由你决定。**任何凭据、后端细节都不在 App 里。**
+
 ### 模块要提供的文件
 
-App 读这些来搭表单和「物料」标签页,放在模块的 `config/` 下:`config/forms.json`(机型→form_id、每个 form 的字段/上传/物料分组/等级等)、`config/materials.json`(每个 form 的物料清单 + 选中扣料的编码/分组)、以及可选的 `state/accounts.local.json`(账号列表)。结构见上面英文小节。
+App 读这些来搭表单和「物料」标签页,放在模块的 `config/` 下:`config/forms.json`(机型→form_id、每个 form 的字段/上传/物料分组/等级等)、`config/materials.json`(每个 form 的物料清单 + 选中扣料的编码/分组)、以及 `state/accounts.local.json`(提交人列表,也是 `login-ui` 写登录账号的地方)。**App 只读 `active` 和每个账号的 `name`/`account`(填下拉框、把选中的 `--account <name>` 传给 submit-report/forms refresh);`token`/`base` 等其余字段是你模块自己的,App 从不碰你的后端。** 结构见上面英文小节。
 
 ### `submit_report` payload
 

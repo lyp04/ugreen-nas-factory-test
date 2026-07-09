@@ -4317,8 +4317,8 @@ class FactoryTestGUI:
         self.status_var.set(f"{datetime.now().strftime('%H:%M:%S')}  已删除录表账号：{account_name}")
 
     def _on_add_account(self) -> None:
-        # 「登录」按钮：调 ugreen-nas-autoupdate 弹出它自己的 内部系统 登录窗口（账号/密码/验证码都在模块里）。
-        # 登录成功后模块把 token 写进 accounts.local.json；窗口关闭后这里刷新账号列表并选中该账号。
+        # 「登录」按钮：调上传器模块弹出它自己的登录窗口（凭据/验证码/后端都在模块里，app 不关心）。
+        # 登录成功后模块把账号（含 token）写进 accounts.local.json；窗口关闭后这里刷新账号列表并选中。
         if not self.form_entry_enabled:
             return
         self.status_var.set(f"{datetime.now().strftime('%H:%M:%S')}  正在打开录表登录窗口……")

@@ -367,8 +367,9 @@ def refresh_form_materials(project_root: Path | None = None, account_name: str |
 
 
 def run_login_ui(project_root: Path | None = None) -> None:
-    """点「登录」时调 ugreen-nas-autoupdate 弹出 内部系统 登录窗口；阻塞到窗口关闭（在后台线程里调用）。
-    登录逻辑/验证码全在模块的 login_ui，app 只负责把窗口叫出来、登录完刷新账号。"""
+    """点「登录」时调上传器模块弹出它自己的登录窗口；阻塞到窗口关闭（在后台线程里调用）。
+    登录逻辑 / 凭据 / 验证码等全在模块的 login-ui 里，app 只负责把窗口叫出来、登录完刷新账号列表。
+    模块接什么后端由模块自己决定，app 不关心。"""
     root = autoupdate_root()
     python = os.environ.get("UGREEN_AUTOUPDATE_PYTHON") or sys.executable
     if getattr(sys, "frozen", False):

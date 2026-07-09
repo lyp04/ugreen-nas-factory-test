@@ -245,6 +245,7 @@ def _click_update_action(frame, *, include_download: bool = True) -> str | None:
     selector_templates = (
         'button:visible:has-text("{text}")',
         '.ivu-btn:visible:has-text("{text}")',
+        '.arco-btn:visible:has-text("{text}")',
         '[role="button"]:visible:has-text("{text}")',
         'a:visible:has-text("{text}")',
     )
@@ -644,6 +645,7 @@ def _update_action_visible(frame) -> bool:
         for selector in (
             f'button:visible:has-text("{text}")',
             f'.ivu-btn:visible:has-text("{text}")',
+            f'.arco-btn:visible:has-text("{text}")',
             f'[role="button"]:visible:has-text("{text}")',
             f'a:visible:has-text("{text}")',
         ):

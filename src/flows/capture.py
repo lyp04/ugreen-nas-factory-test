@@ -1587,10 +1587,7 @@ def _system_update_key_values(frame: "Frame") -> dict[str, str]:
 def _storage_pool_key_values(frame: "Frame") -> dict[str, str]:
     items = frame.locator(".storage-itemInfo")
     count = items.count()
-    if count == 0:
-        return {}
-
-    values: dict[str, str] = {}
+    summaries: list[str] = []
     for index in range(count):
         locator = items.nth(index)
         try:
@@ -1599,7 +1596,18 @@ def _storage_pool_key_values(frame: "Frame") -> dict[str, str]:
             summary = " ".join(locator.inner_text(timeout=1_000).split())
         except Exception:
             continue
+        if summary:
+            summaries.append(summary)
 
+    if not summaries:
+        # Arco 重构后的存储管理页没有 .storage-itemInfo 卡片；退回整页文本按
+        # 「存储池N」锚点切段（与 provision 的池匹配同一套逻辑）。
+        from .provision import _pool_summaries_from_body_text
+
+        summaries = _pool_summaries_from_body_text(frame)
+
+    values: dict[str, str] = {}
+    for summary in summaries:
         disks = set(POOL_DISK_TOKEN_RE.findall(summary))
         if not disks:
             continue

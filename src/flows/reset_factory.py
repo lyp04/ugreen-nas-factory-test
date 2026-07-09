@@ -63,7 +63,12 @@ def run(page: "Page", selectors: dict, admin: dict) -> None:
     acknowledge = frame.locator(acknowledge_checkbox).first
     expect(acknowledge).to_be_attached(timeout=FRAME_WAIT_MS)
     if not acknowledge.is_checked():
-        acknowledge.check(force=True)
+        try:
+            acknowledge.check(force=True, timeout=3_000)
+        except Exception:
+            # Arco 自绘勾选框把原生 input 移出视口；派发 DOM click 兜底。
+            acknowledge.evaluate("el => el.click()")
+        expect(acknowledge).to_be_checked(timeout=FRAME_WAIT_MS)
 
     first_confirm_button = frame.locator(first_confirm).first
     expect(first_confirm_button).to_be_enabled(timeout=FRAME_WAIT_MS)

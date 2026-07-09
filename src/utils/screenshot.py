@@ -120,3 +120,15 @@ def capture_failure(page: "Page", sn: str, step: str, dest_dir: Path) -> None:
         logger.error(f"Saved failure HTML: {html.name}")
     except Exception as exc:
         logger.error(f"Failed to save failure HTML for step={step}: {exc}")
+    # 顶层页面只包含桌面壳，真正出错的应用内容都在 iframe 文档里；把每个应用
+    # iframe 的 DOM 一并留档，失败现场才可独立定位（否则只能猜 iframe 内部状态）。
+    for index, frame in enumerate(page.frames):
+        if frame is page.main_frame:
+            continue
+        name = "".join(ch if ch.isalnum() else "_" for ch in (frame.name or f"frame{index}"))[:40] or f"frame{index}"
+        frame_html = dest_dir / f"{sn}_FAIL_{step}_{ts}_iframe_{name}.html"
+        try:
+            frame_html.write_text(frame.content(), encoding="utf-8")
+            logger.error(f"Saved failure iframe HTML: {frame_html.name}")
+        except Exception as exc:
+            logger.debug(f"Skipping iframe dump for {frame.name!r} at step={step}: {exc}")

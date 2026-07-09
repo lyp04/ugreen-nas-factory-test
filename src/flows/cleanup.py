@@ -50,7 +50,23 @@ def _list_pool_ids(frame: "Frame", cleanup: dict) -> list[str]:
     raw_ids = frame.locator(selector).evaluate_all("(els) => els.map((el) => el.id)")
     pool_ids = [pool_id for pool_id in raw_ids if isinstance(pool_id, str) and pool_id]
     pool_ids.sort(key=_pool_sort_key)
+    if not pool_ids and _pools_visible_in_text(frame):
+        # 页面上明明有「存储池N」却按容器 id 找不到 —— 多半是 UI 又改了池卡片
+        # DOM。宁可报错留现场，也不能静默当"无池"跳过：跳过会让池带进下一台
+        # 的流程（出厂还原保留硬盘数据，池元数据随盘存活）。
+        raise CleanupError(
+            "Storage pools are visible on the page but none matched "
+            f"cleanup.pool_container ({selector!r}); the pool-card DOM likely changed"
+        )
     return pool_ids
+
+
+def _pools_visible_in_text(frame: "Frame") -> bool:
+    try:
+        text = " ".join(frame.locator("body").inner_text(timeout=2_000).split())
+    except Exception:
+        return False
+    return bool(re.search(r"存储池\d+", text))
 
 
 def _delete_pool(page: "Page", frame: "Frame", cleanup: dict, admin: dict, pool_id: str) -> None:

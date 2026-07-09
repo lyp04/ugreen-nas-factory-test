@@ -12,17 +12,23 @@ if TYPE_CHECKING:
 SHORT_GUIDE_WAIT_MS = 700
 SHORT_UI_WAIT_MS = 400
 STORAGE_GUIDE_WAIT_MS = 4_000
-STORAGE_GUIDE_MODAL_SELECTOR = "section.storage-guide-modal, section.ivu-modal-default.storage-guide-modal"
-STORAGE_GUIDE_MASK_SELECTOR = "#ugreen0, .basic-mask.ivu-modal-mask"
+STORAGE_GUIDE_MODAL_SELECTOR = (
+    "section.storage-guide-modal, section.ivu-modal-default.storage-guide-modal, "
+    ".arco-modal-container.storage-guide-modal"
+)
+STORAGE_GUIDE_MASK_SELECTOR = "#ugreen0, .basic-mask.ivu-modal-mask, .arco-modal-container.storage-guide-modal .arco-modal-mask"
 STORAGE_GUIDE_CLOSE_SELECTORS = [
     "section.storage-guide-modal .action-bar .icon-close.pro-public.pro-icon-func-close",
     "section.ivu-modal-default.storage-guide-modal .action-bar .icon-close.pro-public.pro-icon-func-close",
     "section.storage-guide-modal .icon-close.pro-public.pro-icon-func-close",
     "section.ivu-modal-default.storage-guide-modal .icon-close.pro-public.pro-icon-func-close",
+    ".storage-guide-modal .action-bar .icon-close",
 ]
 STORAGE_GUIDE_EXIT_SELECTORS = [
     'section.ivu-modal-default .submit-btn.ivu-btn-primary:has-text("退出")',
     ".quit-modal .submit-btn.ivu-btn-primary",
+    # Arco 版关闭引导后会追问「确定要退出吗？」，必须点「退出」才真正收起。
+    '.arco-modal:has-text("确定要退出吗") button:has-text("退出")',
 ]
 
 
@@ -163,7 +169,7 @@ def _remove_tutorial_artifacts(frame: "Frame") -> int:
         frame.evaluate(
             """() => {
                 let count = 0;
-                for (const selector of ['div.mask', 'div.stepElem', '[data-v-d10fc649]']) {
+                for (const selector of ['div.mask', 'div.stepElem', '[data-v-d10fc649]', '#tourMain', '.tour-main']) {
                     for (const el of Array.from(document.querySelectorAll(selector))) {
                         const rect = el.getBoundingClientRect();
                         const style = window.getComputedStyle(el);

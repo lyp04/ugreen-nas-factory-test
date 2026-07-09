@@ -151,7 +151,12 @@ def _ensure_smb_enabled(page: "Page", desktop: dict, nav: dict, provision: dict)
         logger.info("  SMB service already enabled")
         return
 
-    checkbox.check(force=True)
+    try:
+        checkbox.check(force=True, timeout=3_000)
+    except Exception:
+        # Arco 把原生 input 移出视口（自绘勾选框），Playwright 拿不到可点击的
+        # 盒子；直接派发 DOM click，随后的 to_be_checked 断言兜真值。
+        checkbox.evaluate("el => el.click()")
     apply_button = frame.locator(_require_selector(provision.get("smb_apply_button"), "provision.smb_apply_button")).first
     expect(apply_button).to_be_enabled(timeout=FRAME_WAIT_MS)
     apply_button.click()
@@ -608,7 +613,7 @@ def _dismiss_filemgr_tutorial_once(page: "Page", frame: "Frame") -> bool:
 def _has_visible_filemgr_tutorial_artifacts(frame: "Frame") -> bool:
     return bool(
         frame.evaluate(
-            """() => Array.from(document.querySelectorAll('div.mask, div.stepElem, [data-v-d10fc649]')).some((el) => {
+            """() => Array.from(document.querySelectorAll('div.mask, div.stepElem, [data-v-d10fc649], #tourMain, .tour-main')).some((el) => {
                 const rect = el.getBoundingClientRect();
                 const style = window.getComputedStyle(el);
                 return rect.width > 0
@@ -626,7 +631,7 @@ def _remove_filemgr_tutorial_artifacts(frame: "Frame") -> int:
         frame.evaluate(
             """() => {
                 let count = 0;
-                for (const selector of ['div.mask', 'div.stepElem', '[data-v-d10fc649]']) {
+                for (const selector of ['div.mask', 'div.stepElem', '[data-v-d10fc649]', '#tourMain', '.tour-main']) {
                     for (const el of Array.from(document.querySelectorAll(selector))) {
                         const rect = el.getBoundingClientRect();
                         const style = window.getComputedStyle(el);
@@ -721,8 +726,14 @@ def _is_filemgr_shared_folder_view(frame: "Frame", nav_selectors: dict, provisio
 
     try:
         quick_add.click(force=True, timeout=1_000)
-        frame.page.wait_for_timeout(200)
-        if share_item.is_visible(timeout=500):
+        # is_visible 不等待；下拉是异步渲染的（Vue + 动画），必须真正等它出现。
+        found = False
+        try:
+            share_item.wait_for(state="visible", timeout=2_000)
+            found = True
+        except Exception:
+            found = False
+        if found:
             try:
                 frame.page.keyboard.press("Escape")
             except Exception:
@@ -758,8 +769,23 @@ def _start_pool_creation(frame: "Frame", provision: dict) -> None:
     pool_item = frame.locator(
         _require_selector(provision.get("storagemgr_header_create_pool_item"), "provision.storagemgr_header_create_pool_item")
     ).first
-    expect(pool_item).to_be_visible(timeout=FRAME_WAIT_MS)
-    pool_item.click()
+    try:
+        expect(pool_item).to_be_visible(timeout=5_000)
+        pool_item.click()
+    except Exception:
+        # Arco 版的创建入口可能直接进向导而不是弹下拉；只要向导已就位就继续。
+        if _pool_wizard_is_open(frame):
+            logger.info("Provisioning: create entry opened the pool wizard directly (no dropdown)")
+            return
+        raise
+
+
+def _pool_wizard_is_open(frame: "Frame") -> bool:
+    try:
+        text = " ".join(frame.locator("body").inner_text(timeout=2_000).split())
+    except Exception:
+        return False
+    return "创建存储池" in text and ("选择硬盘" in text or "选择RAID" in text)
 
 
 def _click_pool_creation_entry(frame: "Frame", locator) -> None:
@@ -804,7 +830,12 @@ def _select_pool_disks_and_raid(
         logger.info(f"Provisioning: select pool disk {disk}")
         disk_option = frame.get_by_text(disk, exact=True).first
         expect(disk_option).to_be_visible(timeout=FRAME_WAIT_MS)
-        disk_option.click()
+        try:
+            disk_option.click(timeout=3_000)
+        except Exception:
+            # Arco 版硬盘卡片的文本被自身覆盖层（.text）拦截命中测试；force 点同一
+            # 坐标让事件落在覆盖层上并冒泡到卡片的选中处理器。
+            disk_option.click(force=True, timeout=FRAME_WAIT_MS)
 
     _select_pool_raid(frame, provision, raid, selected_disk_count=len(selected_disks))
 
@@ -1067,15 +1098,19 @@ def _select_pool_raid(frame: "Frame", provision: dict, raid: str, selected_disk_
     next_button_selector = _require_selector(provision.get("storagemgr_next_button"), "provision.storagemgr_next_button")
 
     for candidate in _pool_raid_candidates(raid, selected_disk_count):
-        for locator in (
-            frame.get_by_text(candidate, exact=True).first,
-            frame.get_by_text(candidate).first,
+        for locator, force in (
+            # Arco 版 RAID 选项是 .raid-type-item 卡片，文本被 tooltip 容器拦截，
+            # 必须 force 点；未满足条件的卡片带 disabled 类，先排除。
+            (frame.locator(f'.raid-type-item:not(.disabled):has(span:text-is("{candidate}"))').first, True),
+            (frame.get_by_text(candidate, exact=True).first, False),
+            (frame.get_by_text(candidate).first, False),
+            (frame.get_by_text(candidate, exact=True).first, True),
         ):
             try:
                 if locator.is_visible(timeout=1_000):
                     if candidate != raid:
                         logger.info(f"Provisioning: using RAID option {candidate} for configured {raid}")
-                    locator.click()
+                    locator.click(force=force, timeout=3_000)
                     frame.page.wait_for_timeout(SHORT_UI_WAIT_MS)
                     return
             except Exception:
@@ -1129,7 +1164,7 @@ def _dismiss_pool_creation_warning(frame: "Frame") -> bool:
                             && style.visibility !== 'hidden'
                             && style.opacity !== '0';
                     };
-                    return Array.from(document.querySelectorAll('section, .ivu-modal, .ivu-modal-wrap'))
+                    return Array.from(document.querySelectorAll('section, .ivu-modal, .ivu-modal-wrap, .arco-modal'))
                         .some((el) => isVisible(el) && (el.innerText || '').includes(warningText));
                 }""",
                 POOL_CREATE_WARNING_TEXT,
@@ -1154,10 +1189,10 @@ def _dismiss_pool_creation_warning(frame: "Frame") -> bool:
                             && style.visibility !== 'hidden'
                             && style.opacity !== '0';
                     };
-                    const scopes = Array.from(document.querySelectorAll('section, .ivu-modal, .ivu-modal-wrap'))
+                    const scopes = Array.from(document.querySelectorAll('section, .ivu-modal, .ivu-modal-wrap, .arco-modal'))
                         .filter((el) => isVisible(el) && (el.innerText || '').includes(warningText));
                     for (const scope of scopes) {
-                        const target = Array.from(scope.querySelectorAll('button, .ivu-btn, span, div'))
+                        const target = Array.from(scope.querySelectorAll('button, .ivu-btn, .arco-btn, span, div'))
                             .find((el) => isVisible(el) && (el.innerText || '').trim() === ackText);
                         if (target) {
                             target.click();
@@ -1175,13 +1210,13 @@ def _dismiss_pool_creation_warning(frame: "Frame") -> bool:
     if not clicked:
         frame.evaluate(
             """(warningText) => {
-                const scopes = Array.from(document.querySelectorAll('section, .ivu-modal, .ivu-modal-wrap'))
+                const scopes = Array.from(document.querySelectorAll('section, .ivu-modal, .ivu-modal-wrap, .arco-modal'))
                     .filter((el) => (el.innerText || '').includes(warningText));
                 for (const scope of scopes) {
-                    const root = scope.closest('section') || scope;
+                    const root = scope.closest('section') || scope.closest('.arco-modal-container') || scope;
                     root.style.setProperty('display', 'none', 'important');
                 }
-                for (const mask of document.querySelectorAll('.ivu-modal-mask, .basic-mask')) {
+                for (const mask of document.querySelectorAll('.ivu-modal-mask, .basic-mask, .arco-modal-mask')) {
                     mask.style.setProperty('display', 'none', 'important');
                 }
             }""",
@@ -1234,10 +1269,44 @@ def _finish_pool_creation(page: "Page", frame: "Frame", provision: dict, admin: 
 
 
 def _find_matching_pool_summary_text(frame: "Frame", pool: dict) -> str | None:
-    for summary_text in _list_pool_summary_texts(frame):
+    summaries = _list_pool_summary_texts(frame)
+    if not summaries:
+        # Arco 重构后的存储管理页没有 .storage-itemInfo 卡片；退回整页文本，
+        # 按「存储池N」锚点切段后逐段做 token/RAID 匹配，段外的未使用硬盘
+        # 提示（也含 硬盘N/M.2硬盘N 字样）不会误判成已建池。
+        summaries = _pool_summaries_from_body_text(frame)
+    for summary_text in summaries:
         if _pool_summary_matches(summary_text, pool):
             return summary_text
     return None
+
+
+_POOL_ANCHOR_RE = re.compile(r"存储池\d+")
+# 池卡片之后的页面内容（未使用/未分配硬盘列表、引导文案、创建入口）也带
+# 硬盘N/M.2硬盘N 字样；最后一个池的段落必须在这些标记前截断，避免把空闲盘
+# 误算进该池、进而把「还没建的池」判成已存在。
+_POOL_SECTION_TERMINATORS = ("未使用", "未分配", "欢迎使用", "添加小组件", "创建存储池", "立即创建")
+
+
+def _pool_summaries_from_body_text(frame: "Frame") -> list[str]:
+    try:
+        text = " ".join(frame.locator("body").inner_text(timeout=2_000).split())
+    except Exception:
+        return []
+    anchors = [m.start() for m in _POOL_ANCHOR_RE.finditer(text)]
+    if not anchors:
+        return []
+    sections: list[str] = []
+    for index, start in enumerate(anchors):
+        end = anchors[index + 1] if index + 1 < len(anchors) else len(text)
+        section = text[start:end].strip()
+        for terminator in _POOL_SECTION_TERMINATORS:
+            cut = section.find(terminator, 1)
+            if cut > 0:
+                section = section[:cut].strip()
+        if section:
+            sections.append(section)
+    return sections
 
 
 def _wait_for_matching_pool_summary_text(frame: "Frame", pool: dict, timeout_ms: int) -> str:

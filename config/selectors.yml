@@ -57,12 +57,14 @@ desktop_launchers:
 # -----------------------------------------------------------------------------
 # In-app navigation once the desktop has launched the iframe app
 # -----------------------------------------------------------------------------
+# ctlmgr/storagemgr 在 UGOS Pro（2026-07 起）从 iView 迁到 Arco：tab/checkbox/modal
+# 全部换类名。所有受影响选择器都写成 "旧, 新" 并集，同一份配置兼容新旧固件。
 capture_nav:
   ctlmgr_update_menu: 'text=更新与还原'
   ctlmgr_network_menu: 'text=网络设置'
-  ctlmgr_network_connections_tab: '.ivu-tabs-tab:has-text("网络连接")'
+  ctlmgr_network_connections_tab: '.ivu-tabs-tab:has-text("网络连接"), .arco-tabs-tab:has-text("网络连接")'
   ctlmgr_hardware_menu: 'text=硬件与电源'
-  ctlmgr_hardware_general_tab: '.ivu-tabs-tab:has-text("常规")'
+  ctlmgr_hardware_general_tab: '.ivu-tabs-tab:has-text("常规"), .arco-tabs-tab:has-text("常规")'
   storagemgr_storage_menu: '.menu-item-name:text-is("存储管理")'
   storagemgr_pool_tab: 'text=存储池与空间'
   taskmgr_overview_tab: '.arco-tabs-tab:has-text("总览")'
@@ -70,7 +72,7 @@ capture_nav:
 
 provision_nav:
   ctlmgr_file_service_menu: 'text=文件服务'
-  ctlmgr_smb_tab: '.ivu-tabs-tab:has-text("SMB")'
+  ctlmgr_smb_tab: '.ivu-tabs-tab:has-text("SMB"), .arco-tabs-tab:has-text("SMB")'
   storagemgr_storage_menu: '.menu-item-name:text-is("存储管理")'
   storagemgr_pool_tab: 'text=存储池与空间'
   filemgr_shared_folder_tree: 'div.tree-item.root[title="共享文件夹"]'
@@ -79,16 +81,16 @@ provision_nav:
 # Provisioning selectors used before transfer screenshots
 # -----------------------------------------------------------------------------
 provision:
-  smb_enable_checkbox: 'label.ivu-checkbox-wrapper:has-text("启用SMB服务") input.ivu-checkbox-input'
-  smb_apply_button: '.page-footer .ivu-btn-primary'
+  smb_enable_checkbox: 'label.ivu-checkbox-wrapper:has-text("启用SMB服务") input.ivu-checkbox-input, label.arco-checkbox:has-text("启用SMB服务") input.arco-checkbox-target'
+  smb_apply_button: '.page-footer .ivu-btn-primary, .footer-page .arco-btn-primary'
   storagemgr_empty_create_button: 'button:has-text("立即创建")'
-  storagemgr_header_create_button: '.created-storage .ivu-btn-dropdown-model'
-  storagemgr_header_create_pool_item: '.ivu-dropdown-item-box:visible:has-text("存储池")'
+  storagemgr_header_create_button: '.created-storage .ivu-btn-dropdown-model, button:visible:has-text("创建存储池"), .arco-btn:visible:has-text("创建")'
+  storagemgr_header_create_pool_item: '.ivu-dropdown-item-box:visible:has-text("存储池"), .arco-dropdown-option:visible:has-text("存储池")'
   storagemgr_next_button: 'button:visible:has-text("下一步")'
   storagemgr_create_button: 'button:visible:has-text("创建")'
   storagemgr_delete_all_button: 'button:visible:has-text("删除所有数据")'
-  modal_password_input: 'section[data-transfer="true"] input[type="password"]'
-  modal_confirm_button: 'section[data-transfer="true"] .modal-footer button:has-text("确定")'
+  modal_password_input: 'section[data-transfer="true"] input[type="password"], .arco-modal input[type="password"]'
+  modal_confirm_button: 'section[data-transfer="true"] .modal-footer button:has-text("确定"), .arco-modal .arco-modal-footer button:has-text("确定")'
   filemgr_empty_create_button: 'button.create-folder'
   filemgr_quick_add_button: '.quick-operation-box .operate-drop-btn'
   filemgr_quick_add_share_item: '.arco-dropdown-option:visible:has-text("新建共享文件夹")'
@@ -109,24 +111,24 @@ provision:
 # -----------------------------------------------------------------------------
 cleanup:
   pool_container: '[id^="poolCompool"]'
-  pool_menu_button: '.more-tools .ivu-dropdown-rel'
-  pool_delete_item: '.ivu-dropdown-item-box:visible:has-text("删除")'
-  delete_confirm_button: '.ivu-modal-footer .ivu-btn-primary:has-text("确认删除")'
-  modal_password_input: 'section[data-transfer="true"] input[type="password"]'
-  modal_confirm_button: 'section[data-transfer="true"] .modal-footer button:has-text("确定")'
+  pool_menu_button: '.more-tools .ivu-dropdown-rel, .more-tools, [class*="more-tools"]'
+  pool_delete_item: '.ivu-dropdown-item-box:visible:has-text("删除"), .arco-dropdown-option:visible:has-text("删除")'
+  delete_confirm_button: '.ivu-modal-footer .ivu-btn-primary:has-text("确认删除"), .arco-modal-footer button:has-text("确认删除"), .arco-modal-footer .arco-btn-status-danger'
+  modal_password_input: 'section[data-transfer="true"] input[type="password"], .arco-modal input[type="password"]'
+  modal_confirm_button: 'section[data-transfer="true"] .modal-footer button:has-text("确定"), .arco-modal .arco-modal-footer button:has-text("确定")'
 
 # -----------------------------------------------------------------------------
 # Restore factory settings after capture
 # -----------------------------------------------------------------------------
 factory_reset:
-  restore_tab: '.ivu-tabs-tab:has-text("系统还原和重置")'
+  restore_tab: '.ivu-tabs-tab:has-text("系统还原和重置"), .arco-tabs-tab:has-text("系统还原")'
   restore_button: 'button.reduction-restart-red-button'
-  first_modal_root: 'section[data-transfer="true"] .ivu-modal:has(.ivu-checkbox-input)'
-  first_modal_acknowledge_checkbox: 'section[data-transfer="true"] .ivu-modal:has(.ivu-checkbox-input) .ivu-checkbox-input'
-  first_modal_confirm_button: 'section[data-transfer="true"] .ivu-modal:has(.ivu-checkbox-input) .ivu-modal-footer .ivu-btn-primary'
-  password_modal_root: 'section[data-transfer="true"] .ivu-modal:has(input[type="password"])'
-  password_input: 'section[data-transfer="true"] input[type="password"]'
-  password_submit_button: 'section[data-transfer="true"] .ivu-modal-footer .ivu-btn-primary'
+  first_modal_root: 'section[data-transfer="true"] .ivu-modal:has(.ivu-checkbox-input), .arco-modal:has(.restart-modal-checkbox)'
+  first_modal_acknowledge_checkbox: 'section[data-transfer="true"] .ivu-modal:has(.ivu-checkbox-input) .ivu-checkbox-input, .arco-modal .restart-modal-checkbox input.arco-checkbox-target'
+  first_modal_confirm_button: 'section[data-transfer="true"] .ivu-modal:has(.ivu-checkbox-input) .ivu-modal-footer .ivu-btn-primary, .arco-modal:has(.restart-modal-checkbox) .arco-modal-footer .arco-btn-primary'
+  password_modal_root: 'section[data-transfer="true"] .ivu-modal:has(input[type="password"]), .arco-modal:has(input[type="password"])'
+  password_input: 'section[data-transfer="true"] input[type="password"], .arco-modal input[type="password"]'
+  password_submit_button: 'section[data-transfer="true"] .ivu-modal-footer .ivu-btn-primary, .arco-modal:has(input[type="password"]) .arco-modal-footer .arco-btn-primary'
 
 # -----------------------------------------------------------------------------
 # Target pages to screenshot
@@ -148,7 +150,9 @@ capture_pages:
   storage_pool:
     app: storagemgr
     nav_path: ["storagemgr_storage_menu", "storagemgr_pool_tab"]
-    landmark: '#poolCompool1'
+    # 旧版按池容器 id；新版（Arco 重构）用「存储池与空间」active tab 兜底 ——
+    # 截图只要求页面就位，池是否存在由 provision 阶段保证。
+    landmark: '#poolCompool1, .arco-tabs-tab-active:has-text("存储池与空间")'
     # Match pools by disk fingerprint (not slot index). UGOS assigns
     # #poolCompool1/2 by creation order, which flips when the NAS is
     # factory-reset and re-provisioned in a different sequence.
@@ -204,8 +208,8 @@ capture_pages:
       fan_row: '.hardware-list-item:has(.hardware-list-name:has-text("冷却风扇"))'
       settings_button: '.hardware-list-item:has(.hardware-list-name:has-text("冷却风扇")) button:has-text("设置")'
       modal_root: '.fan-modal'
-      modal_title: '.ivu-modal-header-inner:has-text("冷却风扇设置")'
-      confirm_button: '.ivu-modal-footer .ivu-btn-primary:has-text("确定")'
+      modal_title: '.ivu-modal-header-inner:has-text("冷却风扇设置"), .arco-modal-title:has-text("冷却风扇设置")'
+      confirm_button: '.ivu-modal-footer .ivu-btn-primary:has-text("确定"), .arco-modal:has(.fan-modal) .arco-modal-footer .arco-btn-primary:has-text("确定")'
 
   fan_normal:
     app: ctlmgr
@@ -213,7 +217,8 @@ capture_pages:
     landmark: '.details-content:has(.title:has-text("设备风扇"))'
     wait_after_mode_ms: 12000
     key_values:
-      mode_selector: '.fan-modal .fan-modal-label:has-text("普通")'
+      # 新固件把「普通」档改名「自动」；两代文案互斥，谁在就点谁。
+      mode_selector: '.fan-modal .fan-modal-label:has-text("普通"), .fan-modal .fan-modal-label:has-text("自动")'
 
   fan_silent:
     app: ctlmgr

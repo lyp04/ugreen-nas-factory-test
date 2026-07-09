@@ -25,7 +25,7 @@ Model is inferred from the SN prefix: DXP2800 (`HB`), DXP4800 (`EC671`), DXP4800
 
 ## Architecture
 
-The tool is a self-contained Windows app. On its own it runs the full test and, optionally, reports faults to a GitHub repo you own and self-updates from that repo's releases. One thing is external and optional: a separate `ugreen-nas-autoupdate` module that submits results to the factory's internal business system. When that module sits next to the app, the app detects it and shows the form-entry UI; when it doesn't, that UI is hidden and the app is test-only.
+The tool is a self-contained Windows app. On its own it runs the full test and, optionally, reports faults to a GitHub repo you own and self-updates from that repo's releases. One thing is external and optional: a separate `ugreen-nas-autoupdate` module that submits results to the factory's internal business system. When that module sits next to the app, the app detects it and shows the form-entry UI; when it doesn't, that UI is hidden and the app is test-only. This repo ships no such module — to build your own to the small interface it expects (an `automation.runner` subprocess plus a couple of JSON config files), see [docs/module-interface.md](./docs/module-interface.md).
 
 ```
                  scan SN
@@ -139,7 +139,7 @@ Issues and pull requests are welcome. Please keep changes focused and describe t
 
 ## License
 
-[Apache-2.0](./LICENSE). © 2026 UGREEN.
+[Apache-2.0](./LICENSE).
 
 ---
 
@@ -166,7 +166,7 @@ Issues and pull requests are welcome. Please keep changes focused and describe t
 
 ### 架构
 
-工具本身是自包含的 Windows App，单独就能跑完整测试，并可选地把故障上报到你自己的 GitHub 仓库、从该仓库的 release 自更新。唯一外部且可选的部分是一个独立的 `ugreen-nas-autoupdate` 模块，负责把结果录到工厂内部业务系统：模块放在 App 旁边时，App 探测到就显示录表界面；没有模块时，界面隐藏，App 就是纯测试模式。完整数据流见上面英文小节的 ASCII 图。
+工具本身是自包含的 Windows App，单独就能跑完整测试，并可选地把故障上报到你自己的 GitHub 仓库、从该仓库的 release 自更新。唯一外部且可选的部分是一个独立的 `ugreen-nas-autoupdate` 模块，负责把结果录到工厂内部业务系统：模块放在 App 旁边时，App 探测到就显示录表界面；没有模块时，界面隐藏，App 就是纯测试模式。完整数据流见上面英文小节的 ASCII 图。本仓库不带这个模块——想自己写一个，它要满足的接口（一个 `automation.runner` 子进程 + 几个 JSON 配置文件）见 [docs/module-interface.md](./docs/module-interface.md)。
 
 ### 快速开始
 
@@ -257,4 +257,4 @@ tests/                单元 + smoke 测试
 
 ### 许可证
 
-[Apache-2.0](./LICENSE)。© 2026 UGREEN。
+[Apache-2.0](./LICENSE)。

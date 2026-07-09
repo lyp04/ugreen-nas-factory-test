@@ -108,6 +108,16 @@ if (Test-Path ".\config\labels.yml") { Copy-Item -Force ".\config\labels.yml" ".
 if (Test-Path ".\config\labels")     { Copy-Item -Recurse -Force ".\config\labels" ".\dist-full\config\labels" }
 if (Test-Path $AutoupdateSrc) {
     Copy-Item -Recurse -Force $AutoupdateSrc ".\dist-full\ugreen-nas-autoupdate"
+    # 别把模块的私有历史 / 运行态凭据 / 构建产物打进包：
+    #   .git   = 私库完整历史（可能含更多秘密）
+    #   state  = 账号 token / 缓存 / 提交记录（accounts.local.json 等）——账号在目标机运行时登录，不随包分发
+    #   build/dist/apk/__pycache__/.pytest_cache = 构建产物
+    $moduleOut = ".\dist-full\ugreen-nas-autoupdate"
+    foreach ($ex in @(".git", "state", "build", "dist", "apk", "__pycache__", ".pytest_cache")) {
+        $exPath = Join-Path $moduleOut $ex
+        if (Test-Path $exPath) { Remove-Item -Recurse -Force $exPath }
+    }
+    Get-ChildItem $moduleOut -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
     # 启动器：把 UGREEN_AUTOUPDATE_ROOT 指到随包模块再启动 exe（自更新换 exe 后仍生效）
     $bat = @(
         "@echo off",

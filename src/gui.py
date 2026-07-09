@@ -1592,10 +1592,8 @@ class FactoryTestGUI:
         self._register_text("account", ttk.Label(form_frame, text=self._t("account"))).pack(side=tk.LEFT, padx=(0, 4))
         self.form_account_combo = ttk.Combobox(form_frame, textvariable=self.form_account_var, width=24, state="readonly")
         self.form_account_combo.pack(side=tk.LEFT, padx=(0, 6))
+        # 下拉框选一下就切换账号（绑定见上），不再单独放「切换账号」按钮。
         self.form_account_combo.bind("<<ComboboxSelected>>", self._on_switch_account)
-        self._register_text(
-            "switch_account", ttk.Button(form_frame, text=self._t("switch_account"), command=self._on_switch_account)
-        ).pack(side=tk.LEFT, padx=(0, 6))
         self._register_text(
             "add_account", ttk.Button(form_frame, text=self._t("add_account"), command=self._on_add_account)
         ).pack(side=tk.LEFT, padx=(0, 6))

@@ -381,7 +381,7 @@ UI_TEXT = {
         "grade": "等级",
         "account": "账号",
         "switch_account": "切换账号",
-        "add_account": "添加账号",
+        "add_account": "登录",
         "delete_account": "删除账号",
         "auto_seed_previous": "缺第一步时自动补录",
         "add_to_queue": "添加到队列",
@@ -1930,6 +1930,8 @@ class FactoryTestGUI:
             self._finish_auto_scan(event)
         elif event_type == "form_material_refresh":
             self.status_var.set(str(event.get("message") or ""))
+        elif event_type == "form_login_done":
+            self._on_form_login_done(event)
         elif event_type == "confirm_previous_step":
             self._handle_confirm_previous_step(event)
         elif event_type == "confirm_disk_shortage":
@@ -4315,45 +4317,33 @@ class FactoryTestGUI:
         self.status_var.set(f"{datetime.now().strftime('%H:%M:%S')}  已删除录表账号：{account_name}")
 
     def _on_add_account(self) -> None:
+        # 「登录」按钮：调 ugreen-nas-autoupdate 弹出它自己的 内部系统 登录窗口（账号/密码/验证码都在模块里）。
+        # 登录成功后模块把 token 写进 accounts.local.json；窗口关闭后这里刷新账号列表并选中该账号。
         if not self.form_entry_enabled:
             return
-        dialog = tk.Toplevel(self.root)
-        dialog.title("添加录表账号")
-        dialog.transient(self.root)
-        dialog.grab_set()
-        dialog.resizable(False, False)
+        self.status_var.set(f"{datetime.now().strftime('%H:%M:%S')}  正在打开录表登录窗口……")
 
-        account_var = tk.StringVar(value=self.form_account_var.get().strip() or "自动录表系统")
-
-        frame = ttk.Frame(dialog, padding=12)
-        frame.grid(row=0, column=0, sticky=tk.NSEW)
-        frame.columnconfigure(1, weight=1)
-
-        ttk.Label(frame, text="账号名").grid(row=0, column=0, sticky=tk.W, pady=4)
-        ttk.Entry(frame, textvariable=account_var, width=32).grid(row=0, column=1, sticky=tk.EW, pady=4)
-        ttk.Label(
-            frame,
-            text="账号凭据由自动录表系统管理，这里只保存 factory-test 的显示/选择名称。",
-        ).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(4, 8))
-
-        def save_account() -> None:
-            account = account_var.get().strip()
-            if not account:
-                messagebox.showwarning("缺少账号名", "请填写一个录表账号名。", parent=dialog)
-                return
+        def worker() -> None:
             try:
-                entry = form_entry.add_or_update_account(self.project_root, account=account)
-                self._refresh_form_accounts()
-                self.form_account_var.set(str(entry.get("name") or account))
-                messagebox.showinfo("账号已保存", f"当前录表账号：{self.form_account_var.get()}", parent=dialog)
-                dialog.destroy()
-            except Exception as exc:
-                messagebox.showerror("保存失败", str(exc), parent=dialog)
+                form_entry.run_login_ui(self.project_root)
+            except Exception as exc:  # noqa: BLE001
+                self.ui_queue.put({"type": "form_login_done", "error": str(exc)})
+                return
+            self.ui_queue.put({"type": "form_login_done"})
 
-        buttons = ttk.Frame(frame)
-        buttons.grid(row=2, column=0, columnspan=2, sticky=tk.EW)
-        ttk.Button(buttons, text="保存并切换", command=save_account).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(buttons, text="取消", command=dialog.destroy).pack(side=tk.LEFT)
+        threading.Thread(target=worker, name="form-login", daemon=True).start()
+
+    def _on_form_login_done(self, event: dict) -> None:
+        error = event.get("error")
+        if error:
+            self.status_var.set(f"{datetime.now().strftime('%H:%M:%S')}  登录未完成：{error}")
+            return
+        self._refresh_form_accounts()
+        active = form_entry.get_active_account_name(self.project_root)
+        if active:
+            self.form_account_var.set(active)
+        self.status_var.set(f"{datetime.now().strftime('%H:%M:%S')}  已登录录表账号：{active}")
+
     def _form_grade_choice(self) -> str:
         grade = self.form_grade_var.get().strip().upper()
         return grade if grade in {"A", "B"} else ""

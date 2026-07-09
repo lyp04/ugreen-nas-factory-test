@@ -366,6 +366,21 @@ def refresh_form_materials(project_root: Path | None = None, account_name: str |
         raise FormEntryError(f"鑷姩褰曡〃鐗╂枡鍒锋柊杩斿洖涓嶅彲瑙ｆ瀽: {text}") from exc
 
 
+def run_login_ui(project_root: Path | None = None) -> None:
+    """点「登录」时调 ugreen-nas-autoupdate 弹出 内部系统 登录窗口；阻塞到窗口关闭（在后台线程里调用）。
+    登录逻辑/验证码全在模块的 login_ui，app 只负责把窗口叫出来、登录完刷新账号。"""
+    root = autoupdate_root()
+    python = os.environ.get("UGREEN_AUTOUPDATE_PYTHON") or sys.executable
+    if getattr(sys, "frozen", False):
+        python = os.environ.get("UGREEN_AUTOUPDATE_PYTHON") or "python"
+    result = subprocess.run(
+        [python, "-m", "automation.runner", "login-ui"],
+        cwd=root, text=True, capture_output=True, timeout=1800, **_hidden_process_kwargs(),
+    )
+    if result.returncode != 0:
+        raise FormEntryError((result.stderr or result.stdout or "登录窗口启动失败").strip())
+
+
 def list_accounts(project_root: Path | None = None) -> list[dict[str, Any]]:
     data = load_accounts_file(project_root)
     accounts = data.get("accounts") or []

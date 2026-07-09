@@ -32,3 +32,5 @@ logs/
 config/update-config.json
 # 真实运行配置（含管理员凭据 / 打印机名等）只留本地，不进 git；仓库里只带 config.example.yml。
 config/config.yml
+# 打印专有数据（P/N/EAN 表），不进 git
+config/labels.yml

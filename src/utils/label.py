@@ -121,15 +121,64 @@ NAMEPLATE_PN_TABLE: dict[tuple[str, str], str] = {
 }
 
 
-def lookup_pn(model_key: str | None, grade: str | None) -> str | None:
-    """Return the US-region refurb P/N for (model_key, grade), or None.
+def _label_project_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[2]
 
-    ``model_key`` should be the value returned by ``model_key_from_sn``
-    (e.g. "2800", "4800", "4800Plus"). ``grade`` is "A" or "B".
+
+_CONFIG_LABEL_TABLES: dict | None = None
+
+
+def _config_label_tables() -> dict:
+    """P/N & EAN-13 tables loaded from the proprietary data file that config's
+    ``label_data_file`` points at (default ``config/labels.yml``). That file is
+    gitignored and only ships in the internal/full package — the public repo has
+    none, so lookups return None there. Cached; never raises."""
+    global _CONFIG_LABEL_TABLES
+    if _CONFIG_LABEL_TABLES is not None:
+        return _CONFIG_LABEL_TABLES
+    pn: dict[tuple[str, str], str] = {}
+    ean: dict[tuple[str, str], str] = {}
+    try:
+        from .config_loader import load_configs, load_yaml
+
+        root = _label_project_root()
+        cfg, _ = load_configs(root)
+        rel = (cfg.get("label_data_file") if isinstance(cfg, dict) else None) or "config/labels.yml"
+        data_path = root / rel
+        if data_path.exists():
+            data = load_yaml(data_path) or {}
+
+            def _ingest(table_key: str, out: dict) -> None:
+                table = data.get(table_key)
+                if isinstance(table, dict):
+                    for model, grades in table.items():
+                        if isinstance(grades, dict):
+                            for grade, val in grades.items():
+                                if val:
+                                    out[(str(model), str(grade).strip().upper())] = str(val)
+
+            _ingest("pn_table", pn)
+            _ingest("ean13_table", ean)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"label data file: load failed ({exc}); using empty tables")
+    _CONFIG_LABEL_TABLES = {"pn": pn, "ean13": ean}
+    return _CONFIG_LABEL_TABLES
+
+
+def lookup_pn(model_key: str | None, grade: str | None) -> str | None:
+    """Return the P/N for (model_key, grade), or None. Reads the proprietary
+    table from the config-referenced ``label_data_file`` first, then the built-in
+    table (empty by default in the public repo).
+
+    ``model_key`` is the value from ``model_key_from_sn`` (e.g. "2800",
+    "4800", "4800Plus"). ``grade`` is "A" or "B".
     """
     if not model_key or not grade:
         return None
-    return NAMEPLATE_PN_TABLE.get((str(model_key), str(grade).strip().upper()))
+    key = (str(model_key), str(grade).strip().upper())
+    return _config_label_tables()["pn"].get(key) or NAMEPLATE_PN_TABLE.get(key)
 
 
 # 13-digit EAN-13 ("69 码") by (model_key, grade). Real barcodes are proprietary
@@ -144,7 +193,8 @@ NAMEPLATE_EAN13_TABLE: dict[tuple[str, str], str] = {
 def lookup_ean13(model_key: str | None, grade: str | None) -> str | None:
     if not model_key or not grade:
         return None
-    return NAMEPLATE_EAN13_TABLE.get((str(model_key), str(grade).strip().upper()))
+    key = (str(model_key), str(grade).strip().upper())
+    return _config_label_tables()["ean13"].get(key) or NAMEPLATE_EAN13_TABLE.get(key)
 
 # Heuristic substrings to recognize a Zebra/ZPL printer queue name on Windows.
 _ZEBRA_NAME_HINTS = (

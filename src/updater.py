@@ -122,7 +122,9 @@ class UpdateManager:
         path = self._config_path()
         if not path.exists():
             return _Config(False, "", "", "", DEFAULT_MANIFEST_ASSET, "")
-        with path.open("r", encoding="utf-8") as fh:
+        # utf-8-sig: tolerate a UTF-8 BOM (PowerShell Set-Content -Encoding utf8 adds one),
+        # otherwise json.load chokes on the BOM and updates silently never fire.
+        with path.open("r", encoding="utf-8-sig") as fh:
             data = json.load(fh)
         owner = str(data.get("owner", "")).strip()
         repo = str(data.get("repo", "")).strip()

@@ -67,7 +67,10 @@ function Write-UpdateConfig {
         manifestAsset = "update.json"
         releaseTag    = ""
     }
-    ($cfg | ConvertTo-Json -Depth 4) | Set-Content -Path (Join-Path $OutDir "config\update-config.json") -Encoding utf8
+    # 用 .NET WriteAllText 写成 UTF-8 无 BOM —— PS5.1 的 Set-Content -Encoding utf8 会加 BOM，
+    # 而 updater 的 json.load 读到 BOM 会报错、自更新静默失效。
+    $ucPath = Join-Path (Resolve-Path $OutDir) "config\update-config.json"
+    [System.IO.File]::WriteAllText($ucPath, ($cfg | ConvertTo-Json -Depth 4))
 }
 
 # 两个包共用：exe + selectors + update-config.json + 测速源文件
@@ -99,6 +102,10 @@ if (Test-Path ".\config\config.yml") {
     Write-Host "   ! 本地没有 config\config.yml，改带 config.example.yml（记得填真实凭据）" -ForegroundColor Yellow
     Copy-Item -Force ".\config\config.example.yml" ".\dist-full\config\config.yml"
 }
+# 打印专有数据 + 现有模版文件：现有的直接带进 B（A 公开包不带）。
+# labels.yml = 真实 P/N/EAN 对照表（label_data_file 指向它）；config/labels/ = 现有 .ddl/.btw 等模版文件（若有）。
+if (Test-Path ".\config\labels.yml") { Copy-Item -Force ".\config\labels.yml" ".\dist-full\config\labels.yml" }
+if (Test-Path ".\config\labels")     { Copy-Item -Recurse -Force ".\config\labels" ".\dist-full\config\labels" }
 if (Test-Path $AutoupdateSrc) {
     Copy-Item -Recurse -Force $AutoupdateSrc ".\dist-full\ugreen-nas-autoupdate"
     # 启动器：把 UGREEN_AUTOUPDATE_ROOT 指到随包模块再启动 exe（自更新换 exe 后仍生效）

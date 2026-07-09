@@ -126,6 +126,10 @@ browser:
   default_timeout_ms: 30000
   channel: msedge    # msedge | chrome | chromium. msedge uses system Edge (no download needed on Win10+)
 
+# 打印专有数据（P/N + EAN-13 对照表）文件的相对路径。真实数据文件不进 git、只在内部完整包里带；
+# 公开包没有这个文件 → 查表返回 None，铭牌打印回退到 placeholder_pn / --pn。
+label_data_file: config/labels.yml
+
 # Screenshots, logs, and reports. This can be a synced folder.
 # 用 ${USERPROFILE} 而不是写死某个账户：换任何 Windows 账户都指向该用户自己的桌面。
 output_dir: "${USERPROFILE}/Desktop/NAS/Automatic"

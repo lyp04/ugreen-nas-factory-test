@@ -58,7 +58,8 @@ def autoupdate_root() -> Path:
     config_root = _config_autoupdate_root()
     if config_root is not None:
         candidates.append(config_root)
-    candidates.append(_project_root().parent / "ugreen-nas-autoupdate")
+    candidates.append(_project_root() / "ugreen-nas-autoupdate")         # 模块随包：exe 同级子目录（B 完整包布局，复制即用）
+    candidates.append(_project_root().parent / "ugreen-nas-autoupdate")  # 与 factory-test 同级（开发 / 克隆布局）
     for candidate in candidates:
         if (candidate / "automation" / "runner.py").exists():
             return candidate

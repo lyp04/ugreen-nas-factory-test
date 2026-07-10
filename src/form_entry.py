@@ -215,17 +215,6 @@ def submit_report(
     return _run_autoupdate_bridge(payload)
 
 
-def seed_previous_step_for_task(project_root: Path, sn: str, model: str, account_name: str | None = None) -> dict[str, Any]:
-    payload = {
-        "type": "seed_previous_step",
-        "created_at": datetime.now().isoformat(),
-        "account_name": account_name or get_active_account_name(project_root),
-        "sn": sn,
-        "model": normalize_model_key(model),
-    }
-    return _run_autoupdate_bridge(payload)
-
-
 def _run_autoupdate_bridge(payload: dict[str, Any]) -> dict[str, Any]:
     root = autoupdate_root()
     bridge_dir = root / "state" / "bridge_requests"

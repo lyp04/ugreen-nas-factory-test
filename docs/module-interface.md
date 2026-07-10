@@ -15,8 +15,6 @@ The app resolves the module directory in this order, and treats a directory as t
 3. an `ugreen-nas-autoupdate` subdirectory next to the exe / project root — this is how a packaged distribution ships the module: drop the folder beside the exe and it just works
 4. the sibling directory `../ugreen-nas-autoupdate` (next to this repo — the development/clone layout)
 
-One more switch worth knowing: setting `UGREEN_DISABLE_FORM_ENTRY=1` force-hides the form-entry UI even when a module is present (that's all `src/gui_no_form.py` does). Detection wins only when that variable isn't set.
-
 ### Expected layout
 
 ```
@@ -54,8 +52,7 @@ Your module is a Python package the app calls as a subprocess, from the module r
 
 `submit-report` receives a payload file the app first writes to `state/bridge_requests/<timestamp>_<sn>.json`. Dispatch on the payload's `type`:
 
-- `type: "submit_report"` — a full report + `form_data` (below). Log into your backend, upload the screenshots, fill the fields, apply the material deduction list, submit.
-- `type: "seed_previous_step"` — `{ "sn", "model" }`. **Reserved, not wired up yet**: the current app never sends this type (the GUI checkbox exists but its callback isn't connected). Implement it as a no-op or skip it until a release note says otherwise.
+- `type: "submit_report"` — a full report + `form_data` (below). Log into your backend, upload the screenshots, fill the fields, apply the material deduction list, submit. (This is currently the only `type` the app sends.)
 
 One error-message contract to know: when `submit-report` fails because the unit has no prior-stage record in your backend, the app recognizes that case **by substring-matching your error message** — it must contain `缺少第一步翻新记录` or `previous refurbishment process` verbatim. Any other wording lands in the generic failure path.
 
@@ -172,8 +169,6 @@ App 按下面顺序解析模块目录,且只有目录里存在 `automation/runne
 3. exe / 项目根目录下的 `ugreen-nas-autoupdate` 子目录——成品分发就走这条:把模块文件夹放在 exe 旁边即可
 4. 同级目录 `../ugreen-nas-autoupdate`(本仓库旁边,开发克隆布局)
 
-另有一个开关:设环境变量 `UGREEN_DISABLE_FORM_ENTRY=1` 可以在模块存在时也强制隐藏录表界面(`src/gui_no_form.py` 干的就是这一件事)。
-
 ### 契约
 
 你的模块是一个 Python 包,App 在模块根目录以子进程方式调用(目录布局见上面英文小节):
@@ -196,8 +191,7 @@ App 按下面顺序解析模块目录,且只有目录里存在 `automation/runne
 
 `submit-report` 拿到的 payload 文件,App 会先写到 `state/bridge_requests/<时间戳>_<sn>.json`。按 payload 的 `type` 分派:
 
-- `type: "submit_report"` —— 完整报告 + `form_data`(见下)。登录后端、上传截图、填字段、应用扣料清单、提交。
-- `type: "seed_previous_step"` —— `{ "sn", "model" }`。**预留、当前未接线**:现版本 App 不会发这个 type(GUI 有复选框但回调没接上),先实现成空操作或干脆不管。
+- `type: "submit_report"` —— 完整报告 + `form_data`(见下)。登录后端、上传截图、填字段、应用扣料清单、提交。(目前 App 只会发这一个 type。)
 
 错误文案契约:`submit-report` 因「后端没有该 SN 的上一工步记录」而失败时,App 靠**子串匹配你的错误信息**识别这种情况——信息里必须原样含有 `缺少第一步翻新记录` 或 `previous refurbishment process`,换别的措辞就会落进普通失败分支。
 

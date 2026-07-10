@@ -24,11 +24,8 @@ FORM_ENTRY_ENABLED = True
 
 def _resolve_form_entry_enabled() -> bool:
     """录表 / 登录 / 上传 相关 UI 是否启用（决定它们显示还是整块隐藏）：
-    1. 显式关闭优先：gui_no_form.py 设 UGREEN_DISABLE_FORM_ENTRY=1 → 关。
-    2. 否则自动探测：找不到自动录表系统（ugreen-nas-autoupdate 的 automation/runner.py）就关。
+    自动探测——找不到自动录表系统（ugreen-nas-autoupdate 的 automation/runner.py）就关。
     这样「只带 factory-test、不带上传器」的分发包会自动进入纯测试模式，隐藏全部登录/上传按钮。"""
-    if os.environ.get("UGREEN_DISABLE_FORM_ENTRY") == "1":
-        return False
     if not FORM_ENTRY_ENABLED:
         return False
     try:
@@ -109,7 +106,6 @@ class DeviceTask:
     cleanup_before_finish: bool
     factory_reset_before_finish: bool
     auto_form_entry: bool = False
-    auto_seed_previous_step: bool = False
     form_model: str = ""
     form_grade: str = "A"
     form_account_name: str = ""
@@ -383,7 +379,6 @@ UI_TEXT = {
         "switch_account": "切换账号",
         "add_account": "登录",
         "delete_account": "删除账号",
-        "auto_seed_previous": "缺第一步时自动补录",
         "add_to_queue": "添加到队列",
         "print_label": "打印标签",
         "label_nameplate": "铭牌标签",
@@ -500,7 +495,6 @@ UI_TEXT = {
         "switch_account": "Switch account",
         "add_account": "Add account",
         "delete_account": "Delete account",
-        "auto_seed_previous": "Auto-fill step 1 if missing",
         "add_to_queue": "Add to queue",
         "print_label": "Print label",
         "label_nameplate": "Nameplate",
@@ -617,7 +611,6 @@ UI_TEXT = {
         "switch_account": "Cambiar cuenta",
         "add_account": "Añadir cuenta",
         "delete_account": "Eliminar cuenta",
-        "auto_seed_previous": "Rellenar paso 1 si falta",
         "add_to_queue": "Añadir a la cola",
         "print_label": "Imprimir etiqueta",
         "label_nameplate": "Placa",
@@ -790,7 +783,6 @@ class FactoryTestGUI:
         self.auto_form_entry_var = tk.BooleanVar(value=self.form_entry_enabled)
         _label_cfg = (self.config.get("label_printer") or {}) if isinstance(self.config, dict) else {}
         self.auto_print_label_var = tk.BooleanVar(value=bool(_label_cfg.get("auto_print_on_pass", False)))
-        self.auto_seed_previous_step_var = tk.BooleanVar(value=False)
         self.form_grade_var = tk.StringVar(value="")
         self.form_account_var = tk.StringVar()
         self.sound_enabled_var = tk.BooleanVar(value=True)
@@ -811,7 +803,6 @@ class FactoryTestGUI:
         self.factory_reset_check: ttk.Checkbutton | None = None
         self.auto_form_entry_check: ttk.Checkbutton | None = None
         self.auto_print_label_check: ttk.Checkbutton | None = None
-        self.auto_seed_previous_step_check: ttk.Checkbutton | None = None
         self.sound_check: ttk.Checkbutton | None = None
         self.language_combo: ttk.Combobox | None = None
         self.form_grade_radios: list[ttk.Radiobutton] = []
@@ -1207,7 +1198,6 @@ class FactoryTestGUI:
             "cleanup_before_finish": bool(report.get("cleanup_before_finish", True)),
             "factory_reset_before_finish": bool(report.get("factory_reset_before_finish", True)),
             "auto_form_entry": bool(report.get("auto_form_entry", False)),
-            "auto_seed_previous_step": False,
             "form_model": str(report.get("form_model") or model_key_from_sn(sn) or ""),
             "form_grade": str(report.get("form_grade") or "A"),
             "form_account_name": str(report.get("form_account_name") or ""),
@@ -1315,7 +1305,6 @@ class FactoryTestGUI:
             "cleanup_before_finish": task.cleanup_before_finish,
             "factory_reset_before_finish": task.factory_reset_before_finish,
             "auto_form_entry": task.auto_form_entry,
-            "auto_seed_previous_step": task.auto_seed_previous_step,
             "form_model": task.form_model,
             "form_grade": task.form_grade,
             "form_account_name": task.form_account_name,
@@ -1358,7 +1347,6 @@ class FactoryTestGUI:
             cleanup_before_finish=bool(record.get("cleanup_before_finish", True)),
             factory_reset_before_finish=bool(record.get("factory_reset_before_finish", True)),
             auto_form_entry=bool(record.get("auto_form_entry", False)),
-            auto_seed_previous_step=bool(record.get("auto_seed_previous_step", False)),
             form_model=str(record.get("form_model") or ""),
             form_grade=str(record.get("form_grade") or "A"),
             form_account_name=str(record.get("form_account_name") or ""),
@@ -1614,14 +1602,6 @@ class FactoryTestGUI:
         self.start_btn = ttk.Button(btn_frame, text=self._t("add_to_queue"), command=self._on_start_test)
         self._register_text("add_to_queue", self.start_btn)
         self.start_btn.pack(side=tk.LEFT, padx=(0, 6))
-        if self.form_entry_enabled:
-            self.auto_seed_previous_step_check = ttk.Checkbutton(
-                btn_frame,
-                text=self._t("auto_seed_previous"),
-                variable=self.auto_seed_previous_step_var,
-            )
-            self._register_text("auto_seed_previous", self.auto_seed_previous_step_check)
-            self.auto_seed_previous_step_check.pack(side=tk.LEFT, padx=(6, 12))
         self._register_text(
             "open_screenshot_dir", ttk.Button(btn_frame, text=self._t("open_screenshot_dir"), command=self._open_output)
         ).pack(side=tk.LEFT, padx=(0, 6))
@@ -1930,8 +1910,6 @@ class FactoryTestGUI:
             self.status_var.set(str(event.get("message") or ""))
         elif event_type == "form_login_done":
             self._on_form_login_done(event)
-        elif event_type == "confirm_previous_step":
-            self._handle_confirm_previous_step(event)
         elif event_type == "confirm_disk_shortage":
             self._handle_confirm_disk_shortage(event)
         elif event_type == "resolve_form_grade":
@@ -2016,25 +1994,6 @@ class FactoryTestGUI:
         if task.task_id == self.selected_task_id:
             self._append_log(message)
             self._schedule_timing_chart_refresh(task)
-
-    def _handle_confirm_previous_step(self, event: dict) -> None:
-        reply = event.get("reply")
-        done = event.get("done")
-        task = self.devices.get(str(event.get("task_id")))
-        event_sn = normalize_sn(str(event.get("sn") or ""))
-        if task is not None and event_sn and (
-            same_sn_identity(task.sn, event_sn) or is_auto_sn_placeholder(task.sn)
-        ):
-            task.sn = event_sn
-        sn = event_sn or (task.sn if task is not None else "")
-        answer = messagebox.askyesno(
-            "缺少第一步",
-            f"SN {sn} 缺少第一步翻新记录。是否自动录入第一步后继续第二步？",
-        )
-        if isinstance(reply, dict):
-            reply["answer"] = bool(answer)
-        if done is not None:
-            done.set()
 
     def _handle_resolve_form_grade(self, event: dict) -> None:
         reply = event.get("reply")
@@ -4426,7 +4385,6 @@ class FactoryTestGUI:
         network_interface: str = "",
     ) -> DeviceTask | None:
         auto_form_entry = self.form_entry_enabled and self.auto_form_entry_var.get()
-        auto_seed_previous_step = auto_form_entry and self.auto_seed_previous_step_var.get()
         task = DeviceTask(
             task_id=self._next_task_id(sn),
             sn=sn,
@@ -4435,7 +4393,6 @@ class FactoryTestGUI:
             cleanup_before_finish=self.cleanup_before_finish_var.get(),
             factory_reset_before_finish=self.factory_reset_before_finish_var.get(),
             auto_form_entry=auto_form_entry,
-            auto_seed_previous_step=auto_seed_previous_step,
             form_model=model_key_from_sn(sn) or "",
             form_grade=self._form_grade_choice() if auto_form_entry else "",
             form_account_name=self.form_account_var.get().strip() if auto_form_entry else "",
@@ -4453,7 +4410,7 @@ class FactoryTestGUI:
             task.task_id,
             f"SN {task.sn} 已加入队列，来源={source}，模式={task.mode}，IP={task.requested_ip}，"
             f"{f'接口={task.network_interface}，' if task.network_interface else ''}"
-            f"自动录表={task.auto_form_entry}，自动补第一步={task.auto_seed_previous_step}，"
+            f"自动录表={task.auto_form_entry}，"
             f"机型={task.form_model or 'SN自动识别'}，等级={task.form_grade}，账号={task.form_account_name}",
         )
         self._mark_daily_task_retry_pending(task)
@@ -4486,7 +4443,6 @@ class FactoryTestGUI:
             cleanup_before_finish=task.cleanup_before_finish,
             factory_reset_before_finish=task.factory_reset_before_finish,
             auto_form_entry=task.auto_form_entry,
-            auto_seed_previous_step=task.auto_seed_previous_step,
             form_model=task.form_model,
             form_grade=task.form_grade,
             form_account_name=task.form_account_name,
@@ -4579,10 +4535,6 @@ class FactoryTestGUI:
                         form_account_name=task.form_account_name,
                         progress_cb=emit,
                         confirm_disk_shortage_cb=lambda prompt, task=task: self._confirm_disk_shortage(task, prompt),
-                        confirm_previous_step_cb=lambda prompt, task=task: self._confirm_auto_seed_previous_step(
-                            task,
-                            prompt,
-                        ),
                         resolve_form_grade_cb=lambda prompt, task=task: self._resolve_current_form_grade(task, prompt),
                         cancel_requested_cb=task.cancel_event.is_set,
                         task_id=task.task_id,
@@ -4757,31 +4709,6 @@ class FactoryTestGUI:
             )
         task.form_grade = grade
         return grade
-
-    def _confirm_auto_seed_previous_step(self, task: DeviceTask, prompt: dict | None = None) -> bool:
-        prompt = prompt or {}
-        if task.auto_seed_previous_step:
-            self.ui_queue.put(
-                {
-                    "type": "local_log",
-                    "task_id": task.task_id,
-                    "message": "按录表配置自动补录第一步，不弹窗询问",
-                }
-            )
-            return True
-        reply: dict[str, bool] = {"answer": False}
-        done = threading.Event()
-        self.ui_queue.put(
-            {
-                "type": "confirm_previous_step",
-                "task_id": task.task_id,
-                "sn": prompt.get("sn") or task.sn,
-                "reply": reply,
-                "done": done,
-            }
-        )
-        done.wait()
-        return bool(reply.get("answer"))
 
     def _on_cancel_task(self) -> None:
         task = self._selected_task()

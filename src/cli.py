@@ -496,7 +496,6 @@ def run_test(
     form_account_name: str | None = None,
     progress_cb: Callable[[dict], None] | None = None,
     confirm_disk_shortage_cb: Callable[[dict], bool] | None = None,
-    confirm_previous_step_cb: Callable[[dict], bool] | None = None,
     resolve_form_grade_cb: Callable[[dict], str] | None = None,
     cancel_requested_cb: Callable[[], bool] | None = None,
     task_id: str | None = None,

@@ -126,7 +126,6 @@ Page selectors are in `config/selectors.yml`; update them when the UGOS front en
 ```
 src/
 ├── gui.py            GUI main window (Tkinter), multi-device queue
-├── gui_no_form.py    same GUI with form entry force-hidden (sets UGREEN_DISABLE_FORM_ENTRY=1)
 ├── cli.py            CLI entry (Click): test / cleanup / print-*
 ├── measurements.py   CPU-temp / fan-RPM pass-fail rules (shared by cli.py and flows/capture.py)
 ├── updater.py        self-update from GitHub Releases
@@ -262,7 +261,6 @@ Windows 10/11，Python 3.10+，系统自带 Microsoft Edge（Win10 起内置）�
 ```
 src/
 ├── gui.py            GUI 主窗口（Tkinter），多机排队
-├── gui_no_form.py    同一个 GUI，强制隐藏录表界面（设 UGREEN_DISABLE_FORM_ENTRY=1）
 ├── cli.py            CLI 入口（Click）：test / cleanup / print-*
 ├── measurements.py   CPU 温度 / 风扇转速判定规则（cli.py 与 flows/capture.py 共用）
 ├── updater.py        从 GitHub Release 自更新

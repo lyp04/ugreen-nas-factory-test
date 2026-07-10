@@ -10,7 +10,6 @@ admin:
   # 换成你自己的；公开模板里用占位符，真实值放本地 config.yml（不进 git）。
   username: "CHANGE_ME"
   password: "CHANGE_ME"
-  email: "you@example.com"
 
 network:
   # 端口扫描兜底用的网段。auto = 自动探测本机所在网段（通版默认，换到任意产线/网段都能用）；

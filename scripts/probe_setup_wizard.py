@@ -70,49 +70,69 @@ def main() -> int:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    def census_of(fr) -> dict:
+        try:
+            return fr.evaluate(CENSUS_JS)
+        except Exception:
+            return {}
+
+    def scan(page):
+        # The 1.17 wizard renders inside a child iframe (name="device-wizard"),
+        # so a top-document census sees only the empty shell. Classify EACH frame
+        # and prefer the one that actually looks like the wizard.
+        best_fr, best_c = page.main_frame, census_of(page.main_frame)
+        for fr in page.frames:
+            c = census_of(fr)
+            if classify_state(c) == "setup_wizard":
+                return fr, c, "setup_wizard"
+            if (c.get("ivu", 0) + c.get("arco", 0)) > (best_c.get("ivu", 0) + best_c.get("arco", 0)):
+                best_fr, best_c = fr, c
+        return best_fr, best_c, classify_state(best_c)
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False, channel="msedge")
         page = browser.new_context(viewport={"width": 1600, "height": 1000}, locale="zh-CN").new_page()
 
-        state, census = "starting", {}
+        frame, state, census = page.main_frame, "starting", {}
         deadline = time.monotonic() + args.wait
         while time.monotonic() < deadline:
             try:
                 page.goto(args.url, wait_until="domcontentloaded", timeout=20000)
                 page.wait_for_timeout(4000)
-                census = page.evaluate(CENSUS_JS)
-                state = classify_state(census)
+                frame, census, state = scan(page)
                 if state in ("setup_wizard", "login", "desktop"):
                     break
             except Exception as exc:  # noqa: BLE001
                 print(f"[probe] load error: {exc}", file=sys.stderr)
             time.sleep(6)
 
-        print(f"[probe] device state: {state}")
+        print(f"[probe] device state: {state}  (frame={frame.name or 'top'!r})")
         print(f"[probe] framework census: ivu={census.get('ivu')} arco={census.get('arco')}")
 
         if state != "setup_wizard":
             print("[probe] NOT at the setup wizard — use a freshly flashed / uninitialized unit.")
-            print(f"[probe]   page text: {census.get('text', '')!r}")
+            print(f"[probe]   frame text: {census.get('text', '')!r}")
             browser.close()
             return 2
 
-        # --- we are on the wizard: classify and check the configured selectors ---
-        (out_dir / "wizard.html").write_text(page.content(), encoding="utf-8")
+        # --- we are on the wizard frame: classify and check the configured selectors ---
+        (out_dir / "wizard.html").write_text(frame.content(), encoding="utf-8")
         page.screenshot(path=str(out_dir / "wizard.png"), full_page=True)
 
         framework = "iView" if census["ivu"] and not census["arco"] else \
                     "Arco" if census["arco"] and not census["ivu"] else \
                     "mixed / unknown"
         print(f"\n[probe] WIZARD FRAMEWORK: {framework}  (ivu={census['ivu']}, arco={census['arco']})")
+        print("[probe] NOTE: only page-1 (device naming) is observable read-only; later")
+        print("[probe] pages (admin / skip-phone / update-mode / init) need a full run to see.")
 
-        print("\n[probe] setup_wizard selectors from config/selectors.yml — do they resolve here?")
+        print("\n[probe] setup_wizard selectors from config/selectors.yml — resolve on this frame?")
         broken = 0
         for name, sel in wizard_selectors.items():
             if not isinstance(sel, str):
                 continue
             try:
-                n = page.locator(sel).count()
+                n = frame.locator(sel).count()
             except Exception as exc:  # noqa: BLE001
                 n = -1
                 print(f"    {name}: BAD SELECTOR ({exc})")

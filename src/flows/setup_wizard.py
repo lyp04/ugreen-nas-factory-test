@@ -24,7 +24,7 @@ class SetupAlreadyRegistered(SetupWizardError):
 
 
 SN_UNBOUND_MESSAGE = "SN\u672a\u89e3\u7ed1\uff0c\u8bf7\u5148\u89e3\u7ed1SN"
-INIT_MAX_WAIT_MS = 300_000
+INIT_MAX_WAIT_MS = 900_000  # first-time init + reboot runs long; 5 min was too short
 OVERLAY_WAIT_MS = 30_000
 SHORT_WAIT_MS = 3_000
 INITIAL_STATE_WAIT_MS = 300_000
@@ -108,6 +108,22 @@ def _try_click_if_visible(page: "Page", selector: str | None, name: str, timeout
         return False
 
 
+def _wizard_surface(page: "Page"):
+    """UGOS 1.17 renders the first-time wizard inside a child iframe
+    (name="device-wizard"); older firmware renders it on the top page. Return
+    whichever surface holds the wizard so one flow drives both — element-level
+    calls go through this; page-level nav / loading / desktop stay on ``page``.
+    Falls back to ``page`` when the iframe isn't present (old firmware, or not
+    created yet), so old-firmware behaviour is byte-for-byte unchanged."""
+    try:
+        frame = page.frame(name="device-wizard")
+        if frame is not None:
+            return frame
+    except Exception:
+        pass
+    return page
+
+
 def run(page: "Page", nas_url: str, admin: dict, selectors: dict, sn: str = "") -> str | None:
     logger.info(f"Setup wizard -> {nas_url}")
     page.goto(nas_url, wait_until="domcontentloaded")
@@ -152,11 +168,12 @@ def _detect_initial_state(page: "Page", sw: dict, login_selectors: dict, nas_url
     while time.monotonic() < deadline:
         if _is_loading_page(page):
             return "loading"
-        if _is_visible(page, wizard_marker):
+        surface = _wizard_surface(page)
+        if _is_visible(surface, wizard_marker):
             return "wizard"
-        if _is_visible(page, COMBINED_DEVICE_INPUT) or _is_visible(page, COMBINED_ADMIN_INPUT):
+        if _is_visible(surface, COMBINED_DEVICE_INPUT) or _is_visible(surface, COMBINED_ADMIN_INPUT):
             return "wizard"
-        if any(_is_visible(page, selector) for selector in INTRO_START_BUTTONS):
+        if any(_is_visible(surface, selector) for selector in INTRO_START_BUTTONS):
             return "wizard"
         if _is_visible(page, login_marker):
             logger.info("Setup mode detected a registered device; login page is already shown")
@@ -203,7 +220,8 @@ def _is_visible(page: "Page", selector: str) -> bool:
 
 
 def _page0_intro_start_if_present(page: "Page", sw: dict) -> None:
-    start_btn = _first_visible_locator(page, INTRO_START_BUTTONS)
+    surface = _wizard_surface(page)
+    start_btn = _first_visible_locator(surface, INTRO_START_BUTTONS)
     if start_btn is None:
         return
 
@@ -214,55 +232,53 @@ def _page0_intro_start_if_present(page: "Page", sw: dict) -> None:
 
     deadline = time.monotonic() + (OVERLAY_WAIT_MS / 1000)
     while time.monotonic() < deadline:
-        if _is_combined_device_admin_page(page) or _is_visible(page, sw.get("device_name_input", "")) or _is_loading_page(page):
+        if _is_combined_device_admin_page(page) or _is_visible(_wizard_surface(page), sw.get("device_name_input", "")) or _is_loading_page(page):
             return
         page.wait_for_timeout(250)
     raise SetupWizardError("Welcome page did not advance after clicking Start")
 
 
 def _check_agreements(page: "Page", sw: dict) -> None:
-    checkbox_selectors = [
-        sw.get("agree_checkboxes"),
-        "input.ivu-checkbox-input",
-        'input[type="checkbox"]',
-    ]
+    surface = _wizard_surface(page)
+    # Both iView (input.ivu-checkbox-input) and Arco (input.arco-checkbox-target)
+    # render a real <input type=checkbox>; Arco hides it off-screen and toggles it
+    # from the visible label, so is_visible() is False and check(force=True) can't
+    # act on it. A JS click on the input fires the change for both frameworks —
+    # same trick as the SMB checkbox — so we don't gate on visibility.
+    boxes = surface.locator('input[type="checkbox"]')
     checked = 0
-    for selector in checkbox_selectors:
-        if not selector or selector == "TODO":
-            continue
-        boxes = page.locator(selector)
-        count = boxes.count()
-        for i in range(count):
-            cb = boxes.nth(i)
-            try:
-                if cb.is_visible(timeout=500) and not cb.is_checked():
-                    cb.check(force=True)
-                    checked += 1
-            except Exception:
+    for i in range(boxes.count()):
+        cb = boxes.nth(i)
+        try:
+            if cb.is_checked():
                 continue
-        if count:
-            break
+            cb.evaluate("el => { if (!el.checked) el.click(); }")
+            checked += 1
+        except Exception:
+            continue
     if checked:
         logger.info(f"  checked {checked} agreement checkbox(es)")
 
 
 def _is_combined_device_admin_page(page: "Page") -> bool:
-    return _is_visible(page, COMBINED_DEVICE_INPUT) and _is_visible(page, COMBINED_ADMIN_INPUT)
+    surface = _wizard_surface(page)
+    return _is_visible(surface, COMBINED_DEVICE_INPUT) and _is_visible(surface, COMBINED_ADMIN_INPUT)
 
 
 def _combined_device_admin_page(page: "Page", admin: dict, sn: str) -> None:
+    surface = _wizard_surface(page)
     logger.info("[Page 1] device name + admin account")
-    page.locator(COMBINED_DEVICE_INPUT).first.fill(_device_name(sn))
-    page.locator(COMBINED_ADMIN_INPUT).first.fill(admin["username"])
+    surface.locator(COMBINED_DEVICE_INPUT).first.fill(_device_name(sn))
+    surface.locator(COMBINED_ADMIN_INPUT).first.fill(admin["username"])
 
-    pw_inputs = page.locator('input[type="password"]')
+    pw_inputs = surface.locator('input[type="password"]')
     expect(pw_inputs.first).to_be_visible(timeout=OVERLAY_WAIT_MS)
     if pw_inputs.count() < 2:
         raise SetupWizardError(f"Expected 2 password inputs on combined account page, got {pw_inputs.count()}")
     pw_inputs.nth(0).fill(admin["password"])
     pw_inputs.nth(1).fill(admin["password"])
 
-    next_btn = _first_visible_locator(page, COMBINED_NEXT_BUTTONS)
+    next_btn = _first_visible_locator(surface, COMBINED_NEXT_BUTTONS)
     if next_btn is None:
         raise SetupWizardError("Combined account page next button was not found")
     expect(next_btn).to_be_enabled(timeout=OVERLAY_WAIT_MS)
@@ -287,80 +303,119 @@ def _first_visible_locator(page: "Page", selectors: tuple[str, ...]):
 
 
 def _page1_device_name(page: "Page", sw: dict) -> None:
+    surface = _wizard_surface(page)
     logger.info("[Page 1] device name + agreements")
-    device_input = page.locator(_require(sw.get("device_name_input"), "setup_wizard.device_name_input"))
+    device_input = surface.locator(_require(sw.get("device_name_input"), "setup_wizard.device_name_input"))
     expect(device_input).to_be_visible(timeout=OVERLAY_WAIT_MS)
 
     _check_agreements(page, sw)
 
-    next_btn = page.locator(_require(sw.get("page1_next_button"), "setup_wizard.page1_next_button"))
+    next_btn = surface.locator(_require(sw.get("page1_next_button"), "setup_wizard.page1_next_button"))
     expect(next_btn).to_be_enabled(timeout=OVERLAY_WAIT_MS)
     next_btn.click()
 
 
 def _page2_admin_account(page: "Page", sw: dict, admin: dict) -> None:
+    surface = _wizard_surface(page)
     logger.info("[Page 2] admin account")
-    page.locator(_require(sw.get("admin_username_input"), "setup_wizard.admin_username_input")).fill(admin["username"])
+    user_input = surface.locator(_require(sw.get("admin_username_input"), "setup_wizard.admin_username_input")).first
+    # Wait for page 2 to actually render before filling. Filling during the
+    # page-1 -> page-2 transition lands on the wrong input (Arco drops it) and the
+    # account-name box stays empty, leaving Next disabled. Fill, verify, retry.
+    expect(user_input).to_be_visible(timeout=OVERLAY_WAIT_MS)
+    username = str(admin["username"])
+    for _ in range(4):
+        user_input.fill(username)
+        try:
+            if (user_input.input_value() or "").strip() == username:
+                break
+        except Exception:
+            pass
+        page.wait_for_timeout(400)
 
     pw_sel = _require(sw.get("admin_password_inputs"), "setup_wizard.admin_password_inputs")
-    pw_inputs = page.locator(pw_sel)
+    pw_inputs = surface.locator(pw_sel)
     expect(pw_inputs.first).to_be_visible(timeout=OVERLAY_WAIT_MS)
     if pw_inputs.count() < 2:
         raise SetupWizardError(f"Expected 2 password inputs, got {pw_inputs.count()} via '{pw_sel}'")
     pw_inputs.nth(0).fill(admin["password"])
     pw_inputs.nth(1).fill(admin["password"])
 
-    next_btn = page.locator(_require(sw.get("page2_next_button"), "setup_wizard.page2_next_button"))
+    next_btn = surface.locator(_require(sw.get("page2_next_button"), "setup_wizard.page2_next_button"))
     expect(next_btn).to_be_enabled(timeout=OVERLAY_WAIT_MS)
     next_btn.click()
 
 
 def _page3_skip_phone(page: "Page", sw: dict) -> None:
+    surface = _wizard_surface(page)
     logger.info("[Page 3] skip phone binding")
     if _is_loading_page(page):
         logger.info("  system loading already started; phone binding step skipped")
         return
-    if _try_click_if_visible(page, sw.get("skip_phone_link"), "setup_wizard.skip_phone_link"):
-        _try_click_if_visible(page, sw.get("skip_phone_confirm_button"), "setup_wizard.skip_phone_confirm_button")
+
+    def _click_skip_confirm() -> None:
+        # The confirm dialog may live in the wizard iframe (Arco) or be portalled
+        # to the top page — try both surfaces.
+        sel = sw.get("skip_phone_confirm_button")
+        if not _try_click_if_visible(surface, sel, "setup_wizard.skip_phone_confirm_button"):
+            _try_click_if_visible(page, sel, "setup_wizard.skip_phone_confirm_button")
+
+    if _try_click_if_visible(surface, sw.get("skip_phone_link"), "setup_wizard.skip_phone_link"):
+        _click_skip_confirm()
         return
 
-    skip_btn = _first_visible_locator(page, ('button:has-text("跳过")', ".jump-btn"))
+    skip_btn = _first_visible_locator(surface, ('button:has-text("跳过")', ".jump-btn"))
     if skip_btn is None:
         logger.info("  phone binding step not shown")
         return
     skip_btn.click()
     page.wait_for_timeout(SHORT_WAIT_MS)
-    _try_click_if_visible(page, sw.get("skip_phone_confirm_button"), "setup_wizard.skip_phone_confirm_button")
+    _click_skip_confirm()
 
 
 def _page4_update_mode_and_init(page: "Page", sw: dict) -> None:
+    surface = _wizard_surface(page)
     logger.info("[Page 4] update mode + start init")
     if _is_loading_page(page):
         logger.info("  system loading already started")
         return
     radio_sel = _require(sw.get("update_mode_radios"), "setup_wizard.update_mode_radios")
-    radios = page.locator(radio_sel)
-    if not _is_visible(page, radio_sel):
-        logger.info("  update mode step not shown")
-        return
-    expect(radios.first).to_be_visible(timeout=OVERLAY_WAIT_MS)
-    if radios.count() == 0:
-        raise SetupWizardError(f"No update-mode radios found via '{radio_sel}'")
-    update_radio = radios.nth(1) if radios.count() > 1 else radios.first
-    update_radio.check()
-    logger.info("  selected automatic update option")
-
-    _click_first_visible_selector(
-        page,
-        (
+    init_selectors = tuple(
+        s for s in (
             sw.get("start_system_init_button"),
             'button.complete-btn',
             'button.ivu-btn-primary:has-text("\u5f00\u59cb\u7cfb\u7edf\u521d\u59cb\u5316")',
             'button.ivu-btn-primary:has-text("\u5f00\u59cb\u521d\u59cb\u5316")',
+            'button.arco-btn-primary:has-text("\u5f00\u59cb\u7cfb\u7edf\u521d\u59cb\u5316")',
+            'button.arco-btn-primary:has-text("\u5f00\u59cb\u521d\u59cb\u5316")',
             'button:has-text("\u5f00\u59cb\u7cfb\u7edf\u521d\u59cb\u5316")',
-        ),
-        "setup_wizard.start_system_init_button",
+        )
+        if s
     )
+    # Clicking through page 3 lands us here a frame early, so poll for page 4 to
+    # render (its update-mode radios or the init button) before acting \u2014 do NOT
+    # early-return on a not-yet-rendered radio count, or we skip init entirely.
+    deadline = time.monotonic() + (OVERLAY_WAIT_MS / 1000)
+    while time.monotonic() < deadline:
+        if _is_loading_page(page):
+            logger.info("  system loading already started")
+            return
+        if surface.locator(radio_sel).count() > 0 or _first_visible_locator(surface, init_selectors) is not None:
+            break
+        page.wait_for_timeout(300)
+
+    # A recommended update mode is pre-selected and the init button is enabled
+    # without touching the radios; best-effort switch to "install all updates"
+    # like the old flow, but never block on it.
+    radios = surface.locator(radio_sel)
+    if radios.count() > 1:
+        try:
+            surface.locator('label.arco-radio, label.ivu-radio-wrapper').nth(1).click(timeout=2_000)
+            logger.info("  selected auto-update option")
+        except Exception:
+            logger.info("  update mode left at recommended default")
+
+    _click_first_visible_selector(surface, init_selectors, "setup_wizard.start_system_init_button")
     logger.info("  system init started; waiting for reboot + desktop...")
 
 
@@ -452,6 +507,11 @@ def _extract_full_sn_from_page(page: "Page", sn: str) -> str | None:
     except Exception:
         pass
     parts.append(_body_text(page))
+    # New-firmware wizard renders in a child iframe; include its text so the full
+    # SN (shown as 序列号: ...) is recoverable from a scanned tail.
+    surface = _wizard_surface(page)
+    if surface is not page:
+        parts.append(_body_text(surface))
     # Browser storage can retain stale SN values from another device; only use it
     # when a scanned tail is available to validate the candidate.
     if expected_sn:

@@ -4,17 +4,21 @@
 # -----------------------------------------------------------------------------
 # First-time setup wizard
 # -----------------------------------------------------------------------------
+# 初始化向导：UGOS 1.17 起渲染在 device-wizard 子 iframe 里，且换成 Arco。
+# 选择器一律「旧 iView, 新 Arco」并集；驱动侧 setup_wizard.py 用 _wizard_surface()
+# 自动在顶层(旧固件)或 iframe(新固件)上操作，兼容新旧。
 setup_wizard:
   device_name_input: 'input[type="text"]'
-  agree_checkboxes: 'input.ivu-checkbox-input'
+  agree_checkboxes: 'input.ivu-checkbox-input, input.arco-checkbox-target'
   page1_next_button: 'button.next-step-btn'
-  admin_username_input: 'input[type="text"]'
+  # 用 placeholder 精确定位账号名输入框，避免页面切换瞬间填到上一页的设备名框
+  admin_username_input: 'input[placeholder*="管理员账号"], input[placeholder*="账号名称"], input[type="text"]'
   admin_password_inputs: 'input[type="password"]'
   page2_next_button: 'button.next-step-btn'
   skip_phone_link: '.jump-btn'
-  skip_phone_confirm_button: '.ivu-modal-footer .ivu-btn-primary'
-  update_mode_radios: 'input.ivu-radio-input'
-  start_system_init_button: 'button.complete-btn, button.ivu-btn-primary:has-text("开始系统初始化"), button.ivu-btn-primary:has-text("开始初始化")'
+  skip_phone_confirm_button: '.ivu-modal-footer .ivu-btn-primary, .arco-modal-footer .arco-btn-primary'
+  update_mode_radios: 'input.ivu-radio-input, input.arco-radio-target'
+  start_system_init_button: 'button.complete-btn, button.ivu-btn-primary:has-text("开始系统初始化"), button.ivu-btn-primary:has-text("开始初始化"), button.arco-btn-primary:has-text("开始系统初始化"), button.arco-btn-primary:has-text("开始初始化"), button.arco-btn-primary:has-text("完成")'
   desktop_ready_body: 'body.lang-zh-CN'
 
 # -----------------------------------------------------------------------------

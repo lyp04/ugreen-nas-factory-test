@@ -37,6 +37,10 @@
 
 UGOS 的前端跨固件版本变化很大，同一个功能在不同版本用不同的 HTML 结构、CSS 框架（ivu/arco）和 iframe 命名方式。代码里充满了多级 fallback：
 
+**换框架时选择器写「旧, 新」并集，不要替换。** 2026-07 的 UGOS 1.17 把控制面板/存储管理整体从 iView 迁到 Arco，`selectors.yml` 里受影响的选择器全部改成了逗号并集（如 `.ivu-tabs-tab:has-text("SMB"), .arco-tabs-tab:has-text("SMB")`），同一份配置同时兼容新旧固件——产线上新旧固件长期混跑，替换式修复会把旧固件打崩。另一条经验：`text=` / `:has-text()` 文本选择器比类名耐版本变化得多，优先用文本锚定。
+
+**失败留档带每个应用 iframe 的 DOM。** 顶层页面只有桌面壳，真正出错的内容都在应用 iframe 里；`capture_failure` 会把每个 iframe 的 HTML 存成 `*_FAIL_*_iframe_<name>.html`。排查选择器问题先看这些文件，不要对着顶层截图猜。
+
 **iframe 选择器要试三种模式。** 存储管理器和文件管理器的 iframe 在不同固件版本用不同命名：`iframe[name^="storagemgr"]`、`iframe[name*="storagemgr"]`、`iframe[src*="/storagemgr/"]`，代码按顺序尝试，命中任何一个即可。
 
 **"立即更新" 按钮有 6 种写法。** 不同 UGOS 版本的更新通知用不同的标签（链接 / 按钮 / 纯文本）和措辞（"立即更新"、"已经下载并准备好"），代码逐一尝试 6 种定位策略。
@@ -106,15 +110,17 @@ PyInstaller `--windowed` 打包的 exe 没有控制台，但 `subprocess.run()` 
 
 发现策略按速度递减尝试：UGREEN 广播（2 秒）→ mDNS（5 秒）→ TCP 端口扫描（最慢）。每个发现到的 IP 都做 HTTP 探测确认是 UGOS 而非同端口的其他服务。
 
+**双网口机型自动选快口。** 4800Plus 这类双网口机器同一 SN 会在两个 IP 上可见，测速必须走 10G 口。`_identity_port_score()`（`src/cli.py`）按 identity 文本里的 10G/10000 关键词和 `interface=eth0` 加权，自动选分高的 IP——无需配置，也不受 `network.subnet` 影响。
+
 **SN 尾号匹配防止测错机。** 同一网段上可能有多台 NAS，用 SN 末四位匹配确保测到对的那台。浏览器存储里可能残留上一台设备的 SN，所以只在有扫码枪输入的预期 SN 尾号时才做存储抽取验证。
 
 **并发测试的 IP 隔离。** GUI 并发跑多台 NAS 时，`exclude` 参数防止同一台 NAS 被两个任务同时认领。`DEVICE_LOCKS` 字典按 IP 加锁，锁获取用 `timeout=1.0` 以便在等待间隙检查取消事件，防止死锁。
 
 ### 10. autoupdate 仓库同步：不要用 merge
 
-早期用 `git merge --ff-only --autostash` 同步 `ugreen-nas-autoupdate` 仓库。内部业务系统刷新 会本地修改 `materials.json`，上游也经常改这个文件，`--autostash` 的 stash pop 经常冲突，留下合并标记导致下次 refresh 失败。
+早期用 `git merge --ff-only --autostash` 同步 `ugreen-nas-autoupdate` 仓库。`forms refresh` 会本地重写 `materials.json`，上游也经常改这个文件，`--autostash` 的 stash pop 经常冲突，留下合并标记导致下次 refresh 失败。
 
-改用 `git reset --hard <upstream>`：反正 `materials.json` 在 sync 之后立刻就会被 内部业务系统刷新 整个重写，本地修改是短命的，丢了无所谓。
+改用 `git reset --hard <upstream>`：反正 `materials.json` 在 sync 之后立刻就会被 `forms refresh` 整个重写，本地修改是短命的，丢了无所谓。
 
 另一个教训：工厂机上任何需要手动操作的步骤（比如 `git pull`）都会被遗忘。autoupdate 仓库的 carton 扣减功能发布了好几个版本都"静悄悄地没人用"，因为没有人在工厂机上手动 pull。修复：启动时自动拉取。
 
@@ -135,6 +141,15 @@ PyInstaller `--windowed` 打包的 exe 没有控制台，但 `subprocess.run()` 
 失败截图文件名含 `_FAIL_` 标记，`capture.py` 靠这个标记判断"已有成功截图则跳过"。删掉标记会导致失败截图被误认为成功，跳过重拍。
 
 Playwright traces 目录在每次会话开始时清空，否则会在工厂机上累积 GB 级文件。
+
+**控制台 GBK 编码。** 输出目录里有中文目录名（`图片/`），文件读写全程显式 UTF-8 没有问题；但工厂机 PowerShell/cmd 的代码页不是 UTF-8，命令行里直接传中文参数会被 GBK 误编码。调试脚本的做法是把中文关键词写进 .py 文件而不是命令行（见 `scripts/analyze_html.py` 头部注释）；交互排查前先 `chcp 65001`。
+
+### 14. 部署 / 换包：exe 旁边的 `config/` 是运行时真身
+
+冻结 exe 读的是 `<exe>/config/` 下的**磁盘文件**，不是 PyInstaller 打进包里的副本。所以手工替换 exe（不走 `build-packages.ps1` 整包重打）时，两件事必须跟着做，否则新代码带的修复不生效：
+
+- **`config/selectors.yml` 要一起换。** 2026-07 UGOS Arco 迁移时实踩：exe 换成了带新选择器的版本，但磁盘上的旧 `selectors.yml` 覆盖了它，页面照样点不到。
+- **`config/labels.yml` 要在。** 缺失时 `lookup_pn` 查不到，`print-nameplate` CLI 会**静默**用 `placeholder_pn`（默认 `000000`）出牌不报错；GUI 的自动打印路径会警告并跳过，但手工 CLI 补打没有这层保护。
 
 ---
 
@@ -163,6 +178,8 @@ git tag v0.2.0 && git push --tags
 ```
 
 CI 会自动把 tag 名当 `versionName`、`git rev-list --count HEAD` 当 `versionCode`，stamp 进 `src/version.py` 后打包发布。
+
+**手工打包的 exe 不能对外分发。** `build-exe.ps1` / `build-packages.ps1` 不 stamp 版本号，打出来的 exe 还是仓库默认的 `VERSION_CODE=1`——updater 会认为线上任意 release 都比它新，一启动就提示"更新"，可能把机器覆盖成旧代码。正式分发必须走 tag 触发 CI。
 
 已部署的 v0.1.0 / v0.1.1 无法自动升级（早期 swap 脚本用 `Move-Item -Force` 会静默 no-op），首次需手动替换 exe。v0.1.6 起 swap 完成后不再自动重启，弹窗提示用户手动双击。
 

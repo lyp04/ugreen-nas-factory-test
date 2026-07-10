@@ -358,12 +358,12 @@ def refresh_form_materials(project_root: Path | None = None, account_name: str |
         cmd.extend(["--account", account_name])
     result = subprocess.run(cmd, cwd=root, text=True, capture_output=True, timeout=180, **_hidden_process_kwargs())
     if result.returncode != 0:
-        raise FormEntryError((result.stderr or result.stdout or "鑷姩褰曡〃鐗╂枡鍒锋柊澶辫触").strip())
+        raise FormEntryError((result.stderr or result.stdout or "自动录表物料刷新失败").strip())
     text = (result.stdout or "").strip().splitlines()[-1]
     try:
         return json.loads(text)
     except json.JSONDecodeError as exc:
-        raise FormEntryError(f"鑷姩褰曡〃鐗╂枡鍒锋柊杩斿洖涓嶅彲瑙ｆ瀽: {text}") from exc
+        raise FormEntryError(f"自动录表物料刷新返回不可解析: {text}") from exc
 
 
 def run_login_ui(project_root: Path | None = None) -> None:

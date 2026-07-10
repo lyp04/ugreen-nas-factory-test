@@ -15,6 +15,10 @@ function Assert-RealPython {
     $cmd = Get-Command python -ErrorAction SilentlyContinue
     if (-not $cmd) {
         Write-Host "未找到 python 命令。" -ForegroundColor Red
+        if (Get-Command py -ErrorAction SilentlyContinue) {
+            Write-Host "但检测到 py 启动器——多半是安装时没勾选 'Add Python to PATH'。" -ForegroundColor Yellow
+            Write-Host "可以把已装的 Python 加入 PATH，或手动执行：py -3 -m venv .venv 后重跑本脚本。" -ForegroundColor Yellow
+        }
         return $false
     }
 
@@ -29,6 +33,16 @@ function Assert-RealPython {
     }
 
     Write-Host $versionText
+
+    # 源码里有 3.10+ 语法（裸 PEP 604 联合类型），低版本会在导入期抛出一条
+    # 看不出因果的 TypeError——在这里就把版本挡下来。
+    if ("$versionText" -match "(\d+)\.(\d+)") {
+        $ver = [version]("{0}.{1}" -f $Matches[1], $Matches[2])
+        if ($ver -lt [version]"3.10") {
+            Write-Host "Python $ver 过低，本项目需要 3.10+。" -ForegroundColor Red
+            return $false
+        }
+    }
     return $true
 }
 

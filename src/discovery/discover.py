@@ -159,8 +159,8 @@ def _looks_like_ugos(ip: str, port: int, timeout: float = 2.0) -> bool:
 
 def wait_until_ready(ip: str, port: int, max_wait: float) -> None:
     logger.info(f"Waiting for UGOS at {ip}:{port} to be ready (max {max_wait}s)...")
-    deadline = time.time() + max_wait
-    while time.time() < deadline:
+    deadline = time.monotonic() + max_wait
+    while time.monotonic() < deadline:
         if _looks_like_ugos(ip, port):
             logger.info("UGOS service is ready")
             return

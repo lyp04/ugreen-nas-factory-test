@@ -1,4 +1,6 @@
-from src.gui import TimingSlice, _compact_timing_slices, build_timing_slices
+from types import SimpleNamespace
+
+from src.gui import FactoryTestGUI, TimingSlice, _compact_timing_slices, build_timing_slices
 
 
 def test_build_timing_slices_splits_each_update_cycle() -> None:
@@ -37,7 +39,8 @@ def test_build_timing_slices_tolerates_small_out_of_order_log_lines() -> None:
 
     slices = {item.label: item.seconds for item in build_timing_slices(logs)}
 
-    assert slices["准备"] == 2
+    # Queue-to-start time is intentionally excluded from runtime timing.
+    assert "准备" not in slices
     assert slices["首次设置"] == 166
     assert slices["更新1"] == 60
 
@@ -57,3 +60,18 @@ def test_compact_timing_slices_moves_short_phases_to_other() -> None:
         ("建池共享", 45),
         ("其他", 13),
     ]
+
+
+def test_gui_runtime_text_scrubs_configured_password_and_structured_token() -> None:
+    secret = "factory-admin-secret"
+    fake_gui = SimpleNamespace(
+        config={"admin": {"password": secret}, "fault_report": {"token": ""}}
+    )
+
+    cleaned = FactoryTestGUI._scrub_runtime_text(
+        fake_gui,
+        f'worker failed with {secret}; response={{"token": "bridge-secret"}}',
+    )
+
+    assert secret not in cleaned
+    assert "bridge-secret" not in cleaned

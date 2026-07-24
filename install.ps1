@@ -11,75 +11,97 @@ Set-Location -Path $PSScriptRoot
 
 Write-Host "== 检查 Python ==" -ForegroundColor Cyan
 
-function Assert-RealPython {
-    $cmd = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $cmd) {
-        Write-Host "未找到 python 命令。" -ForegroundColor Red
-        if (Get-Command py -ErrorAction SilentlyContinue) {
-            Write-Host "但检测到 py 启动器——多半是安装时没勾选 'Add Python to PATH'。" -ForegroundColor Yellow
-            Write-Host "可以把已装的 Python 加入 PATH，或手动执行：py -3 -m venv .venv 后重跑本脚本。" -ForegroundColor Yellow
-        }
-        return $false
+$venvPython = ".\.venv\Scripts\python.exe"
+
+function Get-PythonLauncherInfo {
+    param(
+        [Parameter(Mandatory=$true)][string]$Command,
+        [string[]]$PrefixArgs = @()
+    )
+
+    $resolved = Get-Command $Command -ErrorAction SilentlyContinue
+    if (-not $resolved) { return $null }
+    $commandPath = if ($resolved.Path) { $resolved.Path } elseif ($resolved.Source) { $resolved.Source } else { $resolved.Name }
+
+    try {
+        $versionOutput = & $commandPath @PrefixArgs --version 2>&1
+        $exitCode = $LASTEXITCODE
+    } catch {
+        return $null
+    }
+    $versionText = ($versionOutput | Out-String).Trim()
+    if ($exitCode -ne 0 -or $versionText -notmatch "(\d+)\.(\d+)") {
+        return $null
     }
 
-    $versionText = & python --version 2>&1
-    $exit = $LASTEXITCODE
-    $isStub = $cmd.Source -like "*WindowsApps*" -and ($exit -ne 0 -or -not $versionText)
-
-    if ($isStub -or $exit -ne 0) {
-        Write-Host "检测到 python.exe 是 Microsoft Store 占位器（未实际安装）。" -ForegroundColor Red
-        Write-Host "Source: $($cmd.Source)"
-        return $false
+    # 源码里有 3.10+ 语法（裸 PEP 604 联合类型），低版本会在导入期失败。
+    $version = [version]("{0}.{1}" -f $Matches[1], $Matches[2])
+    if ($version -lt [version]"3.10") {
+        Write-Host "$Command $($PrefixArgs -join ' ') 指向 Python $version，低于所需的 3.10。" -ForegroundColor Yellow
+        return $null
     }
 
-    Write-Host $versionText
-
-    # 源码里有 3.10+ 语法（裸 PEP 604 联合类型），低版本会在导入期抛出一条
-    # 看不出因果的 TypeError——在这里就把版本挡下来。
-    if ("$versionText" -match "(\d+)\.(\d+)") {
-        $ver = [version]("{0}.{1}" -f $Matches[1], $Matches[2])
-        if ($ver -lt [version]"3.10") {
-            Write-Host "Python $ver 过低，本项目需要 3.10+。" -ForegroundColor Red
-            return $false
-        }
+    return [pscustomobject]@{
+        Command = $commandPath
+        PrefixArgs = @($PrefixArgs)
+        Version = $version
+        VersionText = $versionText
     }
-    return $true
-}
-
-if (-not (Assert-RealPython)) {
-    Write-Host ""
-    Write-Host "请安装 Python 3.10+ 后再运行本脚本：" -ForegroundColor Yellow
-    Write-Host "  方式1：winget install -e --id Python.Python.3.12"
-    Write-Host "  方式2：从 https://www.python.org/downloads/windows/ 下载安装包，安装时务必勾选 'Add Python to PATH'"
-    Write-Host ""
-    Write-Host "如果已装 Python 但仍报此错，请关闭 Store 别名：设置 → 应用 → 高级应用设置 → 应用执行别名 → 关闭 python.exe / python3.exe" -ForegroundColor DarkGray
-    Write-Error "Python 未就绪"
 }
 
 Write-Host ""
 Write-Host "== 创建虚拟环境 .venv ==" -ForegroundColor Cyan
-if (-not (Test-Path ".venv")) {
-    & python -m venv .venv
-    if (-not $?) { Write-Error "创建虚拟环境失败" }
+
+if (Test-Path -LiteralPath $venvPython -PathType Leaf) {
+    $venvInfo = Get-PythonLauncherInfo -Command $venvPython
+    if (-not $venvInfo) {
+        Write-Error "现有 .venv 无法运行或 Python 版本低于 3.10；请移走该目录后重新运行安装脚本"
+    }
+    Write-Host "已存在，使用 $($venvInfo.VersionText)"
 } else {
-    Write-Host "已存在，跳过"
+    if (Test-Path -LiteralPath ".venv") {
+        Write-Error "现有 .venv 不完整（缺少 Scripts\python.exe）；请移走该目录后重新运行安装脚本"
+    }
+
+    # python.org 安装通常提供 python；未加入 PATH 时 Windows 的 py 启动器
+    # 仍可用。依次探测，且每个候选都实际执行并校验 3.10+，不会把 Store
+    # 占位器当成可用解释器。
+    $pythonLauncher = Get-PythonLauncherInfo -Command "python"
+    if (-not $pythonLauncher) {
+        $pythonLauncher = Get-PythonLauncherInfo -Command "py" -PrefixArgs @("-3")
+    }
+    if (-not $pythonLauncher) {
+        Write-Host ""
+        Write-Host "未找到可用的 python 或 py -3（需要 Python 3.10+）。" -ForegroundColor Red
+        Write-Host "请安装 Python 3.10+ 后再运行本脚本：" -ForegroundColor Yellow
+        Write-Host "  方式1：winget install -e --id Python.Python.3.12"
+        Write-Host "  方式2：从 https://www.python.org/downloads/windows/ 下载安装包"
+        Write-Error "Python 未就绪"
+    }
+
+    Write-Host "使用 $($pythonLauncher.VersionText)：$($pythonLauncher.Command) $($pythonLauncher.PrefixArgs -join ' ')"
+    $pythonLauncherArgs = @($pythonLauncher.PrefixArgs)
+    & $pythonLauncher.Command @pythonLauncherArgs -m venv .venv
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
+        Write-Error "创建虚拟环境失败"
+    }
 }
 
 Write-Host ""
 Write-Host "== 安装依赖 ==" -ForegroundColor Cyan
-& .\.venv\Scripts\python.exe -m pip install --upgrade pip
-if (-not $?) { Write-Error "pip 升级失败" }
+& $venvPython -m pip install --upgrade pip
+if ($LASTEXITCODE -ne 0) { Write-Error "pip 升级失败" }
 
-& .\.venv\Scripts\pip.exe install -r requirements.txt
-if (-not $?) { Write-Error "requirements.txt 安装失败" }
+& $venvPython -m pip install -r requirements.txt
+if ($LASTEXITCODE -ne 0) { Write-Error "requirements.txt 安装失败" }
 
 Write-Host ""
 Write-Host "== 安装 Playwright 驱动 ==" -ForegroundColor Cyan
 Write-Host "（默认用系统 Edge，不下载 Chromium。如需下载 Chromium 改用 ' .\install.ps1 -WithChromium'）" -ForegroundColor DarkGray
 
 if ($WithChromium) {
-    & .\.venv\Scripts\playwright.exe install chromium
-    if (-not $?) { Write-Error "Playwright Chromium 安装失败" }
+    & $venvPython -m playwright install chromium
+    if ($LASTEXITCODE -ne 0) { Write-Error "Playwright Chromium 安装失败" }
 } else {
     Write-Host "跳过 Chromium 下载"
 }

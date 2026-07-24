@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import ipaddress
+import json
 import re
 import sys
 import threading
@@ -9,7 +9,10 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from functools import wraps
+from inspect import signature
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import click
 from playwright.sync_api import sync_playwright
@@ -38,8 +41,10 @@ from .utils.browser_control import close_managed_context, launch_managed_context
 from .utils.desktop import dismiss_desktop_overlays
 from .utils import label as label_util
 from .utils.logger import logger, setup_logger
+from .utils.interprocess_lock import InterProcessLock, InterProcessLockToken
 from .utils.screenshot import capture_failure, relocate_session_dirs, session_dirs
 from .report import reporter as fault_reporter
+from .report.redact import scrub_data, scrub_text
 from .measurements import (
     DEFAULT_CPU_TEMP_MAX_C,
     cpu_temp_failing_pages,
@@ -49,6 +54,7 @@ from .utils.sn import (
     SN_TAIL_LENGTH,
     extract_full_sn,
     is_auto_sn_placeholder,
+    is_full_sn_candidate,
     model_key_from_sn,
     normalize_sn,
     same_sn_identity,
@@ -68,9 +74,11 @@ DEVICE_LOCKS: dict[str, threading.Lock] = {}
 DEVICE_LOCKS_GUARD = threading.Lock()
 ACTIVE_DEVICE_IPS: set[str] = set()
 DISCOVERY_ALLOCATION_GUARD = threading.Lock()
+AUTO_DEVICE_PROCESS_LEASE_KEY = "device-auto-claim-v1"
 UNINITIALIZED_MARKERS = ("未初始化", "欢迎使用绿联云存储", "我们将引导您完成设备的初始化过程")
 STARTING_MARKERS = ("服务启动中", "尝试手动刷新页面")
 SETUP_NO_SN_MARKERS = ("命名您的绿联云", "命名您的设备", "序列号：", "设备名")
+DEVICE_IDENTITY_FAILURE_STAGE = "设备身份校验失败"
 PAGE_LABELS = {
     "system_update": "系统更新",
     "network_interface": "网络接口",
@@ -105,6 +113,50 @@ FORM_SUCCESS_STATUSES = {"success", "already_submitted"}
 
 class TaskCancelled(RuntimeError):
     pass
+
+
+def _validate_admin_credentials(config: dict) -> None:
+    """Fail before touching a NAS when the public example credentials are active."""
+    admin = config.get("admin") or {}
+    username = str(admin.get("username") or "").strip()
+    password = str(admin.get("password") or "").strip()
+    placeholders = {"change_me", "changeme"}
+    invalid_fields = [
+        field
+        for field, value in (("admin.username", username), ("admin.password", password))
+        if not value or value.lower() in placeholders
+    ]
+    if invalid_fields:
+        raise ValueError(
+            "Unsafe administrator configuration: replace the public CHANGE_ME placeholders "
+            f"in config/config.yml before testing a NAS ({', '.join(invalid_fields)})"
+        )
+
+
+def _verify_page_host(page, expected_ip: str, before_action: str) -> str:
+    """Bind a browser-side destructive action to the same IP verified by broadcast."""
+    try:
+        observed_host = urlsplit(str(page.url)).hostname
+    except Exception as exc:
+        raise RuntimeError(
+            f"{DEVICE_IDENTITY_FAILURE_STAGE}: could not verify the page address before {before_action}"
+        ) from exc
+
+    try:
+        expected = str(ipaddress.ip_address(expected_ip))
+        observed = str(ipaddress.ip_address(observed_host or ""))
+    except ValueError as exc:
+        raise RuntimeError(
+            f"{DEVICE_IDENTITY_FAILURE_STAGE}: page address changed before {before_action}: "
+            f"expected {expected_ip}, got {observed_host or '<unknown>'}"
+        ) from exc
+
+    if observed != expected:
+        raise RuntimeError(
+            f"{DEVICE_IDENTITY_FAILURE_STAGE}: page address changed before {before_action}: "
+            f"expected {expected}, got {observed}"
+        )
+    return observed
 
 
 def _normalize_model_override(model: str | None) -> str | None:
@@ -144,6 +196,25 @@ def _read_report_file(report_path: Path) -> dict:
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _factory_reset_state(report: dict | None) -> str:
+    return str((report or {}).get("factory_reset") or "").strip().lower()
+
+
+def _raise_for_unsafe_prior_factory_reset(report: dict | None, *, sn: str) -> None:
+    state = _factory_reset_state(report)
+    if state in {"starting", "initiated", "uncertain"}:
+        raise reset_factory_flow.FactoryResetUnconfirmed(
+            f"{reset_factory_flow.FACTORY_RESET_UNCONFIRMED_MARKER}: "
+            f"previous report for {sn} is {state}; verify and reinitialize the NAS, "
+            "then archive its prior report before retesting"
+        )
+    if state == "confirmed" and str((report or {}).get("status") or "").lower() != "success":
+        raise reset_factory_flow.FactoryResetRetryBlocked(
+            f"{reset_factory_flow.FACTORY_RESET_RETRY_BLOCKED_MARKER}: "
+            f"previous report for {sn} already confirmed completion"
+        )
 
 
 def _merge_resume_report(report: dict, previous: dict) -> None:
@@ -223,17 +294,66 @@ def _validate_captured_measurements(captured_values: dict, cpu_temp_max_c: float
         raise RuntimeError(f"{CPU_TEMP_FAILURE_STAGE}: {'；'.join(temp_failures)}")
 
 
-def _write_report_checkpoint(dirs: dict[str, Path], report: dict, stage: str | None = None) -> None:
+def _config_secret_values(config: dict) -> tuple[str, ...]:
+    admin = config.get("admin") or {}
+    fault_report = config.get("fault_report") or {}
+    values = (
+        str(admin.get("password") or ""),
+        str(fault_report.get("token") or ""),
+    )
+    return tuple(dict.fromkeys(value for value in values if len(value) >= 4))
+
+
+def _safe_error_message(exc_or_message: object, config: dict) -> str:
+    return scrub_text(
+        exc_or_message,
+        extra_secrets=_config_secret_values(config),
+        max_len=4_000,
+        mask_identifiers=False,
+    )
+
+
+def _sanitized_exception(exc: Exception, config: dict) -> Exception:
+    safe_message = _safe_error_message(exc, config)
+    if safe_message == str(exc):
+        return exc
+    try:
+        return type(exc)(safe_message)
+    except Exception:
+        return RuntimeError(safe_message)
+
+
+def _write_report_checkpoint(
+    dirs: dict[str, Path],
+    report: dict,
+    stage: str | None = None,
+    *,
+    extra_secrets: tuple[str, ...] = (),
+) -> None:
     if stage:
         report["current_stage"] = stage
     report["checkpoint_at"] = datetime.now().isoformat()
-    _write_json_atomic(dirs["base"] / "test_report.json", report)
+    _write_json_atomic(
+        dirs["base"] / "test_report.json",
+        report,
+        extra_secrets=extra_secrets,
+    )
 
 
-def _write_json_atomic(path: Path, data: dict) -> None:
+def _write_json_atomic(
+    path: Path,
+    data: dict,
+    *,
+    extra_secrets: tuple[str, ...] = (),
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f"{path.name}.tmp")
-    tmp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    safe_data = scrub_data(
+        data,
+        extra_secrets=extra_secrets,
+        mask_identifiers=False,
+    )
+    tmp_path.write_text(json.dumps(safe_data, indent=2, ensure_ascii=False), encoding="utf-8")
     tmp_path.replace(path)
 
 
@@ -244,6 +364,18 @@ def is_pool_creation_timeout_error(exc_or_message: object) -> bool:
 
 def is_unflashed_password_error(exc_or_message: object) -> bool:
     return UNFLASHED_MESSAGE in str(exc_or_message)
+
+
+def is_factory_reset_unconfirmed_error(exc_or_message: object) -> bool:
+    return reset_factory_flow.FACTORY_RESET_UNCONFIRMED_MARKER in str(exc_or_message)
+
+
+def is_factory_reset_retry_blocked_error(exc_or_message: object) -> bool:
+    return reset_factory_flow.FACTORY_RESET_RETRY_BLOCKED_MARKER in str(exc_or_message)
+
+
+def is_device_identity_error(exc_or_message: object) -> bool:
+    return DEVICE_IDENTITY_FAILURE_STAGE in str(exc_or_message)
 
 
 def failure_stage_for_error(exc_or_message: object) -> str:
@@ -259,6 +391,14 @@ def failure_stage_for_error(exc_or_message: object) -> str:
         return _pool_failure_stage(message)
     if is_unflashed_password_error(exc_or_message):
         return UNFLASHED_TITLE
+    if is_device_identity_error(exc_or_message):
+        return DEVICE_IDENTITY_FAILURE_STAGE
+    if is_factory_reset_retry_blocked_error(exc_or_message):
+        return "恢复出厂设置已确认，禁止重复执行"
+    if is_factory_reset_unconfirmed_error(exc_or_message):
+        return "恢复出厂设置待确认"
+    if "factory reset" in message.lower() or "factory_reset" in message.lower():
+        return "恢复出厂设置失败"
     capture_match = re.search(r"Capture failed at page '([A-Za-z0-9_]+)'", message)
     if capture_match:
         page_key = capture_match.group(1)
@@ -322,6 +462,12 @@ def classify_failure_category(exc_or_message: object) -> str:
         return "rw_speed"
     # operator 可自行处理的已知条件：不当作需要排障的「故障」，不上报。
     if is_unflashed_password_error(message):
+        return "operator"
+    if is_factory_reset_unconfirmed_error(message):
+        return "operator"
+    if is_factory_reset_retry_blocked_error(message):
+        return "operator"
+    if is_device_identity_error(message):
         return "operator"
     if "SN未解绑" in message or "请先解绑SN" in message:
         return "operator"
@@ -460,6 +606,118 @@ def _acquire_lock_until_cancelled(lock: threading.Lock, cancel_requested_cb: Cal
             return
 
 
+def _device_process_lease_key(sn: str) -> str | None:
+    """Map the full and short forms of one unit to the same IPC key."""
+    normalized = normalize_sn(sn)
+    if is_auto_sn_placeholder(normalized):
+        return None
+    tail = sn_tail(normalized)
+    return f"device-sn-tail:{tail}" if len(tail) >= SN_TAIL_LENGTH else None
+
+
+def _acquire_process_lease_until_cancelled(
+    key: str,
+    cancel_requested_cb: Callable[[], bool] | None,
+    *,
+    description: str,
+) -> tuple[InterProcessLock, InterProcessLockToken]:
+    if not key:
+        raise ValueError("cross-process lease key must not be empty")
+    lock = InterProcessLock(key)
+    waiting_logged = False
+    while True:
+        token = lock.try_acquire()
+        if token is not None:
+            logger.info(f"{description}: cross-process lease acquired")
+            return lock, token
+        if not waiting_logged:
+            logger.info(f"{description}: another application process is active; waiting")
+            waiting_logged = True
+        _raise_if_cancelled(cancel_requested_cb)
+        time.sleep(0.25)
+
+
+def _acquire_process_lease_or_fail(
+    key: str,
+    *,
+    description: str,
+) -> tuple[InterProcessLock, InterProcessLockToken]:
+    """Acquire once, refusing to turn a duplicate AUTO claim into a queued retest."""
+    if not key:
+        raise ValueError("cross-process lease key must not be empty")
+    lock = InterProcessLock(key)
+    token = lock.try_acquire()
+    if token is None:
+        raise RuntimeError(
+            f"{DEVICE_IDENTITY_FAILURE_STAGE}: {description} is already claimed by "
+            "another application process; refusing a duplicate AUTO run"
+        )
+    logger.info(f"{description}: exclusive cross-process claim acquired")
+    return lock, token
+
+
+def _release_process_lease(
+    lock: InterProcessLock | None,
+    token: InterProcessLockToken | None,
+    *,
+    description: str,
+) -> None:
+    if lock is None or token is None:
+        return
+    if not lock.release(token):
+        raise RuntimeError(f"{description}: refused to release an unowned cross-process lease")
+    logger.info(f"{description}: cross-process lease released")
+
+
+def _with_device_process_lease(func):
+    """Hold a per-unit IPC lease across report reads and all NAS actions.
+
+    AUTO has no stable identity yet, so it holds one machine-wide, non-waiting
+    claim across its report reads and discovery. Once discovery returns a real SN,
+    the run also claims that stable identity without waiting. Rejecting contention
+    is intentional: waiting would run the same physical unit again after the
+    current owner finishes.
+    """
+    func_signature = signature(func)
+
+    @wraps(func)
+    def locked(*args, **kwargs):
+        bound = func_signature.bind_partial(*args, **kwargs)
+        requested_sn = str(bound.arguments.get("sn") or "")
+        key = _device_process_lease_key(requested_sn)
+        if key is None:
+            if not is_auto_sn_placeholder(normalize_sn(requested_sn)):
+                return func(*args, **kwargs)
+            lock, token = _acquire_process_lease_or_fail(
+                AUTO_DEVICE_PROCESS_LEASE_KEY,
+                description=f"AUTO task {normalize_sn(requested_sn)}",
+            )
+            try:
+                return func(*args, **kwargs)
+            finally:
+                _release_process_lease(
+                    lock,
+                    token,
+                    description=f"AUTO task {normalize_sn(requested_sn)}",
+                )
+        cancel_requested_cb = bound.arguments.get("cancel_requested_cb")
+        lock, token = _acquire_process_lease_until_cancelled(
+            key,
+            cancel_requested_cb if callable(cancel_requested_cb) else None,
+            description=f"NAS {normalize_sn(requested_sn)}",
+        )
+        try:
+            return func(*args, **kwargs)
+        finally:
+            _release_process_lease(
+                lock,
+                token,
+                description=f"NAS {normalize_sn(requested_sn)}",
+            )
+
+    return locked
+
+
 def _wait_until_ready_cancelable(
     ip: str,
     port: int,
@@ -471,8 +729,8 @@ def _wait_until_ready_cancelable(
         return
 
     logger.info(f"Waiting for UGOS at {ip}:{port} to be ready (max {max_wait}s)...")
-    deadline = time.time() + max_wait
-    while time.time() < deadline:
+    deadline = time.monotonic() + max_wait
+    while time.monotonic() < deadline:
         _raise_if_cancelled(cancel_requested_cb)
         if _looks_like_ugos(ip, port):
             logger.info("UGOS service is ready")
@@ -483,6 +741,7 @@ def _wait_until_ready_cancelable(
     raise RuntimeError(f"UGOS at {ip}:{port} did not become ready within {max_wait}s")
 
 
+@_with_device_process_lease
 def run_test(
     sn: str,
     nas_ip: str = "auto",
@@ -513,17 +772,51 @@ def run_test(
         form_account_name = None
 
     config, selectors = load_configs(PROJECT_ROOT)
+    report_secrets = _config_secret_values(config)
     output_root = (PROJECT_ROOT / config["output_dir"]).resolve()
     dirs = session_dirs(output_root, sn)
     previous_report = _read_report_file(dirs["base"] / "test_report.json")
+    previous_status = str((previous_report or {}).get("status") or "").strip().lower()
+    previous_reset_state = _factory_reset_state(previous_report)
+    previous_reset_verification = str(
+        (previous_report or {}).get("factory_reset_verification") or ""
+    ).strip().lower()
+    if (
+        previous_reset_state == "confirmed"
+        and previous_reset_verification == "confirmed"
+        and previous_status != "success"
+    ):
+        # Reset confirmation is the final required operation. If the process
+        # died after that durable checkpoint, finalize the existing run without
+        # reconnecting to (or re-initializing) the now-factory-state NAS.
+        recovered_report = dict(previous_report)
+        recovered_report["status"] = "success"
+        recovered_report["current_stage"] = "测试完成"
+        recovered_report["finished_at"] = datetime.now().isoformat()
+        recovered_report["recovered_after_factory_reset"] = True
+        recovered_report.pop("error", None)
+        _write_json_atomic(
+            dirs["base"] / "test_report.json",
+            recovered_report,
+            extra_secrets=report_secrets,
+        )
+        recovery_progress = TaskProgress(progress_cb, task_id or sn, sn, 1)
+        recovery_progress.finish(
+            "success",
+            "测试完成",
+            nas_ip=str(
+                recovered_report.get("nas_ip_after_reset")
+                or recovered_report.get("nas_ip")
+                or nas_ip
+            ),
+        )
+        logger.info(f"Recovered completed factory-reset run for {sn}")
+        return recovered_report
     # A previous report left in "running" means the last run was interrupted (app closed /
     # crashed) mid-test: resume it and reuse the pages it already completed. Any other prior
     # status (failed / success) makes this a deliberate retest — re-capture every page fresh
     # so the operator sees a real new run instead of the previous run's cached screenshots.
     resume_in_progress = str((previous_report or {}).get("status") or "").strip().lower() == "running"
-    if setup_file_log:
-        setup_logger(dirs["sn_root"], sn=sn)
-
     # GUI 模式（setup_file_log=False）不调用 setup_logger，run.log 从不落盘，故障 zip
     # 里也就没有日志。这里挂一个按 task 过滤的内存 sink，收尾时再把缓冲写进
     # <sn>/run.log——不持有文件句柄，避免 SN 升级 relocate 时在 Windows 上撞文件锁。
@@ -532,7 +825,13 @@ def run_test(
     run_log_sink_id: int | None = None
     if not setup_file_log:
         run_log_sink_id = logger.add(
-            lambda message: run_log_buffer.append(str(message)),
+            lambda message: run_log_buffer.append(
+                scrub_text(
+                    str(message),
+                    extra_secrets=report_secrets,
+                    mask_identifiers=False,
+                )
+            ),
             level="DEBUG",
             filter=lambda record: record["extra"].get("task_id") == task_key,
             format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}",
@@ -561,6 +860,21 @@ def run_test(
         "status": "running",
     }
     _merge_resume_report(report, previous_report)
+    unsafe_reset_resume = previous_reset_state in {
+        "starting",
+        "initiated",
+        "uncertain",
+    }
+    blocked_confirmed_reset_resume = (
+        previous_reset_state == "confirmed" and previous_status != "success"
+    )
+    prior_reset_requires_guard = unsafe_reset_resume or blocked_confirmed_reset_resume
+    if factory_reset_before_finish:
+        report["factory_reset"] = previous_reset_state if prior_reset_requires_guard else "pending"
+    elif prior_reset_requires_guard:
+        report["factory_reset"] = previous_reset_state
+    if prior_reset_requires_guard and previous_report.get("factory_reset_verification"):
+        report["factory_reset_verification"] = previous_report["factory_reset_verification"]
     if requested_form_model:
         report["requested_form_model"] = requested_form_model
     final_success_stage = "测试完成"
@@ -573,7 +887,13 @@ def run_test(
     device_lock: threading.Lock | None = None
     device_lock_acquired = False
     reserved_ips: set[str] = set()
-    connected = False
+    verified_device_macs: frozenset[str] = frozenset()
+    auto_process_lock: InterProcessLock | None = None
+    auto_process_token: InterProcessLockToken | None = None
+    # A prior checkpoint with an already-submitted reset belongs to an existing
+    # on-disk run. Mark it writable so the fail-safe resume guard below can turn
+    # that stale "running" report into an actionable failed/unconfirmed report.
+    connected = prior_reset_requires_guard
 
     def checkpoint(stage: str | None = None) -> None:
         if stage is not None:
@@ -581,13 +901,47 @@ def run_test(
         # 连上设备前不落盘，避免给「没匹配到的 SN / 离线设备」留空壳目录。CLI 模式
         # （setup_file_log=True）目录已由 setup_logger 建好，保持原样即时落盘。
         if connected or setup_file_log:
-            _write_report_checkpoint(dirs, report, stage)
+            _write_report_checkpoint(
+                dirs,
+                report,
+                stage,
+                extra_secrets=report_secrets,
+            )
+
+    def reverify_device_identity(before_action: str) -> None:
+        observed_sn = _verify_nas_identity_at_ip(
+            ip,
+            sn,
+            cancel_requested_cb=cancel_requested_cb,
+            expected_macs=verified_device_macs,
+        )
+        if observed_sn != normalize_sn(sn):
+            raise RuntimeError(
+                f"{DEVICE_IDENTITY_FAILURE_STAGE}: identity changed before {before_action}: "
+                f"expected {sn}, got {observed_sn}"
+            )
+        _verify_page_host(page, ip, before_action)
+        report.setdefault("device_identity_checks", []).append(
+            {
+                "before": before_action,
+                "sn": observed_sn,
+                "at": datetime.now().isoformat(),
+            }
+        )
+        logger.info(f"NAS {ip}/{observed_sn}: identity reverified before {before_action}")
 
     with logger.contextualize(task_id=task_id or sn, device_sn=sn):
         _raise_if_cancelled(cancel_requested_cb)
         progress.set_stage("等待设备上线", status="running", nas_ip=nas_ip)
         checkpoint("等待设备上线")
         try:
+            if prior_reset_requires_guard:
+                _raise_for_unsafe_prior_factory_reset(previous_report, sn=sn)
+            # Recovery/unsafe-reset guards above are intentionally offline.  Only
+            # require usable credentials immediately before device discovery so a
+            # completed reset can be recovered (or a dangerous retry blocked)
+            # without reconnecting to the factory-state NAS.
+            _validate_admin_credentials(config)
             ip, reserved_ips, discovered_sn = _resolve_ip_for_task(
                 sn,
                 nas_ip,
@@ -596,6 +950,20 @@ def run_test(
                 cancel_requested_cb,
             )
             _raise_if_cancelled(cancel_requested_cb)
+            if _device_process_lease_key(sn) is None:
+                if not discovered_sn:
+                    raise RuntimeError(
+                        f"{DEVICE_IDENTITY_FAILURE_STAGE}: AUTO discovery did not return a full SN"
+                    )
+                auto_key = _device_process_lease_key(discovered_sn)
+                if auto_key is None:
+                    raise RuntimeError(
+                        f"{DEVICE_IDENTITY_FAILURE_STAGE}: invalid discovered SN {discovered_sn!r}"
+                    )
+                auto_process_lock, auto_process_token = _acquire_process_lease_or_fail(
+                    auto_key,
+                    description=f"NAS {normalize_sn(discovered_sn)}",
+                )
             sn, dirs = _upgrade_task_sn(
                 current_sn=sn,
                 discovered_sn=discovered_sn,
@@ -608,7 +976,7 @@ def run_test(
             report["nas_ip"] = ip
             if reserved_ips:
                 report["nas_reserved_ips"] = sorted(reserved_ips)
-            device_lock = _device_lock_for_ip(ip)
+            device_lock = _device_lock_for_ip(_canonical_device_lock_ip(ip, reserved_ips))
             if not device_lock.acquire(blocking=False):
                 logger.info(f"NAS {ip}: another task is active, waiting on hold")
                 progress.set_stage("等待同一 NAS 上一个任务完成", status="running", nas_ip=ip)
@@ -617,6 +985,39 @@ def run_test(
             logger.info(f"NAS {ip}: device lock acquired")
             progress.set_stage("等待设备上线", status="running", nas_ip=ip)
             _wait_until_ready_cancelable(ip, port, config["network"]["service_ready_timeout"], cancel_requested_cb)
+            progress.set_stage("校验设备身份", status="running", nas_ip=ip)
+            initial_macs: set[str] = set()
+            verified_sn = _verify_nas_identity_at_ip(
+                ip,
+                sn,
+                cancel_requested_cb=cancel_requested_cb,
+                observed_macs_out=initial_macs,
+            )
+            verified_device_macs = frozenset(initial_macs)
+            sn, dirs = _upgrade_task_sn(
+                current_sn=sn,
+                discovered_sn=verified_sn,
+                output_root=output_root,
+                dirs=dirs,
+                progress=progress,
+                report=report,
+                setup_file_log=setup_file_log,
+            )
+            report["verified_device_sn"] = verified_sn
+            if verified_device_macs:
+                report["verified_device_macs"] = sorted(verified_device_macs)
+            report["device_identity_checks"] = [
+                {
+                    "before": "initialization_or_login",
+                    "sn": verified_sn,
+                    "at": datetime.now().isoformat(),
+                }
+            ]
+            if setup_file_log:
+                # Identity is now authoritative and any short/AUTO directory
+                # relocation is complete. Opening run.log earlier leaves a
+                # live Windows handle that prevents the directory move.
+                setup_logger(dirs["sn_root"], sn=sn, extra_secrets=report_secrets)
             # 设备已就绪：从这里开始才落地 <sn>/ 目录与 run.log（此前的失败不留目录）。
             connected = True
             progress.complete_step("设备已连接", nas_ip=ip)
@@ -627,12 +1028,9 @@ def run_test(
             nas_url = f"http://{ip}:{port}"
             with sync_playwright() as pw:
                 browser_session = launch_managed_context(pw, config["browser"], task_id or sn)
+                page = _initialize_managed_browser_page(browser_session, config["browser"])
                 if browser_session.browser_pid is not None:
                     _emit_browser_event(progress_cb, "browser_ready", browser_pid=browser_session.browser_pid)
-
-                context = browser_session.context
-                page = browser_session.page
-                page.set_default_timeout(config["browser"]["default_timeout_ms"])
 
                 try:
                     _raise_if_cancelled(cancel_requested_cb)
@@ -707,6 +1105,7 @@ def run_test(
 
                     progress.set_stage("检查系统更新", status="running", nas_ip=ip)
                     _raise_if_cancelled(cancel_requested_cb)
+                    reverify_device_identity("system_update")
                     if system_update_flow.run_update_first(page, nas_url, config["admin"], selectors):
                         report["system_update_before_provision"] = "installed"
                         progress.set_stage("系统更新完成", status="running", nas_ip=ip)
@@ -748,6 +1147,7 @@ def run_test(
 
                     progress.set_stage("准备共享目录", status="running", nas_ip=ip)
                     _raise_if_cancelled(cancel_requested_cb)
+                    reverify_device_identity("provision")
                     reset_existing_pools = not _has_resume_artifacts(report)
                     report["provision_started"] = True
                     checkpoint("准备共享目录")
@@ -875,142 +1275,369 @@ def run_test(
                         )
                         progress.set_stage("清理存储池", status="running", nas_ip=ip)
                         _raise_if_cancelled(cancel_requested_cb)
-                        deleted = cleanup_flow.run(page, selectors, config["admin"])
-                        report["deleted_pools"] = deleted
+                        reverify_device_identity("cleanup")
+                        deleted_pools = list(report.get("deleted_pools") or [])
+
+                        def pool_deleted(pool_id: str) -> None:
+                            if pool_id not in deleted_pools:
+                                deleted_pools.append(pool_id)
+                            report["deleted_pools"] = list(deleted_pools)
+                            checkpoint("清理存储池")
+
+                        deleted_now = cleanup_flow.run(
+                            page,
+                            selectors,
+                            config["admin"],
+                            cancel_check_cb=lambda: _raise_if_cancelled(cancel_requested_cb),
+                            on_pool_deleted=pool_deleted,
+                        )
+                        for pool_id in deleted_now:
+                            if pool_id not in deleted_pools:
+                                deleted_pools.append(pool_id)
+                        report["deleted_pools"] = deleted_pools
                         progress.complete_step("清理完成", nas_ip=ip)
                         checkpoint("清理完成")
 
                         if factory_reset_before_finish:
                             progress.set_stage("恢复出厂设置", status="running", nas_ip=ip)
                             _raise_if_cancelled(cancel_requested_cb)
-                            reset_factory_flow.run(page, selectors, config["admin"])
-                            report["factory_reset"] = "initiated"
-                            progress.complete_step("恢复出厂设置已触发", nas_ip=ip)
+                            report["factory_reset"] = "starting"
+                            checkpoint("恢复出厂设置")
+
+                            def factory_reset_initiated() -> None:
+                                report["factory_reset"] = "initiated"
+                                checkpoint("恢复出厂设置已触发")
+
+                            try:
+                                reset_result = reset_factory_flow.run(
+                                    page,
+                                    selectors,
+                                    config["admin"],
+                                    nas_url=nas_url,
+                                    expected_sn=sn,
+                                    timeout_s=float(
+                                        (config.get("network") or {}).get("auto_discovery_timeout", 900)
+                                    ),
+                                    cancel_requested_cb=cancel_requested_cb,
+                                    on_initiated=factory_reset_initiated,
+                                )
+                            except reset_factory_flow.FactoryResetCancelled as exc:
+                                report["factory_reset"] = "cancelled"
+                                checkpoint("恢复出厂设置已取消")
+                                raise TaskCancelled(_safe_error_message(exc, config)) from None
+                            except reset_factory_flow.FactoryResetUnconfirmed:
+                                if report.get("factory_reset") != "initiated":
+                                    report["factory_reset"] = "uncertain"
+                                report["factory_reset_verification"] = "unconfirmed"
+                                checkpoint("恢复出厂设置待确认")
+                                raise
+                            except Exception:
+                                report["factory_reset"] = "failed"
+                                checkpoint("恢复出厂设置失败")
+                                raise
+
+                            report["factory_reset"] = "confirmed"
+                            report["factory_reset_verification"] = "confirmed"
+                            report["nas_ip_after_reset"] = reset_result.ip
+                            report["factory_reset_old_ip_unreachable_observed"] = (
+                                reset_result.old_ip_unreachable_observed
+                            )
+                            ip = reset_result.ip
+                            progress.complete_step("恢复出厂设置已确认", nas_ip=reset_result.ip)
+                            checkpoint("恢复出厂设置已确认")
 
                     report["status"] = "success"
                     report["current_stage"] = final_success_stage
                     progress.finish("success", final_success_stage, nas_ip=ip)
                 except TaskCancelled as exc:
-                    logger.info(f"Test cancelled: {exc}")
+                    safe_error = _safe_error_message(exc, config)
+                    logger.info(f"Test cancelled: {safe_error}")
                     report["status"] = "cancelled"
-                    report["error"] = str(exc)
-                    progress.finish("cancelled", "用户中断", nas_ip=ip or nas_ip, error=str(exc))
+                    report["error"] = safe_error
+                    progress.finish("cancelled", "用户中断", nas_ip=ip or nas_ip, error=safe_error)
+                    raise _sanitized_exception(exc, config) from None
+                except (
+                    reset_factory_flow.FactoryResetUnconfirmed,
+                    reset_factory_flow.FactoryResetRetryBlocked,
+                ) as exc:
+                    # Once the destructive submit may have been sent, a user
+                    # cancel must not hide the unsafe/terminal reset state as a
+                    # routine cancellation. Keep it failed and non-retryable.
+                    safe_error = _safe_error_message(exc, config)
+                    logger.error(f"Test failed: {safe_error}")
+                    failure_stage = failure_stage_for_error(exc)
+                    report["status"] = "failed"
+                    report["error"] = safe_error
+                    report["current_stage"] = failure_stage
+                    progress.finish("failed", failure_stage, nas_ip=ip or nas_ip, error=safe_error)
+                    _attach_failure_diagnostics(report, ip, port)
+                    capture_failure(page, sn, step="cli_top", dest_dir=dirs["screenshots"])
                     raise
                 except Exception as exc:
                     if _cancel_requested(cancel_requested_cb):
-                        logger.info(f"Test cancelled: {exc}")
+                        safe_error = _safe_error_message(exc, config)
+                        logger.info(f"Test cancelled: {safe_error}")
                         report["status"] = "cancelled"
                         report["error"] = "Test cancelled by user"
-                        progress.finish("cancelled", "用户中断", nas_ip=ip or nas_ip, error=str(exc))
-                        raise TaskCancelled("Test cancelled by user") from exc
-                    logger.error(f"Test failed: {exc}")
+                        progress.finish("cancelled", "用户中断", nas_ip=ip or nas_ip, error=safe_error)
+                        raise TaskCancelled("Test cancelled by user") from None
+                    safe_error = _safe_error_message(exc, config)
+                    logger.error(f"Test failed: {safe_error}")
                     failure_stage = failure_stage_for_error(exc)
                     report["status"] = "failed"
-                    report["error"] = str(exc)
+                    report["error"] = safe_error
                     report["current_stage"] = failure_stage
-                    progress.finish("failed", failure_stage, nas_ip=ip or nas_ip, error=str(exc))
+                    progress.finish("failed", failure_stage, nas_ip=ip or nas_ip, error=safe_error)
                     _attach_failure_diagnostics(report, ip, port)
                     capture_failure(page, sn, step="cli_top", dest_dir=dirs["screenshots"])
                     raise
                 finally:
                     report["finished_at"] = datetime.now().isoformat()
-                    _write_json_atomic(dirs["base"] / "test_report.json", report)
-                    close_managed_context(browser_session)
-                    _emit_browser_event(progress_cb, "browser_closed")
+                    try:
+                        _write_json_atomic(
+                            dirs["base"] / "test_report.json",
+                            report,
+                            extra_secrets=report_secrets,
+                        )
+                    finally:
+                        close_managed_context(browser_session)
+                        _emit_browser_event(progress_cb, "browser_closed")
         except TaskCancelled as exc:
+            safe_error = _safe_error_message(exc, config)
             if report.get("status") == "running":
                 report["status"] = "cancelled"
-                report["error"] = str(exc)
-                progress.finish("cancelled", "用户中断", nas_ip=ip or nas_ip, error=str(exc))
+                report["error"] = safe_error
+                progress.finish("cancelled", "用户中断", nas_ip=ip or nas_ip, error=safe_error)
                 report["finished_at"] = datetime.now().isoformat()
                 if connected or setup_file_log:
-                    _write_json_atomic(dirs["base"] / "test_report.json", report)
-            raise
+                    _write_json_atomic(
+                        dirs["base"] / "test_report.json",
+                        report,
+                        extra_secrets=report_secrets,
+                    )
+            raise _sanitized_exception(exc, config) from None
         except Exception as exc:
+            safe_error = _safe_error_message(exc, config)
             if report.get("status") == "running":
                 failure_stage = failure_stage_for_error(exc)
                 report["status"] = "failed"
-                report["error"] = str(exc)
+                report["error"] = safe_error
                 report["current_stage"] = failure_stage
-                progress.finish("failed", failure_stage, nas_ip=ip or nas_ip, error=str(exc))
+                progress.finish("failed", failure_stage, nas_ip=ip or nas_ip, error=safe_error)
                 _attach_failure_diagnostics(report, ip, port)
                 report["finished_at"] = datetime.now().isoformat()
                 # 连上设备前失败（发现/上线超时）不落盘——不留空壳目录。
                 if connected or setup_file_log:
-                    _write_json_atomic(dirs["base"] / "test_report.json", report)
-            raise
+                    _write_json_atomic(
+                        dirs["base"] / "test_report.json",
+                        report,
+                        extra_secrets=report_secrets,
+                    )
+            raise _sanitized_exception(exc, config) from None
         finally:
-            if device_lock_acquired and device_lock is not None:
-                logger.info(f"NAS {ip}: device lock released")
-                device_lock.release()
-            _release_reserved_ips(reserved_ips)
-            # 把内存日志缓冲落到 <sn>/run.log，再做故障上报，这样故障 zip 带得上完整日志。
-            # 仅当目录已存在（已连上设备）才写，避免给连接前失败的任务建空壳目录。
-            if run_log_buffer and not setup_file_log and dirs["base"].exists():
-                try:
-                    (dirs["base"] / "run.log").write_text("".join(run_log_buffer), encoding="utf-8")
-                except Exception:
-                    pass
-            _maybe_autoreport_failure(config, report, dirs, output_root)
-            if run_log_sink_id is not None:
-                try:
-                    logger.remove(run_log_sink_id)
-                except Exception:
-                    pass
+            try:
+                if device_lock_acquired and device_lock is not None:
+                    logger.info(f"NAS {ip}: device lock released")
+                    device_lock.release()
+                _release_reserved_ips(reserved_ips)
+                # 把内存日志缓冲落到 <sn>/run.log，再做故障上报，这样故障 zip 带得上完整日志。
+                # 仅当目录已存在（已连上设备）才写，避免给连接前失败的任务建空壳目录。
+                if run_log_buffer and not setup_file_log and dirs["base"].exists():
+                    try:
+                        safe_log = scrub_text(
+                            "".join(run_log_buffer),
+                            extra_secrets=report_secrets,
+                            mask_identifiers=False,
+                        )
+                        (dirs["base"] / "run.log").write_text(safe_log, encoding="utf-8")
+                    except Exception:
+                        pass
+                _maybe_autoreport_failure(config, report, dirs, output_root)
+                if run_log_sink_id is not None:
+                    try:
+                        logger.remove(run_log_sink_id)
+                    except Exception:
+                        pass
+            finally:
+                _release_process_lease(
+                    auto_process_lock,
+                    auto_process_token,
+                    description=f"NAS {sn}",
+                )
 
     logger.info(f"Test complete for {sn}")
     return report
 
 
+@_with_device_process_lease
 def run_cleanup(sn: str, nas_ip: str = "auto", setup_file_log: bool = True) -> dict:
+    sn = normalize_sn(sn)
+    if len(sn_tail(sn)) < SN_TAIL_LENGTH:
+        raise ValueError("SN must contain at least the last 4 alphanumeric characters")
+
     config, selectors = load_configs(PROJECT_ROOT)
+    report_secrets = _config_secret_values(config)
+    _validate_admin_credentials(config)
     output_root = (PROJECT_ROOT / config["output_dir"]).resolve()
     dirs = session_dirs(output_root, sn)
-    if setup_file_log:
-        setup_logger(dirs["sn_root"], sn=sn)
 
-    ip = _resolve_ip(nas_ip, config)
+    progress = TaskProgress(None, f"cleanup_{sn}", sn, 1)
+    ip, reserved_ips, discovered_sn = _resolve_ip_for_task(
+        sn,
+        nas_ip,
+        config,
+        progress,
+    )
     port = config["network"]["ugos_http_port"]
-    device_lock = _device_lock_for_ip(ip)
+    device_lock = _device_lock_for_ip(_canonical_device_lock_ip(ip, reserved_ips))
     device_lock_acquired = False
-    if not device_lock.acquire(blocking=False):
-        logger.info(f"NAS {ip}: another task is active, waiting on hold")
-        _acquire_lock_until_cancelled(device_lock, None)
-    device_lock_acquired = True
-    logger.info(f"NAS {ip}: device lock acquired")
-    wait_until_ready(ip, port, config["network"]["service_ready_timeout"])
+    auto_process_lock: InterProcessLock | None = None
+    auto_process_token: InterProcessLockToken | None = None
+    report: dict = {
+        "sn": sn,
+        "nas_ip": ip,
+        "started_at": datetime.now().isoformat(),
+        "status": "running",
+        "deleted_pools": [],
+    }
 
-    nas_url = f"http://{ip}:{port}"
-    report: dict = {"sn": sn, "nas_ip": ip, "started_at": datetime.now().isoformat()}
-
-    with sync_playwright() as pw:
-        browser_session = launch_managed_context(pw, config["browser"], f"cleanup_{sn}")
-        context = browser_session.context
-        page = browser_session.page
-        page.set_default_timeout(config["browser"]["default_timeout_ms"])
-
-        try:
-            login_flow.run(page, nas_url, config["admin"], selectors)
-            dismiss_desktop_overlays(page, selectors, max_rounds=2, completion_wait_ms=0)
-            deleted = cleanup_flow.run(page, selectors, config["admin"])
-            report["deleted_pools"] = deleted
-            report["status"] = "success"
-        except Exception as exc:
-            report["status"] = "failed"
-            report["error"] = str(exc)
-            capture_failure(page, sn, step="cleanup_top", dest_dir=dirs["screenshots"])
-            raise
-        finally:
-            report["finished_at"] = datetime.now().isoformat()
-            (dirs["base"] / "cleanup_report.json").write_text(
-                json.dumps(report, indent=2, ensure_ascii=False),
-                encoding="utf-8",
+    try:
+        if _device_process_lease_key(sn) is None:
+            if not discovered_sn:
+                raise RuntimeError(
+                    f"{DEVICE_IDENTITY_FAILURE_STAGE}: AUTO discovery did not return a full SN"
+                )
+            auto_key = _device_process_lease_key(discovered_sn)
+            if auto_key is None:
+                raise RuntimeError(
+                    f"{DEVICE_IDENTITY_FAILURE_STAGE}: invalid discovered SN {discovered_sn!r}"
+                )
+            auto_process_lock, auto_process_token = _acquire_process_lease_or_fail(
+                auto_key,
+                description=f"NAS {normalize_sn(discovered_sn)}",
             )
-            close_managed_context(browser_session)
-            if device_lock_acquired:
-                logger.info(f"NAS {ip}: device lock released")
-                device_lock.release()
-                device_lock_acquired = False
+        if not device_lock.acquire(blocking=False):
+            logger.info(f"NAS {ip}: another task is active, waiting on hold")
+            _acquire_lock_until_cancelled(device_lock, None)
+        device_lock_acquired = True
+        logger.info(f"NAS {ip}: device lock acquired")
+        wait_until_ready(ip, port, config["network"]["service_ready_timeout"])
+
+        initial_macs: set[str] = set()
+        verified_sn = _verify_nas_identity_at_ip(ip, sn, observed_macs_out=initial_macs)
+        verified_device_macs = frozenset(initial_macs)
+        target_report = _read_report_file(output_root / verified_sn / "test_report.json")
+        _raise_for_unsafe_prior_factory_reset(target_report, sn=verified_sn)
+        if verified_sn != sn:
+            sn = verified_sn
+            dirs = session_dirs(output_root, sn)
+        if setup_file_log:
+            setup_logger(
+                dirs["sn_root"],
+                sn=sn,
+                filename="cleanup.log",
+                extra_secrets=report_secrets,
+            )
+        report["sn"] = sn
+        report["verified_device_sn"] = verified_sn
+        report["device_identity_checks"] = [
+            {
+                "before": "standalone_cleanup_initial",
+                "sn": verified_sn,
+                "at": datetime.now().isoformat(),
+            }
+        ]
+
+        nas_url = f"http://{ip}:{port}"
+        with sync_playwright() as pw:
+            browser_session = launch_managed_context(pw, config["browser"], f"cleanup_{sn}")
+            page = _initialize_managed_browser_page(browser_session, config["browser"])
+
+            try:
+                login_flow.run(page, nas_url, config["admin"], selectors)
+                dismiss_desktop_overlays(page, selectors, max_rounds=2, completion_wait_ms=0)
+                cleanup_sn = _verify_nas_identity_at_ip(
+                    ip,
+                    sn,
+                    expected_macs=verified_device_macs,
+                )
+                if cleanup_sn != normalize_sn(sn):
+                    raise RuntimeError(
+                        f"{DEVICE_IDENTITY_FAILURE_STAGE}: identity changed before standalone cleanup: "
+                        f"expected {sn}, got {cleanup_sn}"
+                    )
+                _verify_page_host(page, ip, "destructive standalone cleanup")
+                report["device_identity_checks"].append(
+                    {
+                        "before": "standalone_cleanup",
+                        "sn": cleanup_sn,
+                        "at": datetime.now().isoformat(),
+                    }
+                )
+                logger.info(f"NAS {ip}/{cleanup_sn}: identity reverified before standalone cleanup")
+                deleted_pools: list[str] = []
+
+                def pool_deleted(pool_id: str) -> None:
+                    if pool_id not in deleted_pools:
+                        deleted_pools.append(pool_id)
+                    report["deleted_pools"] = list(deleted_pools)
+                    report["current_stage"] = "清理存储池"
+                    _write_json_atomic(
+                        dirs["base"] / "cleanup_report.json",
+                        report,
+                        extra_secrets=report_secrets,
+                    )
+
+                deleted_now = cleanup_flow.run(
+                    page,
+                    selectors,
+                    config["admin"],
+                    on_pool_deleted=pool_deleted,
+                )
+                for pool_id in deleted_now:
+                    if pool_id not in deleted_pools:
+                        deleted_pools.append(pool_id)
+                report["deleted_pools"] = deleted_pools
+                report["status"] = "success"
+            except Exception as exc:
+                safe_error = _safe_error_message(exc, config)
+                report["status"] = "failed"
+                report["error"] = safe_error
+                capture_failure(page, sn, step="cleanup_top", dest_dir=dirs["screenshots"])
+                raise
+            finally:
+                close_managed_context(browser_session)
+    except Exception as exc:
+        safe_error = _safe_error_message(exc, config)
+        if report.get("status") != "failed":
+            report["status"] = "failed"
+            report["error"] = safe_error
+        raise _sanitized_exception(exc, config) from None
+    finally:
+        try:
+            if report.get("status"):
+                report["finished_at"] = datetime.now().isoformat()
+                _write_json_atomic(
+                    dirs["base"] / "cleanup_report.json",
+                    report,
+                    extra_secrets=report_secrets,
+                )
+        finally:
+            try:
+                if device_lock_acquired:
+                    try:
+                        logger.info(f"NAS {ip}: device lock released")
+                    finally:
+                        device_lock.release()
+            finally:
+                try:
+                    _release_reserved_ips(reserved_ips)
+                finally:
+                    _release_process_lease(
+                        auto_process_lock,
+                        auto_process_token,
+                        description=f"NAS {sn}",
+                    )
 
     logger.info(f"Cleanup complete for {sn}")
     return report
@@ -1023,6 +1650,94 @@ def _resolve_ip(nas_ip: str, config: dict) -> str:
         subnet=config["network"]["subnet"],
         port=config["network"]["ugos_http_port"],
         discovery_timeout=config["network"]["discovery_timeout"],
+    )
+
+
+def _verify_nas_identity_at_ip(
+    ip: str,
+    requested_sn: str,
+    *,
+    cancel_requested_cb: Callable[[], bool] | None = None,
+    expected_macs: frozenset[str] = frozenset(),
+    observed_macs_out: set[str] | None = None,
+    discover_fn: Callable[..., list] | None = None,
+    wait_fn: Callable[[float], None] = time.sleep,
+    attempts: int = 3,
+) -> str:
+    requested_sn = normalize_sn(requested_sn)
+    discover = discover_fn or ugreen_broadcast.discover
+    last_observation = "no broadcast response from the selected IP"
+
+    for attempt in range(max(1, int(attempts))):
+        _raise_if_cancelled(cancel_requested_cb)
+        try:
+            hits = discover(timeout=1.5)
+        except Exception as exc:
+            last_observation = f"broadcast error: {exc}"
+            hits = []
+
+        target_hits = [
+            hit
+            for hit in hits
+            if ip in ugreen_broadcast.interface_macs(hit)
+        ]
+        target_macs = {
+            _normalize_broadcast_mac(interface_mac)
+            for hit in target_hits
+            for interface_ip, interface_mac in ugreen_broadcast.interface_macs(hit).items()
+            if interface_ip == ip and _normalize_broadcast_mac(interface_mac)
+        }
+        if len(target_macs) > 1:
+            observed = ", ".join(sorted(target_macs))
+            raise RuntimeError(
+                f"{DEVICE_IDENTITY_FAILURE_STAGE}: IP {ip} reported conflicting MACs: {observed}"
+            )
+        normalized_expected_macs = {
+            _normalize_broadcast_mac(value)
+            for value in expected_macs
+            if _normalize_broadcast_mac(value)
+        }
+        if normalized_expected_macs and not target_macs.intersection(normalized_expected_macs):
+            observed = ", ".join(sorted(target_macs)) or "<missing>"
+            raise RuntimeError(
+                f"{DEVICE_IDENTITY_FAILURE_STAGE}: IP {ip} MAC fingerprint changed: "
+                f"expected {', '.join(sorted(normalized_expected_macs))}, got {observed}"
+            )
+        if observed_macs_out is not None:
+            observed_macs_out.update(target_macs)
+        observed_sns = {
+            normalize_sn(str(hit.sn))
+            for hit in target_hits
+            if is_full_sn_candidate(normalize_sn(str(hit.sn)))
+        }
+        if len(observed_sns) > 1:
+            observed = ", ".join(sorted(observed_sns))
+            raise RuntimeError(
+                f"{DEVICE_IDENTITY_FAILURE_STAGE}: IP {ip} reported conflicting SNs: {observed}"
+            )
+        if observed_sns:
+            observed_sn = next(iter(observed_sns))
+            if is_auto_sn_placeholder(requested_sn):
+                return observed_sn
+            if is_full_sn_candidate(requested_sn):
+                matches = observed_sn == requested_sn
+            else:
+                matches = same_sn_identity(requested_sn, observed_sn)
+            if not matches:
+                raise RuntimeError(
+                    f"{DEVICE_IDENTITY_FAILURE_STAGE}: IP {ip} reports SN {observed_sn}, "
+                    f"but the task requested {requested_sn}"
+                )
+            return observed_sn
+
+        if target_hits:
+            last_observation = "selected IP responded without a valid full SN"
+        if attempt + 1 < max(1, int(attempts)):
+            wait_fn(0.25)
+
+    raise RuntimeError(
+        f"{DEVICE_IDENTITY_FAILURE_STAGE}: could not bind IP {ip} to task SN "
+        f"{requested_sn}; {last_observation}"
     )
 
 
@@ -1042,16 +1757,18 @@ def _resolve_ip_for_task(
     cancel_requested_cb: Callable[[], bool] | None = None,
 ) -> tuple[str, set[str], str | None]:
     if nas_ip and nas_ip.lower() != "auto":
-        return nas_ip, set(), None
+        reserved_ips, full_sn = _explicit_ip_identity_aliases(nas_ip, sn)
+        _reserve_ips_until_available(reserved_ips, progress, cancel_requested_cb)
+        return nas_ip, reserved_ips, full_sn
 
     auto_discovery_timeout = float(
         config["network"].get("auto_discovery_timeout", config["network"]["service_ready_timeout"])
     )
-    deadline = datetime.now().timestamp() + auto_discovery_timeout
+    deadline = time.monotonic() + auto_discovery_timeout
     last_error: Exception | None = None
     target_tail = sn_tail(sn)
 
-    while datetime.now().timestamp() < deadline:
+    while time.monotonic() < deadline:
         _raise_if_cancelled(cancel_requested_cb)
         with DISCOVERY_ALLOCATION_GUARD:
             excluded = set(ACTIVE_DEVICE_IPS)
@@ -1091,6 +1808,55 @@ def _resolve_ip_for_task(
             time.sleep(0.1)
 
     raise RuntimeError(f"No unused UGOS NAS matching SN tail {target_tail} became available before timeout: {last_error}")
+
+
+def _explicit_ip_identity_aliases(ip: str, requested_sn: str) -> tuple[set[str], str | None]:
+    """Resolve every advertised port for an explicitly selected NAS before locking it."""
+    aliases = {ip}
+    full_sn: str | None = None
+    try:
+        hits = ugreen_broadcast.discover(timeout=1.5)
+    except Exception as exc:
+        logger.info(f"Could not expand explicit NAS IP {ip} to broadcast aliases yet: {exc}")
+        return aliases, None
+
+    for hit in hits:
+        interfaces = ugreen_broadcast.interface_macs(hit)
+        if ip not in interfaces:
+            continue
+        observed_sn = normalize_sn(getattr(hit, "sn", ""))
+        if observed_sn and not same_sn_identity(requested_sn, observed_sn):
+            raise RuntimeError(
+                f"{DEVICE_IDENTITY_FAILURE_STAGE}: IP {ip} reports SN {observed_sn}, "
+                f"but the task requested {normalize_sn(requested_sn)}"
+            )
+        aliases.update(interfaces)
+        if observed_sn:
+            full_sn = observed_sn
+    return aliases, full_sn
+
+
+def _reserve_ips_until_available(
+    ips: set[str],
+    progress: TaskProgress,
+    cancel_requested_cb: Callable[[], bool] | None,
+) -> None:
+    while True:
+        _raise_if_cancelled(cancel_requested_cb)
+        with DISCOVERY_ALLOCATION_GUARD:
+            conflicts = ACTIVE_DEVICE_IPS.intersection(ips)
+            if not conflicts:
+                ACTIVE_DEVICE_IPS.update(ips)
+                return
+        logger.info(f"Explicit NAS aliases already active; waiting: {sorted(conflicts)}")
+        progress.set_stage("等待同一 NAS 上一个任务完成", status="running", nas_ip=sorted(conflicts)[0])
+        time.sleep(0.25)
+
+
+def _canonical_device_lock_ip(ip: str, reserved_ips: set[str]) -> str:
+    aliases = set(reserved_ips)
+    aliases.add(ip)
+    return _sort_ip_strings(aliases)[0]
 
 
 def _select_candidate_for_sn(
@@ -1326,6 +2092,7 @@ def _broadcast_text_has_sn(text: str) -> bool:
 def _probe_ugreen_broadcast_identity_texts(candidates: list[str]) -> dict[str, str]:
     candidate_set = set(candidates)
     texts: dict[str, str] = {}
+    projection_priority: dict[str, int] = {}
     try:
         hits = ugreen_broadcast.discover(timeout=1.5)
     except Exception as exc:
@@ -1333,22 +2100,58 @@ def _probe_ugreen_broadcast_identity_texts(candidates: list[str]) -> dict[str, s
         return texts
 
     for hit in hits:
-        if hit.address not in candidate_set:
-            continue
-        fields = [f"IP={hit.address}"]
-        if hit.sn:
-            fields.append(f"SN={hit.sn}")
-        if hit.mac:
-            fields.append(f"MAC={hit.mac}")
-        for key, value in sorted(hit.data.items()):
-            if key in {"ip", "sn", "mac", "pair"}:
+        interfaces = ugreen_broadcast.interface_macs(hit)
+        data = hit.data if isinstance(getattr(hit, "data", None), dict) else {}
+        for address, interface_mac in interfaces.items():
+            if address not in candidate_set:
                 continue
-            if isinstance(value, (str, int, float, bool)):
-                fields.append(f"{key}={value}")
-        text = "UGREEN broadcast\n" + "\n".join(fields)
-        texts[hit.address] = text
-        logger.info(f"UGREEN broadcast identity for {hit.address}: {_identity_preview(text)}")
+            is_direct_response = address == hit.address
+            priority = int(is_direct_response)
+            if projection_priority.get(address, -1) > priority:
+                continue
+
+            fields = [f"IP={address}"]
+            if hit.sn:
+                fields.append(f"SN={hit.sn}")
+            if interface_mac:
+                fields.append(f"MAC={interface_mac}")
+            for key, value in sorted(data.items()):
+                if key in {"ip", "sn", "mac", "pair", "interface"}:
+                    continue
+                if isinstance(value, (str, int, float, bool)):
+                    fields.append(f"{key}={value}")
+            interface = (
+                str(data.get("interface") or "").strip().lower()
+                if is_direct_response
+                else _infer_broadcast_pair_interface(address, data)
+            )
+            if interface:
+                fields.append(f"interface={interface}")
+            text = "UGREEN broadcast\n" + "\n".join(fields)
+            texts[address] = text
+            projection_priority[address] = priority
+            logger.info(f"UGREEN broadcast identity for {address}: {_identity_preview(text)}")
     return texts
+
+
+def _normalize_broadcast_mac(value: object) -> str:
+    normalized = re.sub(r"[^0-9A-Fa-f]", "", str(value or "")).upper()
+    return normalized if len(normalized) == 12 else ""
+
+
+def _infer_broadcast_pair_interface(address: str, data: dict) -> str:
+    model = str(data.get("model") or "").lower().replace(" ", "")
+    pair = data.get("pair")
+    if "dxp4800plus" not in model or not isinstance(pair, dict):
+        return ""
+    pair_ips = _sort_ip_strings([str(pair_ip) for pair_ip in pair])
+    if len(pair_ips) < 2:
+        return ""
+    if address == pair_ips[0]:
+        return "eth0"
+    if address == pair_ips[1]:
+        return "eth1"
+    return ""
 
 
 def _identity_preview(text: str, limit: int = 160) -> str:
@@ -1366,19 +2169,35 @@ def _upgrade_task_sn(
     setup_file_log: bool,
 ) -> tuple[str, dict[str, Path]]:
     full_sn = normalize_sn(discovered_sn or "")
-    if not full_sn or full_sn == current_sn:
+    if not full_sn:
         return current_sn, dirs
-    if not same_sn_identity(current_sn, full_sn) and not is_auto_sn_placeholder(current_sn):
-        logger.warning(f"Ignoring discovered SN {full_sn}; it does not match input {current_sn}")
+    if not is_full_sn_candidate(full_sn):
+        raise RuntimeError(
+            f"{DEVICE_IDENTITY_FAILURE_STAGE}: discovered value {full_sn!r} "
+            "is not a valid full SN"
+        )
+    if full_sn == current_sn:
         return current_sn, dirs
+    if is_full_sn_candidate(current_sn) or not is_auto_sn_placeholder(current_sn):
+        matches = (
+            full_sn == normalize_sn(current_sn)
+            if is_full_sn_candidate(current_sn)
+            else same_sn_identity(current_sn, full_sn)
+        )
+        if not matches:
+            raise RuntimeError(
+                f"{DEVICE_IDENTITY_FAILURE_STAGE}: discovered SN {full_sn} "
+                f"does not match task SN {current_sn}"
+            )
+
+    target_report = _read_report_file(output_root / full_sn / "test_report.json")
+    _raise_for_unsafe_prior_factory_reset(target_report, sn=full_sn)
 
     logger.info(f"SN {current_sn} resolved to full SN {full_sn}")
     report.setdefault("input_sn", current_sn)
     report["sn"] = full_sn
     dirs = relocate_session_dirs(output_root, dirs, full_sn)
     _merge_resume_report(report, _read_report_file(dirs["base"] / "test_report.json"))
-    if setup_file_log:
-        setup_logger(dirs["sn_root"], sn=full_sn)
     progress.update_sn(full_sn)
     return full_sn, dirs
 
@@ -1405,13 +2224,34 @@ def _ensure_browser_session(
     _emit_browser_event(progress_cb, "browser_closed")
 
     browser_session = launch_managed_context(pw, browser_cfg, task_id)
-    if browser_session.browser_pid is not None:
-        _emit_browser_event(progress_cb, "browser_ready", browser_pid=browser_session.browser_pid)
+    page = _initialize_managed_browser_page(browser_session, browser_cfg)
+    try:
+        if browser_session.browser_pid is not None:
+            _emit_browser_event(progress_cb, "browser_ready", browser_pid=browser_session.browser_pid)
 
-    page = browser_session.page
-    page.set_default_timeout(browser_cfg["default_timeout_ms"])
-    login_flow.run(page, nas_url, admin, selectors)
-    return browser_session, page
+        login_flow.run(page, nas_url, admin, selectors)
+        return browser_session, page
+    except Exception:
+        try:
+            close_managed_context(browser_session)
+        except Exception as close_exc:
+            logger.warning(f"Could not close replacement browser after login failed: {close_exc}")
+        _emit_browser_event(progress_cb, "browser_closed")
+        raise
+
+
+def _initialize_managed_browser_page(browser_session, browser_cfg: dict):
+    """Return a configured page, closing a newly launched session if setup fails."""
+    try:
+        page = browser_session.page
+        page.set_default_timeout(browser_cfg["default_timeout_ms"])
+        return page
+    except Exception:
+        try:
+            close_managed_context(browser_session)
+        except Exception as close_exc:
+            logger.warning(f"Could not close browser session after page initialization failed: {close_exc}")
+        raise
 
 
 def _page_is_alive(page) -> bool:

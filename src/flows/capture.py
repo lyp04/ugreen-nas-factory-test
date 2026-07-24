@@ -22,6 +22,7 @@ from ..measurements import (
 from ..utils.app_guides import dismiss_arco_app_guides, dismiss_storage_guide_modal
 from ..utils.desktop import click_desktop_launcher, dismiss_desktop_overlays, find_visible_locator
 from ..utils.logger import logger
+from ..utils.interprocess_lock import InterProcessLock, InterProcessLockToken
 from ..utils.screenshot import capture_page
 from ..utils.sn import extract_full_sn
 from ..utils.smb_transfer import (
@@ -37,6 +38,7 @@ from ..utils.smb_transfer import (
     build_upload_script,
     run_powershell,
     start_powershell,
+    terminate_powershell,
     wait_powershell,
 )
 
@@ -87,6 +89,9 @@ TRANSFER_UPLOAD_FINISH_TIMEOUT_S = 30
 TRANSFER_POST_UPLOAD_SETTLE_TIMEOUT_S = 30
 TRANSFER_POST_UPLOAD_SETTLE_INTERVAL_MS = 1_000
 TRANSFER_POST_UPLOAD_SETTLE_SAMPLES = 2
+TRANSFER_DOWNLOAD_FINISH_TIMEOUT_S = 3_600
+TRANSFER_SESSION_MARKER = ".ugreen-transfer-session.json"
+TRANSFER_SESSION_SCHEMA = "ugreen-nas-factory-transfer-v1"
 TRANSFER_SOURCE_SAMPLE_BYTES = 1024 * 1024
 TRANSFER_SOURCE_GENERATE_CHUNK_BYTES = 16 * 1024 * 1024
 GIB = 1024 * 1024 * 1024
@@ -94,6 +99,7 @@ TRANSFER_SOURCE_SIZE_GIB_BY_MODEL = {"2800": 5, "4800": 10, "4800Plus": 20}
 FAN_CTL_WINDOW_LAYOUT = {"left": -260, "top": 120, "width": 780, "height": 760, "z_index": 20}
 FAN_TASK_WINDOW_LAYOUT = {"left": 540, "top": 120, "width": 1340, "height": 760, "z_index": 21}
 TRANSFER_STAGE_LOCK = threading.Lock()
+TRANSFER_PROCESS_LOCK_KEY = "transfer-stage-v1"
 
 
 class CaptureError(RuntimeError):
@@ -114,6 +120,12 @@ class TransferRateSample:
     @property
     def label(self) -> str:
         return f"{self.amount} {self.unit}"
+
+
+@dataclass(frozen=True, slots=True)
+class TransferSlotLease:
+    process_lock: InterProcessLock
+    process_token: InterProcessLockToken
 
 
 @dataclass(slots=True)
@@ -192,6 +204,7 @@ def run(
     transfer_cfg = transfer_cfg or {}
     saved: dict[str, str] = {}
     transfer_slot_held = False
+    transfer_slot_lease: TransferSlotLease | None = None
     transfer_slot_context: tuple[str, str, str] | None = None
     transfer_work_root = _transfer_work_root(transfer_cfg)
     _cleanup_all_transfer_workdirs_if_idle(transfer_work_root)
@@ -242,14 +255,28 @@ def run(
                     if is_transfer_page and transfer_slot_held and not _next_page_is_transfer(page_keys, page_specs, index):
                         if transfer_slot_context is not None:
                             release_page_key, release_share, release_direction = transfer_slot_context
-                            _release_transfer_slot(progress_cb, release_page_key, release_share, release_direction)
-                        transfer_slot_held = False
-                        transfer_slot_context = None
+                            transfer_slot_held = False
+                            transfer_slot_context = None
+                            lease = transfer_slot_lease
+                            transfer_slot_lease = None
+                            if lease is not None:
+                                _release_transfer_slot(
+                                    lease,
+                                    progress_cb,
+                                    release_page_key,
+                                    release_share,
+                                    release_direction,
+                                )
                     continue
 
                 if is_transfer_page and not transfer_slot_held:
                     share, direction = _transfer_share_direction(spec, page_key)
-                    _acquire_transfer_slot(progress_cb, page_key, share, direction)
+                    transfer_slot_lease = _acquire_transfer_slot(
+                        progress_cb,
+                        page_key,
+                        share,
+                        direction,
+                    )
                     transfer_slot_held = True
                     transfer_slot_context = (page_key, share, direction)
 
@@ -315,18 +342,40 @@ def run(
                 if is_transfer_page and not _next_page_is_transfer(page_keys, page_specs, index):
                     if transfer_slot_context is not None:
                         release_page_key, release_share, release_direction = transfer_slot_context
-                        _release_transfer_slot(progress_cb, release_page_key, release_share, release_direction)
-                    transfer_slot_held = False
-                    transfer_slot_context = None
+                        transfer_slot_held = False
+                        transfer_slot_context = None
+                        lease = transfer_slot_lease
+                        transfer_slot_lease = None
+                        if lease is not None:
+                            _release_transfer_slot(
+                                lease,
+                                progress_cb,
+                                release_page_key,
+                                release_share,
+                                release_direction,
+                            )
             except Exception as exc:
                 _emit_capture_event(progress_cb, "capture_page_failed", page_key=page_key, error=str(exc))
                 logger.error(f"Capture failed for '{page_key}': {exc}")
                 raise CaptureError(f"Capture failed at page '{page_key}': {exc}") from exc
     finally:
-        if transfer_slot_held and transfer_slot_context is not None:
-            release_page_key, release_share, release_direction = transfer_slot_context
-            _release_transfer_slot(progress_cb, release_page_key, release_share, release_direction)
-        _cleanup_transfer_run_dir(_transfer_run_dir(screenshots_dir.parent, transfer_cfg))
+        try:
+            if transfer_slot_held and transfer_slot_context is not None:
+                release_page_key, release_share, release_direction = transfer_slot_context
+                transfer_slot_held = False
+                transfer_slot_context = None
+                lease = transfer_slot_lease
+                transfer_slot_lease = None
+                if lease is not None:
+                    _release_transfer_slot(
+                        lease,
+                        progress_cb,
+                        release_page_key,
+                        release_share,
+                        release_direction,
+                    )
+        finally:
+            _cleanup_transfer_run_dir(_transfer_run_dir(screenshots_dir.parent, transfer_cfg))
 
     return saved
 
@@ -357,7 +406,8 @@ def _existing_capture_path(
             return None
 
     if min_rate_mb_s is not None:
-        reported_rate = _reported_transfer_rate_mb_s(report_path, page_key)
+        reported_values = _reported_capture_values(report_path, page_key)
+        reported_rate = _float_or_none(reported_values.get("rate_mbps"))
         if reported_rate is None or reported_rate < min_rate_mb_s:
             if reported_rate is None:
                 logger.info(f"Skipping existing {page_key} screenshot; no reported transfer rate found")
@@ -368,9 +418,19 @@ def _existing_capture_path(
                 )
             return None
 
+        if not _reported_transfer_is_complete(reported_values):
+            logger.info(
+                f"Skipping existing {page_key} screenshot; prior transfer has no valid completion proof"
+            )
+            return None
+
         reported_path = _reported_capture_path(report_path, page_key)
         if reported_path and _valid_existing_capture(reported_path) and _matches_capture_name(reported_path, sn, page_key):
             return reported_path
+
+        # A transfer value and its screenshot are a single proof pair. Never bind a
+        # report's rate/completion fields to an arbitrary same-page PNG found by glob.
+        return None
 
     pattern = f"{sn}_{page_key}_*.png"
     candidates = [
@@ -419,6 +479,21 @@ def _reported_transfer_rate_mb_s(report_path: Path, page_key: str) -> float | No
     report = _read_json_report(report_path)
     values = (report.get("captured_values") or {}).get(page_key) or {}
     return _float_or_none(values.get("rate_mbps"))
+
+
+def _reported_transfer_is_complete(values: dict[str, str]) -> bool:
+    if str(values.get("speed_status") or "").strip().lower() != "ok":
+        return False
+    if str(values.get("transfer_complete") or "").strip().lower() != "true":
+        return False
+    source_bytes = _float_or_none(values.get("source_bytes"))
+    destination_bytes = _float_or_none(values.get("destination_bytes"))
+    return bool(
+        source_bytes is not None
+        and destination_bytes is not None
+        and source_bytes > 0
+        and source_bytes == destination_bytes
+    )
 
 
 def _read_json_report(report_path: Path) -> dict:
@@ -616,8 +691,9 @@ def _capture_transfer_page(
     _navigate(frame, spec, nav_selectors)
     _wait_for_landmark(frame, spec, page_key)
 
-    cfg = _build_transfer_config(nas_url, share, screenshots_dir.parent, admin, transfer_cfg)
+    cfg: SmbTransferConfig | None = None
     slot_acquired = False
+    slot_lease: TransferSlotLease | None = None
     shot_path: Path | None = None
     best_result: TransferAttemptResult | None = None
     seen_shots: list[Path] = []
@@ -633,12 +709,27 @@ def _capture_transfer_page(
                 direction=direction,
             )
         else:
-            _acquire_transfer_slot(progress_cb, page_key, share, direction)
+            slot_lease = _acquire_transfer_slot(progress_cb, page_key, share, direction)
             slot_acquired = True
-        _prepare_share(cfg)
-        if direction == "download" and not _remote_file_exists(cfg):
-            logger.info(f"Seeding remote SMB fixture for share '{share}'")
-            run_powershell(build_upload_script(cfg), timeout_s=TRANSFER_TIMEOUT_S)
+        # Creating/claiming the marker-owned work directory must happen only
+        # while both the in-process slot and the cross-process lease are held.
+        cfg = _build_transfer_config(nas_url, share, screenshots_dir.parent, admin, transfer_cfg)
+        _prepare_share(
+            cfg,
+            page=page,
+            page_key=page_key,
+            share=share,
+            direction=direction,
+            progress_cb=progress_cb,
+        )
+        if direction == "download":
+            _ensure_remote_seed(
+                cfg,
+                share,
+                page=page,
+                page_key=page_key,
+                progress_cb=progress_cb,
+            )
 
         for attempt in range(1, max_retries + 2):
             attempts_run = attempt
@@ -663,6 +754,7 @@ def _capture_transfer_page(
                     threshold_mb_s,
                     attempt,
                     capture_on_low=final_attempt,
+                    progress_cb=progress_cb,
                 )
             finally:
                 _finish_transfer_process(proc, page_key, attempt)
@@ -704,11 +796,22 @@ def _capture_transfer_page(
             if not best_result.reached_threshold:
                 raise CaptureError(_transfer_threshold_error(page_key, values, threshold_mb_s, attempts_run))
     finally:
-        if slot_acquired:
-            try:
+        try:
+            # The outer capture loop may hold the global transfer slot across
+            # adjacent pages, but every page still owns its SMB mapping and local
+            # artefacts. Clean those up whenever this call owns/was given the slot;
+            # an acquire failure must not unmount another task's active mapping.
+            if cfg is not None and (slot_already_acquired or slot_acquired):
                 _cleanup_transfer(cfg, direction)
-            finally:
-                _release_transfer_slot(progress_cb, page_key, share, direction)
+        finally:
+            if slot_acquired and slot_lease is not None:
+                _release_transfer_slot(
+                    slot_lease,
+                    progress_cb,
+                    page_key,
+                    share,
+                    direction,
+                )
 
     if shot_path is None:
         raise CaptureError(f"Transfer capture '{page_key}' did not produce a screenshot")
@@ -758,7 +861,8 @@ def _acquire_transfer_slot(
     page_key: str,
     share: str,
     direction: str,
-) -> None:
+) -> TransferSlotLease:
+    waiting_emitted = False
     if not TRANSFER_STAGE_LOCK.acquire(blocking=False):
         logger.info(f"{page_key}: transfer slot busy, waiting on hold")
         _emit_capture_event(
@@ -768,25 +872,65 @@ def _acquire_transfer_slot(
             share=share,
             direction=direction,
         )
-        TRANSFER_STAGE_LOCK.acquire()
+        waiting_emitted = True
+        while not TRANSFER_STAGE_LOCK.acquire(timeout=0.25):
+            _poll_transfer_control(progress_cb, page_key, share, direction)
 
-    logger.info(f"{page_key}: transfer slot acquired")
-    _emit_capture_event(
-        progress_cb,
-        "transfer_started",
-        page_key=page_key,
-        share=share,
-        direction=direction,
-    )
+    process_lock = InterProcessLock(TRANSFER_PROCESS_LOCK_KEY)
+    process_token: InterProcessLockToken | None = None
+    try:
+        while process_token is None:
+            process_token = process_lock.try_acquire()
+            if process_token is not None:
+                break
+            if not waiting_emitted:
+                logger.info(f"{page_key}: transfer slot busy in another application process")
+                _emit_capture_event(
+                    progress_cb,
+                    "transfer_waiting",
+                    page_key=page_key,
+                    share=share,
+                    direction=direction,
+                )
+                waiting_emitted = True
+            _poll_transfer_control(progress_cb, page_key, share, direction)
+            time.sleep(0.25)
+
+        logger.info(f"{page_key}: in-process and cross-process transfer slots acquired")
+        _emit_capture_event(
+            progress_cb,
+            "transfer_started",
+            page_key=page_key,
+            share=share,
+            direction=direction,
+        )
+        return TransferSlotLease(process_lock, process_token)
+    except Exception:
+        # The caller cannot set its `slot_acquired` flag until this function
+        # returns, so an event-boundary cancellation must release both layers here.
+        try:
+            if process_token is not None:
+                process_lock.release(process_token)
+        finally:
+            TRANSFER_STAGE_LOCK.release()
+        raise
 
 
 def _release_transfer_slot(
+    lease: TransferSlotLease,
     progress_cb: Callable[[dict], None] | None,
     page_key: str,
     share: str,
     direction: str,
 ) -> None:
     logger.info(f"{page_key}: transfer slot released")
+    # Release both layers before notifying the GUI. A stale callback must never
+    # strand either the process-local lock or the OS-backed lease.
+    try:
+        if not lease.process_lock.release(lease.process_token):
+            raise CaptureError(f"{page_key}: refused to release unowned transfer lease")
+    finally:
+        TRANSFER_STAGE_LOCK.release()
     _emit_capture_event(
         progress_cb,
         "transfer_finished",
@@ -794,7 +938,6 @@ def _release_transfer_slot(
         share=share,
         direction=direction,
     )
-    TRANSFER_STAGE_LOCK.release()
 
 
 def _capture_transfer_attempt(
@@ -811,6 +954,7 @@ def _capture_transfer_attempt(
     threshold_mb_s: float,
     attempt: int,
     capture_on_low: bool = False,
+    progress_cb: Callable[[dict], None] | None = None,
 ) -> TransferAttemptResult:
     threshold_bytes = threshold_mb_s * 1024 * 1024
     interval_ms = _transfer_speed_sample_interval_ms(transfer_cfg)
@@ -828,8 +972,10 @@ def _capture_transfer_attempt(
     best_seen: TransferRateSample | None = None
     stable_samples = 0
     last_excerpt = ""
+    process_finished_observed = False
 
     while time.monotonic() < deadline:
+        _poll_transfer_control(progress_cb, page_key, share, direction)
         text = _frame_text(frame)
         last_excerpt = " ".join(text.split())[:300]
         sample = _transfer_speed_sample(text, share, direction)
@@ -869,24 +1015,96 @@ def _capture_transfer_attempt(
                 stable_samples = 0
 
         if _process_finished(proc):
+            process_finished_observed = True
             break
         page.wait_for_timeout(interval_ms)
 
-    upload_seed_complete = True
+    transfer_complete = direction not in {"upload", "download"}
+    completion_status = ""
+    expected_size: int | None = None
+    remote_size: int | None = None
+    local_size: int | None = None
     if bound_sample is not None and direction == "upload":
-        upload_seed_complete = _wait_for_upload_seed_complete(
+        transfer_complete = _wait_for_upload_seed_complete(
             page,
             proc,
             cfg.progress_file,
             min_upload_seed_bytes,
             page_key,
             transfer_cfg,
+            progress_cb=progress_cb,
+            share=share,
+            direction=direction,
         )
+        if not transfer_complete:
+            completion_status = "seed_incomplete"
+        elif not process_finished_observed and not _wait_for_transfer_process_exit(
+            page,
+            proc,
+            page_key,
+            transfer_cfg,
+            progress_cb=progress_cb,
+            share=share,
+            direction=direction,
+        ):
+            transfer_complete = False
+            completion_status = "process_timeout"
+        else:
+            expected_size = _transfer_total_bytes(cfg)
+            remote_size = _remote_file_size(cfg)
+            if remote_size != expected_size:
+                transfer_complete = False
+                completion_status = "remote_size_mismatch"
+                logger.info(
+                    f"{page_key}: remote upload size mismatch "
+                    f"({_format_bytes(remote_size or 0)} / {_format_bytes(expected_size)})"
+                )
 
-    if bound_sample is not None and (direction != "upload" or upload_seed_complete):
+    if bound_sample is not None and direction == "download":
+        expected_size = _transfer_total_bytes(cfg)
+        if not process_finished_observed and not _wait_for_transfer_process_exit(
+            page,
+            proc,
+            page_key,
+            transfer_cfg,
+            timeout_s=_transfer_download_finish_timeout_s(transfer_cfg),
+            progress_cb=progress_cb,
+            share=share,
+            direction=direction,
+        ):
+            completion_status = "process_timeout"
+        else:
+            exit_code = getattr(proc, "returncode", None)
+            if isinstance(exit_code, int) and exit_code != 0:
+                completion_status = "process_failed"
+            else:
+                remote_size = _remote_file_size(cfg)
+                local_size = _local_file_size(cfg.download_file)
+                if remote_size != expected_size:
+                    completion_status = "remote_size_mismatch"
+                elif local_size != expected_size:
+                    completion_status = "download_size_mismatch"
+                else:
+                    transfer_complete = True
+            if not transfer_complete:
+                logger.info(
+                    f"{page_key}: download completion mismatch "
+                    f"(remote {_format_bytes(remote_size or 0)}, "
+                    f"local {_format_bytes(local_size or 0)}, "
+                    f"expected {_format_bytes(expected_size)})"
+                )
+
+    if bound_sample is not None and transfer_complete:
         if direction == "upload":
-            _wait_for_transfer_process_exit(page, proc, page_key, transfer_cfg)
-            _wait_for_post_upload_settle(page, frame, page_key, transfer_cfg)
+            _wait_for_post_upload_settle(
+                page,
+                frame,
+                page_key,
+                transfer_cfg,
+                progress_cb=progress_cb,
+                share=share,
+                direction=direction,
+            )
         values = _transfer_values_from_sample(
             bound_sample,
             share,
@@ -895,10 +1113,19 @@ def _capture_transfer_attempt(
             attempt,
             reached_threshold=True,
         )
+        if direction in {"upload", "download"} and expected_size is not None:
+            values["transfer_complete"] = "true"
+            values["source_bytes"] = str(expected_size)
+            values["destination_bytes"] = str(remote_size if direction == "upload" else local_size)
+        if direction == "upload" and remote_size is not None:
+            values["upload_bytes"] = str(remote_size)
+        if direction == "download" and local_size is not None:
+            values["download_bytes"] = str(local_size)
+            values["remote_bytes"] = str(remote_size or 0)
         return TransferAttemptResult(values, bound_shot, True)
 
-    # Reached >= threshold but the upload seed never completed: still a bound pair,
-    # reported as not-passing so the wrapper retries / fails the page.
+    # Reached >= threshold but the transfer did not complete exactly: still a bound
+    # pair, reported as not-passing so the wrapper retries / fails the page.
     if bound_sample is not None:
         values = _transfer_values_from_sample(
             bound_sample,
@@ -908,7 +1135,19 @@ def _capture_transfer_attempt(
             attempt,
             reached_threshold=False,
         )
-        values["speed_status"] = "seed_incomplete"
+        values["speed_status"] = completion_status or "transfer_incomplete"
+        values["transfer_complete"] = "false"
+        if direction in {"upload", "download"}:
+            values["transfer_expected_bytes"] = str(expected_size or _transfer_total_bytes(cfg))
+            values["transfer_source_bytes"] = str(
+                remote_size if direction == "download" else (expected_size or _transfer_total_bytes(cfg))
+            )
+            values["transfer_destination_bytes"] = str(
+                local_size if direction == "download" else (remote_size or 0)
+            )
+        if direction == "upload":
+            values["upload_expected_bytes"] = str(expected_size or _transfer_total_bytes(cfg))
+            values["upload_remote_bytes"] = str(remote_size or 0)
         return TransferAttemptResult(values, bound_shot, False)
 
     # Never reached threshold. On the final attempt, bind whatever steady rate is on
@@ -971,6 +1210,10 @@ def _wait_for_upload_seed_complete(
     min_seed_bytes: int,
     page_key: str,
     transfer_cfg: dict,
+    *,
+    progress_cb: Callable[[dict], None] | None = None,
+    share: str = "",
+    direction: str = "upload",
 ) -> bool:
     if min_seed_bytes <= 0:
         return True
@@ -989,6 +1232,7 @@ def _wait_for_upload_seed_complete(
 
     last_progress = current
     while time.monotonic() < deadline:
+        _poll_transfer_control(progress_cb, page_key, share, direction)
         current = _progress_size(progress_file)
         last_progress = current
         if current >= min_seed_bytes:
@@ -1012,25 +1256,46 @@ def _wait_for_upload_seed_complete(
     return False
 
 
-def _wait_for_transfer_process_exit(page: "Page", proc, page_key: str, transfer_cfg: dict) -> None:
+def _wait_for_transfer_process_exit(
+    page: "Page",
+    proc,
+    page_key: str,
+    transfer_cfg: dict,
+    *,
+    timeout_s: float | None = None,
+    progress_cb: Callable[[dict], None] | None = None,
+    share: str = "",
+    direction: str = "",
+) -> bool:
     if _process_finished(proc):
-        return
+        return True
 
-    timeout_s = _transfer_upload_finish_timeout_s(transfer_cfg)
+    timeout_s = _transfer_upload_finish_timeout_s(transfer_cfg) if timeout_s is None else max(0.0, timeout_s)
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
+        _poll_transfer_control(progress_cb, page_key, share, direction)
         if _process_finished(proc):
-            return
+            return True
         page.wait_for_timeout(250)
 
-    logger.info(f"{page_key}: transfer process still running after upload seed completion")
+    logger.info(f"{page_key}: transfer process still running after completion wait")
+    return False
 
 
 def _bytes_to_mib(value: int | float) -> float:
     return float(value) / (1024 * 1024)
 
 
-def _wait_for_post_upload_settle(page: "Page", frame: "Frame", page_key: str, transfer_cfg: dict) -> None:
+def _wait_for_post_upload_settle(
+    page: "Page",
+    frame: "Frame",
+    page_key: str,
+    transfer_cfg: dict,
+    *,
+    progress_cb: Callable[[dict], None] | None = None,
+    share: str = "",
+    direction: str = "upload",
+) -> None:
     timeout_s = _transfer_post_upload_settle_timeout_s(transfer_cfg)
     interval_ms = _transfer_post_upload_settle_interval_ms(transfer_cfg)
     stable_target = _transfer_post_upload_settle_samples(transfer_cfg)
@@ -1042,6 +1307,7 @@ def _wait_for_post_upload_settle(page: "Page", frame: "Frame", page_key: str, tr
     last_rate = "unknown"
     logger.info(f"{page_key}: waiting for NAS write activity to settle before read test")
     while time.monotonic() < deadline:
+        _poll_transfer_control(progress_cb, page_key, share, direction)
         _read_section, write_section = _disk_sections(_frame_text(frame))
         sample = _section_total_rate_sample(write_section, "write_total")
         if sample is None or sample.rate_bytes < MIN_TRANSFER_RATE_BYTES:
@@ -1064,14 +1330,9 @@ def _finish_transfer_process(proc, page_key: str, attempt: int) -> None:
 
     logger.info(f"{page_key}: stopping transfer process after speed attempt {attempt}")
     try:
-        proc.kill()
+        terminate_powershell(proc)
     except Exception as exc:
         logger.warning(f"{page_key}: could not stop transfer process: {exc}")
-        return
-    try:
-        proc.communicate(timeout=10)
-    except Exception:
-        pass
 
 
 def _process_finished(proc) -> bool:
@@ -1899,7 +2160,9 @@ def _build_transfer_config(nas_url: str, share: str, run_dir: Path, admin: dict,
     if not host:
         raise CaptureError(f"Could not extract NAS host from '{nas_url}'")
 
-    local_dir = _transfer_run_dir(run_dir, transfer_cfg) / share
+    transfer_run_dir = _transfer_run_dir(run_dir, transfer_cfg)
+    _mark_transfer_session_dir(transfer_run_dir)
+    local_dir = transfer_run_dir / share
     local_dir.mkdir(parents=True, exist_ok=True)
     drive_letter = "H" if share == "hdd" else "S"
 
@@ -2039,6 +2302,12 @@ def _transfer_upload_finish_timeout_s(transfer_cfg: dict) -> float:
     raw = transfer_cfg.get("upload_finish_timeout_s", TRANSFER_UPLOAD_FINISH_TIMEOUT_S)
     value = _float_or_none(raw)
     return max(0.0, value if value is not None else TRANSFER_UPLOAD_FINISH_TIMEOUT_S)
+
+
+def _transfer_download_finish_timeout_s(transfer_cfg: dict) -> float:
+    raw = _model_transfer_cfg_value(transfer_cfg, "download_finish_timeout_s")
+    value = _float_or_none(raw)
+    return max(0.0, value if value is not None else TRANSFER_DOWNLOAD_FINISH_TIMEOUT_S)
 
 
 def _transfer_upload_min_seed_bytes(transfer_cfg: dict) -> int:
@@ -2239,13 +2508,43 @@ def _ps_quote(value: str) -> str:
     return value.replace("'", "''")
 
 
-def _prepare_share(cfg: SmbTransferConfig) -> None:
+def _prepare_share(
+    cfg: SmbTransferConfig,
+    *,
+    page: "Page" | None = None,
+    page_key: str = "",
+    share: str = "",
+    direction: str = "",
+    progress_cb: Callable[[dict], None] | None = None,
+) -> None:
     _run_powershell_best_effort(build_unmount_script(cfg), timeout_s=30)
-    run_powershell(build_mount_script(cfg), timeout_s=60)
+    if page is None:
+        run_powershell(build_mount_script(cfg), timeout_s=60)
+    else:
+        _run_powershell_cancelable(
+            page,
+            build_mount_script(cfg),
+            timeout_s=60,
+            page_key=page_key,
+            share=share,
+            direction=direction,
+            progress_cb=progress_cb,
+        )
     # When source_file is supplied, we upload an existing real file instead of
     # creating a 10GB sparse file in the output directory.
     if cfg.source_file is None:
-        run_powershell(build_prepare_sparse_file_script(cfg), timeout_s=300)
+        if page is None:
+            run_powershell(build_prepare_sparse_file_script(cfg), timeout_s=300)
+        else:
+            _run_powershell_cancelable(
+                page,
+                build_prepare_sparse_file_script(cfg),
+                timeout_s=300,
+                page_key=page_key,
+                share=share,
+                direction=direction,
+                progress_cb=progress_cb,
+            )
 
 
 def _remote_file_exists(cfg: SmbTransferConfig) -> bool:
@@ -2253,6 +2552,95 @@ def _remote_file_exists(cfg: SmbTransferConfig) -> bool:
     script = f"$remote = '{remote_file}'; if (Test-Path -LiteralPath $remote) {{ Write-Output 1 }} else {{ Write-Output 0 }}"
     result = run_powershell(script, timeout_s=30)
     return result.stdout.strip().endswith("1")
+
+
+def _remote_file_size(cfg: SmbTransferConfig) -> int | None:
+    remote_file = cfg.remote_file.replace("'", "''")
+    script = (
+        f"$remote = '{remote_file}'; "
+        "if (Test-Path -LiteralPath $remote) { "
+        "$item = Get-Item -LiteralPath $remote; "
+        "Write-Output ('SIZE=' + [string]([Int64]$item.Length)) "
+        "} else { Write-Output 'MISSING' }"
+    )
+    result = run_powershell(script, timeout_s=30)
+    for line in reversed(result.stdout.splitlines()):
+        value = line.strip()
+        if value.startswith("SIZE="):
+            try:
+                return int(value[5:])
+            except ValueError:
+                return None
+    return None
+
+
+def _local_file_size(path: Path) -> int | None:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
+
+
+def _ensure_remote_seed(
+    cfg: SmbTransferConfig,
+    share: str,
+    *,
+    page: "Page" | None = None,
+    page_key: str = "",
+    progress_cb: Callable[[dict], None] | None = None,
+) -> None:
+    expected_size = _transfer_total_bytes(cfg)
+    current_size = _remote_file_size(cfg)
+    if current_size == expected_size:
+        return
+
+    logger.info(
+        f"Seeding remote SMB fixture for share '{share}' "
+        f"({_format_bytes(current_size or 0)} / {_format_bytes(expected_size)})"
+    )
+    if page is None:
+        run_powershell(build_upload_script(cfg), timeout_s=TRANSFER_TIMEOUT_S)
+    else:
+        _run_powershell_cancelable(
+            page,
+            build_upload_script(cfg),
+            timeout_s=TRANSFER_TIMEOUT_S,
+            page_key=page_key,
+            share=share,
+            direction="upload",
+            progress_cb=progress_cb,
+        )
+    seeded_size = _remote_file_size(cfg)
+    if seeded_size != expected_size:
+        raise CaptureError(
+            f"Remote SMB fixture for share '{share}' has the wrong size after seeding: "
+            f"{_format_bytes(seeded_size or 0)} / {_format_bytes(expected_size)}"
+        )
+
+
+def _run_powershell_cancelable(
+    page: "Page",
+    script: str,
+    *,
+    timeout_s: float,
+    page_key: str,
+    share: str,
+    direction: str,
+    progress_cb: Callable[[dict], None] | None,
+) -> None:
+    proc = start_powershell(script)
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    try:
+        while time.monotonic() < deadline:
+            _poll_transfer_control(progress_cb, page_key, share, direction)
+            if _process_finished(proc):
+                wait_powershell(proc, timeout_s=30)
+                return
+            page.wait_for_timeout(250)
+        raise SmbTransferError(f"PowerShell timed out after {timeout_s}s")
+    finally:
+        if not _process_finished(proc):
+            terminate_powershell(proc)
 
 
 def _cleanup_transfer(cfg: SmbTransferConfig, direction: str) -> None:
@@ -2335,20 +2723,131 @@ def _run_powershell_best_effort(script: str, timeout_s: int) -> None:
         logger.warning(f"Best-effort PowerShell step failed: {exc}")
 
 
+def _transfer_session_marker_path(run_dir: Path) -> Path:
+    return run_dir / TRANSFER_SESSION_MARKER
+
+
+def _transfer_session_info(run_dir: Path) -> dict:
+    marker = _transfer_session_marker_path(run_dir)
+    if run_dir.is_symlink() or marker.is_symlink():
+        return {}
+    try:
+        value = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    if not isinstance(value, dict) or value.get("schema") != TRANSFER_SESSION_SCHEMA:
+        return {}
+    return value
+
+
+def _is_owned_transfer_session(run_dir: Path) -> bool:
+    return bool(_transfer_session_info(run_dir))
+
+
+def _process_id_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if pid == os.getpid():
+        return True
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+
+            process_query_limited_information = 0x1000
+            handle = ctypes.windll.kernel32.OpenProcess(process_query_limited_information, False, pid)
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+            return ctypes.windll.kernel32.GetLastError() == 5  # access denied still means it exists
+        except Exception:
+            # Unknown must be treated as live: a cleanup leak is safer than deleting
+            # another factory process's active 20 GiB transfer.
+            return True
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _transfer_session_owner_is_alive(run_dir: Path) -> bool:
+    info = _transfer_session_info(run_dir)
+    try:
+        pid = int(info.get("pid") or 0)
+    except (TypeError, ValueError):
+        return False
+    return _process_id_is_alive(pid)
+
+
+def _mark_transfer_session_dir(run_dir: Path) -> None:
+    if run_dir.is_symlink():
+        raise CaptureError(f"Refusing symlinked SMB transfer session directory: {run_dir}")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    marker = _transfer_session_marker_path(run_dir)
+    existing = _transfer_session_info(run_dir)
+    if existing:
+        try:
+            owner_pid = int(existing.get("pid") or 0)
+        except (TypeError, ValueError):
+            owner_pid = 0
+        if owner_pid not in {0, os.getpid()} and _process_id_is_alive(owner_pid):
+            raise CaptureError(f"SMB transfer session is active in process {owner_pid}: {run_dir}")
+        if owner_pid == os.getpid():
+            return
+        _cleanup_transfer_run_dir(run_dir)
+        run_dir.mkdir(parents=True, exist_ok=True)
+    elif marker.exists() or marker.is_symlink():
+        raise CaptureError(f"Invalid SMB transfer ownership marker: {marker}")
+    else:
+        try:
+            has_unowned_content = any(run_dir.iterdir())
+        except OSError as exc:
+            raise CaptureError(f"Could not inspect SMB transfer session directory {run_dir}: {exc}") from exc
+        if has_unowned_content:
+            raise CaptureError(
+                f"Refusing to claim non-empty unowned SMB transfer directory: {run_dir}"
+            )
+
+    payload = json.dumps(
+        {"schema": TRANSFER_SESSION_SCHEMA, "pid": os.getpid(), "created_at": time.time()},
+        ensure_ascii=True,
+        sort_keys=True,
+    )
+    try:
+        marker.write_text(payload + "\n", encoding="utf-8")
+    except OSError as exc:
+        raise CaptureError(f"Could not mark SMB transfer session directory {run_dir}: {exc}") from exc
+
+
 def _cleanup_transfer_run_dir(run_dir: Path) -> None:
     """Remove local SMB transfer artefacts for one SN/session."""
     if not run_dir.exists():
         return
+    if not _is_owned_transfer_session(run_dir):
+        logger.warning(f"Skipping unowned transfer session directory: {run_dir}")
+        return
+    marker = _transfer_session_marker_path(run_dir)
     try:
         for entry in run_dir.iterdir():
-            if entry.is_dir():
+            if entry == marker:
+                continue
+            if entry.is_symlink():
+                _unlink_transfer_file(entry)
+            elif entry.is_dir():
                 _cleanup_transfer_file_dir(entry)
             elif entry.is_file():
                 _unlink_transfer_file(entry)
-        try:
-            run_dir.rmdir()
-        except OSError:
-            pass
+        remaining = [entry for entry in run_dir.iterdir() if entry != marker]
+        if not remaining:
+            _unlink_transfer_file(marker)
+            try:
+                run_dir.rmdir()
+            except OSError:
+                pass
     except Exception as exc:
         logger.warning(f"Could not clean up transfer run dir {run_dir}: {exc}")
 
@@ -2356,7 +2855,7 @@ def _cleanup_transfer_run_dir(run_dir: Path) -> None:
 def _cleanup_transfer_file_dir(file_dir: Path) -> None:
     try:
         for entry in file_dir.iterdir():
-            if entry.is_file():
+            if entry.is_symlink() or entry.is_file():
                 _unlink_transfer_file(entry)
         try:
             file_dir.rmdir()
@@ -2394,13 +2893,14 @@ def _cleanup_transfer_workdir(run_dir: Path) -> None:
 
 
 def _cleanup_all_transfer_workdirs_if_idle(output_root: Path) -> None:
-    if not TRANSFER_STAGE_LOCK.acquire(blocking=False):
+    lease = _try_acquire_idle_transfer_slot()
+    if lease is None:
         logger.info("Skipping old SMB workdir cleanup while another transfer is active")
         return
     try:
         _cleanup_all_transfer_workdirs(output_root)
     finally:
-        TRANSFER_STAGE_LOCK.release()
+        _release_idle_transfer_slot(lease)
 
 
 def _cleanup_all_transfer_workdirs(output_root: Path) -> None:
@@ -2408,18 +2908,45 @@ def _cleanup_all_transfer_workdirs(output_root: Path) -> None:
         return
     try:
         for run_dir in output_root.iterdir():
-            if run_dir.is_dir():
+            if _is_owned_transfer_session(run_dir):
+                if _transfer_session_owner_is_alive(run_dir):
+                    logger.info(f"Skipping active SMB transfer session {run_dir}")
+                    continue
                 _cleanup_transfer_run_dir(run_dir)
     except Exception as exc:
         logger.warning(f"Could not clean old transfer workdirs under {output_root}: {exc}")
 
 
 def _cleanup_legacy_transfer_workdirs_if_idle(output_root: Path) -> None:
-    if not TRANSFER_STAGE_LOCK.acquire(blocking=False):
+    lease = _try_acquire_idle_transfer_slot()
+    if lease is None:
         logger.info("Skipping legacy SMB workdir cleanup while another transfer is active")
         return
     try:
         _cleanup_legacy_transfer_workdirs(output_root)
+    finally:
+        _release_idle_transfer_slot(lease)
+
+
+def _try_acquire_idle_transfer_slot() -> TransferSlotLease | None:
+    if not TRANSFER_STAGE_LOCK.acquire(blocking=False):
+        return None
+    process_lock = InterProcessLock(TRANSFER_PROCESS_LOCK_KEY)
+    try:
+        token = process_lock.try_acquire()
+        if token is None:
+            TRANSFER_STAGE_LOCK.release()
+            return None
+        return TransferSlotLease(process_lock, token)
+    except Exception:
+        TRANSFER_STAGE_LOCK.release()
+        raise
+
+
+def _release_idle_transfer_slot(lease: TransferSlotLease) -> None:
+    try:
+        if not lease.process_lock.release(lease.process_token):
+            raise CaptureError("Refused to release unowned idle transfer lease")
     finally:
         TRANSFER_STAGE_LOCK.release()
 
@@ -2429,7 +2956,12 @@ def _cleanup_legacy_transfer_workdirs(output_root: Path) -> None:
         return
     try:
         for smb_dir in output_root.glob("*/smb"):
-            if smb_dir.is_dir():
+            run_dir = smb_dir.parent
+            if (
+                smb_dir.is_dir()
+                and _is_owned_transfer_session(run_dir)
+                and not _transfer_session_owner_is_alive(run_dir)
+            ):
                 _cleanup_transfer_file_dir(smb_dir)
     except Exception as exc:
         logger.warning(f"Could not clean legacy transfer workdirs under {output_root}: {exc}")
@@ -2561,10 +3093,42 @@ def _require_meta(value: str | None, name: str) -> str:
     return value
 
 
-def _emit_capture_event(progress_cb: Callable[[dict], None] | None, event_type: str, **payload: object) -> None:
+def _poll_transfer_control(
+    progress_cb: Callable[[dict], None] | None,
+    page_key: str,
+    share: str,
+    direction: str,
+) -> None:
+    _emit_capture_event(
+        progress_cb,
+        "transfer_poll",
+        page_key=page_key,
+        share=share,
+        direction=direction,
+    )
+
+
+def _is_cancel_callback_error(exc: Exception) -> bool:
+    name = type(exc).__name__.lower()
+    message = str(exc).lower()
+    return name in {"taskcancelled", "capturecancelled"} or any(
+        marker in message
+        for marker in ("cancelled by user", "canceled by user", "用户中断", "已中断")
+    )
+
+
+def _emit_capture_event(
+    progress_cb: Callable[[dict], None] | None,
+    event_type: str,
+    *,
+    propagate_cancel: bool = True,
+    **payload: object,
+) -> None:
     if progress_cb is None:
         return
     try:
         progress_cb({"type": event_type, **payload})
-    except Exception:
-        pass
+    except Exception as exc:
+        if propagate_cancel and _is_cancel_callback_error(exc):
+            raise
+        logger.warning(f"Capture progress callback failed for {event_type}: {exc}")

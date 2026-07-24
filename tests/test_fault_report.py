@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from src.report import collector, fingerprint, github_issues, redact
+from src.report import collector, fingerprint, github_issues, redact, reporter as reporter_module
 from src.report.reporter import FaultReporter
 
 
@@ -30,6 +30,27 @@ def test_scrub_text_removes_secrets() -> None:
     assert "00:11:22:33:44:55" not in out
     assert "<mac>" in out
     assert "password=<redacted>" in out
+
+
+def test_scrub_text_removes_json_dict_and_basic_auth_secrets() -> None:
+    raw = (
+        'json={"password": "json-pass", "token": "opaque.token"} '
+        "dict={'client_secret': 'dict-pass'} "
+        "Authorization: Basic YWRtaW46cGFzcw=="
+    )
+
+    out = redact.scrub_text(raw)
+
+    for secret in ("json-pass", "opaque.token", "dict-pass", "YWRtaW46cGFzcw=="):
+        assert secret not in out
+    assert out.count("<redacted>") >= 4
+    assert "Authorization=<redacted>" in out
+
+
+def test_scrub_text_redacts_entire_short_basic_authorization_value() -> None:
+    out = redact.scrub_text("request failed: Authorization: Basic abc123; retrying")
+
+    assert out == "request failed: Authorization=<redacted>; retrying"
 
 
 def test_scrub_text_extra_secret_too_short_ignored() -> None:
@@ -105,7 +126,7 @@ def _make_sn_dir(tmp_path: Path, sn: str = "SN12345") -> Path:
         json.dumps({"sn": sn, "status": "failed", "error": "boom"}), encoding="utf-8"
     )
     (sn_dir / "run.log").write_text("\n".join(f"line {i}" for i in range(500)), encoding="utf-8")
-    (sn_dir / "图片" / "p1.png").write_bytes(b"\x89PNG\r\n")
+    (sn_dir / "图片" / "p1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     (sn_dir / "test_report.json.tmp").write_text("partial", encoding="utf-8")
     (sn_dir / "traces" / "t.zip").write_bytes(b"trace")
     return sn_dir
@@ -120,6 +141,46 @@ def test_zip_sn_dir_includes_artifacts_and_skips_transient(tmp_path: Path) -> No
     assert not any(n.endswith(".tmp") for n in names)  # 跳过原子写临时文件
     assert not any("/traces/" in n for n in names)  # 跳过 traces
     assert all(n.startswith("SN12345/") for n in names)  # zip 顶层是 SN 目录
+
+
+def test_zip_sn_dir_scrubs_text_and_rejects_secrets_and_unknown_binary(tmp_path: Path) -> None:
+    sn_dir = _make_sn_dir(tmp_path)
+    explicit_secret = "known-admin-pass"
+    json_secret = "opaque.token"
+    basic_secret = "YWRtaW46cGFzcw=="
+    (sn_dir / "run.log").write_text(
+        f"crash {explicit_secret}\nAuthorization: Basic {basic_secret}\n",
+        encoding="utf-8",
+    )
+    (sn_dir / "test_report.json").write_text(
+        json.dumps({"error": "failed", "form_result": {"token": json_secret}}),
+        encoding="utf-8",
+    )
+    (sn_dir / "图片" / "failure.html").write_text(
+        "<pre>{'password': 'dict-pass'}</pre>", encoding="utf-8"
+    )
+    (sn_dir / ".env").write_text("TOKEN=env-secret", encoding="utf-8")
+    (sn_dir / "config.yml").write_text("password: config-secret", encoding="utf-8")
+    (sn_dir / "id_ed25519").write_text("private-key", encoding="utf-8")
+    (sn_dir / "unknown.bin").write_bytes(b"raw-secret-binary")
+    (sn_dir / "fake.png").write_bytes(b"not really an image: password=fake-secret")
+
+    data, _included = collector.zip_sn_dir(sn_dir, extra_secrets=[explicit_secret])
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        names = archive.namelist()
+        payloads = {name: archive.read(name) for name in names}
+
+    combined_text = b"\n".join(
+        payload for name, payload in payloads.items() if Path(name).suffix in {".html", ".json", ".log"}
+    ).decode("utf-8")
+    for secret in (explicit_secret, json_secret, basic_secret, "dict-pass"):
+        assert secret not in combined_text
+    assert "<redacted>" in combined_text
+    assert payloads["SN12345/图片/p1.png"] == b"\x89PNG\r\n\x1a\n"
+    assert not any(
+        name.endswith(("/.env", "/config.yml", "/id_ed25519", "/unknown.bin", "/fake.png"))
+        for name in names
+    )
 
 
 def test_read_report_and_log_tail(tmp_path: Path) -> None:
@@ -229,7 +290,7 @@ class _FakeClient:
         return {"id": 999}
 
     def upload_release_asset(self, release_id, name, data, content_type="application/zip"):
-        self.assets.append((release_id, name, len(data)))
+        self.assets.append((release_id, name, data))
         return f"https://example/releases/{name}"
 
 
@@ -248,6 +309,22 @@ def test_disabled_when_token_empty(tmp_path: Path) -> None:
     assert reporter._snapshot() == []  # 未配置 → 完全 no-op
 
 
+def test_cached_reporter_absorbs_new_runtime_secrets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(FaultReporter, "flush_in_background", lambda self: None)
+    reporter_module._reporter_cache.clear()
+    cfg = {"enabled": True, "owner": "o", "repo": "r", "token": "configured-token"}
+    try:
+        first = reporter_module.get_reporter(cfg, tmp_path, secrets=["first-password"])
+        second = reporter_module.get_reporter(cfg, tmp_path, secrets=["rotated-password"])
+
+        assert second is first
+        assert {"configured-token", "first-password", "rotated-password"} <= set(second.secrets)
+    finally:
+        reporter_module._reporter_cache.clear()
+
+
 def test_dedup_window_suppresses_rapid_repeat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     reporter = _reporter(tmp_path, dedup_window_minutes=5)
     monkeypatch.setattr(reporter, "flush_in_background", lambda: None)  # 只看入队，不起线程
@@ -255,6 +332,43 @@ def test_dedup_window_suppresses_rapid_repeat(tmp_path: Path, monkeypatch: pytes
     reporter.report_async(**kwargs)
     reporter.report_async(**kwargs)
     assert len(reporter._snapshot()) == 1  # 第二次被去重窗口压掉
+
+
+def test_queue_and_legacy_queue_never_retain_raw_secrets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reporter = _reporter(tmp_path)
+    reporter.secrets.append("known-admin-pass")
+    monkeypatch.setattr(reporter, "flush_in_background", lambda: None)
+
+    reporter.report_async(
+        sn="SNQ",
+        sn_dir=tmp_path / "SNQ" / "known-admin-pass",
+        model="4800",
+        category="other",
+        stage="backend token=stage-secret",
+        message='known-admin-pass {"token": "queue-secret"}',
+    )
+    on_disk = reporter.queue_file.read_text(encoding="utf-8")
+    for secret in ("known-admin-pass", "stage-secret", "queue-secret"):
+        assert secret not in on_disk
+    assert reporter._snapshot()[0]["sn_dir"] == "SNQ/<redacted>"
+
+    # Upgrade path: reading a queue written by an older version rewrites it safely.
+    legacy = {
+        "fingerprint": "legacy01",
+        "sn": "SNQ",
+        "sn_dir": str(tmp_path / "SNQ"),
+        "model": "4800",
+        "category": "other",
+        "stage": "failed",
+        "message": "password=legacy-secret",
+        "ts": "2026-06-01 10:00:00",
+    }
+    reporter.queue_file.write_text(json.dumps(legacy) + "\n", encoding="utf-8")
+    snapshot = reporter._snapshot()
+    assert "legacy-secret" not in json.dumps(snapshot)
+    assert "legacy-secret" not in reporter.queue_file.read_text(encoding="utf-8")
 
 
 def test_upload_creates_then_bumps(tmp_path: Path) -> None:
@@ -283,6 +397,18 @@ def test_upload_creates_then_bumps(tmp_path: Path) -> None:
     assert "https://example/releases/" in body  # 资产链接入正文
     assert "Bsd123456" not in body  # run.log 末尾里的密码被脱敏
     assert len(client.assets) == 1
+    with zipfile.ZipFile(io.BytesIO(client.assets[0][2])) as archive:
+        zipped_log = archive.read("SNX/run.log").decode("utf-8")
+    assert "Bsd123456" not in zipped_log
+
+    secret_event = dict(event)
+    secret_event["message"] = "backend token=title-secret"
+    secret_event["stage"] = "Authorization: Basic YWRtaW46cGFzcw=="
+    title = reporter._title(secret_event)
+    secret_body = reporter._body(secret_event, 1, sn_dir)
+    for secret in ("title-secret", "YWRtaW46cGFzcw==", "Bsd123456"):
+        assert secret not in title
+        assert secret not in secret_body
 
     # 第二次出现（同指纹）→ 走缓存命中 → bump，不新建 issue
     event2 = dict(event)

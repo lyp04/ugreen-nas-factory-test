@@ -21,8 +21,14 @@ SW_SHOW = 5
 SWP_NOZORDER = 0x0004
 SWP_SHOWWINDOW = 0x0040
 TOP_LEVEL_WINDOW_CLASS = "Chrome_WidgetWin_1"
-_USER32 = ctypes.WinDLL("user32", use_last_error=True)
-_ENUM_WINDOWS_PROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+if sys.platform.startswith("win"):
+    _USER32 = ctypes.WinDLL("user32", use_last_error=True)
+    _ENUM_WINDOWS_PROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+else:
+    # Keep the module importable on non-Windows hosts so platform-neutral CLI/
+    # GUI logic can still be unit-tested.  Window management remains a no-op.
+    _USER32 = None
+    _ENUM_WINDOWS_PROC = None
 
 
 @dataclass(slots=True)
@@ -176,9 +182,11 @@ def _browser_process_name(channel: str | None) -> str | None:
 
 
 def _top_level_windows_for_pid(browser_pid: int) -> list[int]:
+    if _USER32 is None or _ENUM_WINDOWS_PROC is None:
+        return []
+
     hwnds: list[int] = []
 
-    @_ENUM_WINDOWS_PROC
     def callback(hwnd, _lparam):
         pid = wintypes.DWORD()
         _USER32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
@@ -188,7 +196,8 @@ def _top_level_windows_for_pid(browser_pid: int) -> list[int]:
             hwnds.append(hwnd)
         return True
 
-    _USER32.EnumWindows(callback, 0)
+    enum_callback = _ENUM_WINDOWS_PROC(callback)
+    _USER32.EnumWindows(enum_callback, 0)
     return hwnds
 
 

@@ -22,3 +22,23 @@ def test_decode_response_uses_remote_ip_and_pair_mac() -> None:
     assert hit.sn == "HB670EE02251AF1F2"
     assert hit.mac == "AA:BB:CC:DD:EE:FF"
     assert hit.data["ip"] == "192.0.2.103"
+
+
+def test_interface_macs_includes_non_responding_paired_interface() -> None:
+    hit = ugreen_broadcast.UgreenBroadcastHit(
+        address="192.0.2.107",
+        sn="EC752VV42251611A",
+        mac="AA:BB:CC:DD:EE:01",
+        data={
+            "pair": {
+                "192.0.2.107": "AA:BB:CC:DD:EE:01",
+                "192.0.2.108": "AA:BB:CC:DD:EE:02",
+                "not-an-ip": "AA:BB:CC:DD:EE:03",
+            }
+        },
+    )
+
+    assert ugreen_broadcast.interface_macs(hit) == {
+        "192.0.2.107": "AA:BB:CC:DD:EE:01",
+        "192.0.2.108": "AA:BB:CC:DD:EE:02",
+    }

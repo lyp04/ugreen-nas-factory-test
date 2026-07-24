@@ -172,6 +172,9 @@ class UpdateManager:
         exe_asset = self._find_asset(assets, exe_asset_name)
         if exe_asset is None:
             raise RuntimeError(f"Release asset not found: {exe_asset_name}")
+        sha256 = str(manifest.get("sha256", "")).lower().replace("sha256:", "").strip()
+        if len(sha256) != 64 or any(ch not in "0123456789abcdef" for ch in sha256):
+            raise RuntimeError("update.json is missing a valid 64-character SHA-256")
         return UpdateInfo(
             config=config,
             version_code=remote_version,
@@ -179,7 +182,7 @@ class UpdateManager:
             notes=str(manifest.get("notes", "")),
             exe_asset=exe_asset_name,
             exe_url=exe_asset["url"],
-            sha256=str(manifest.get("sha256", "")).lower().replace("sha256:", "").strip(),
+            sha256=sha256,
         )
 
     def _release_url(self, config: _Config) -> str:
@@ -225,14 +228,16 @@ class UpdateManager:
                     out.write(chunk)
 
     def _validate_download(self, update: UpdateInfo, path: Path) -> None:
-        if update.sha256:
-            actual = _sha256(path)
-            if actual.lower() != update.sha256.lower():
-                raise RuntimeError(
-                    f"SHA-256 不匹配\n期望: {update.sha256}\n实际: {actual}"
-                )
         if path.stat().st_size <= 0:
             raise RuntimeError("下载文件为空")
+        expected = update.sha256.lower().replace("sha256:", "").strip()
+        if len(expected) != 64 or any(ch not in "0123456789abcdef" for ch in expected):
+            raise RuntimeError("更新清单缺少有效的 64 位 SHA-256，拒绝安装")
+        actual = _sha256(path)
+        if actual.lower() != expected:
+            raise RuntimeError(
+                f"SHA-256 不匹配\n期望: {expected}\n实际: {actual}"
+            )
 
     # ---------------------------------------------------------------- install
     def _perform_install(self, update: UpdateInfo, new_exe: Path) -> None:
@@ -432,18 +437,33 @@ try {
 Start-Sleep -Milliseconds 500
 
 $ok = $false
+$backupPath = $OldPath + ".update-backup"
 for ($i = 0; $i -lt 20; $i++) {
     try {
         # Use .NET File APIs instead of Move-Item: Move-Item -Force has been
         # observed to report success while leaving both source and destination
         # untouched when launched as a detached subprocess child. The .NET
         # primitives raise on failure, so we can detect it properly.
-        if ([System.IO.File]::Exists($OldPath)) { [System.IO.File]::Delete($OldPath) }
+        if ([System.IO.File]::Exists($backupPath)) { [System.IO.File]::Delete($backupPath) }
+        if ([System.IO.File]::Exists($OldPath)) { [System.IO.File]::Move($OldPath, $backupPath) }
         [System.IO.File]::Move($NewPath, $OldPath)
         $ok = $true
+        try {
+            if ([System.IO.File]::Exists($backupPath)) { [System.IO.File]::Delete($backupPath) }
+        } catch {
+            Write-LogLine ("[" + (Get-Date -Format o) + "] backup cleanup warning: " + $_.Exception.Message)
+        }
         break
     } catch {
         Write-LogLine ("[" + (Get-Date -Format o) + "] swap retry " + $i + ": " + $_.Exception.Message)
+        if ((-not [System.IO.File]::Exists($OldPath)) -and [System.IO.File]::Exists($backupPath)) {
+            try {
+                [System.IO.File]::Move($backupPath, $OldPath)
+                Write-LogLine ("[" + (Get-Date -Format o) + "] restored original executable")
+            } catch {
+                Write-LogLine ("[" + (Get-Date -Format o) + "] CRITICAL restore failed: " + $_.Exception.Message)
+            }
+        }
         Start-Sleep -Milliseconds 500
     }
 }

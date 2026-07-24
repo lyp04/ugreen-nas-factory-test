@@ -203,7 +203,10 @@ def _ensure_pool(
     summary_text = _find_matching_pool_summary_text(frame, pool)
 
     if summary_text:
-        logger.info(f"Provisioning: storage pool already present for {pool_name} -> {summary_text}")
+        # The pool-card locator can transiently include a still-mounted password
+        # confirmation dialog.  The full DOM text is useful for matching disks and
+        # RAID, but must never be copied into logs.
+        logger.info(f"Provisioning: storage pool already present for {pool_name}")
         return
 
     logger.info(f"Provisioning: create storage pool {pool_name}")
@@ -214,7 +217,7 @@ def _ensure_pool(
 
     summary_text = _wait_for_matching_pool_summary_text(frame, pool, timeout_ms=POOL_READY_TIMEOUT_MS)
     page.wait_for_timeout(SHORT_UI_WAIT_MS)
-    logger.info(f"  Storage pool ready: {pool_name} -> {summary_text}")
+    logger.info(f"  Storage pool ready: {pool_name}")
 
 
 def _ensure_share(page: "Page", desktop: dict, nav: dict, provision: dict, pool: dict, admin: dict) -> None:

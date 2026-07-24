@@ -41,7 +41,6 @@ provision:
       pool_name: 存储池1
       storage_space: 存储空间1
       raid: RAID 0
-      disk_summary: 硬盘1、2、3、4
       disks:
         - 硬盘1
         - 硬盘2
@@ -52,7 +51,6 @@ provision:
       pool_name: 存储池2
       storage_space: 存储空间2
       raid: RAID 0
-      disk_summary: M.2硬盘1、2
       disks:
         - M.2硬盘1
         - M.2硬盘2
@@ -69,13 +67,13 @@ transfer:
     "4800Plus": 20
   # Local-only temp folder for SMB download/progress files. Keep this off synced folders.
   work_dir: "./transfer_work"
-  # Legacy fallback only; transfer screenshots now prefer speed-threshold sampling below.
-  midpoint_ratio: 0.5
   # Sample Task Manager transfer speed while SMB copy is running.
   speed_sample_interval_ms: 500
   speed_stable_samples: 1
   speed_attempt_timeout_s: 45
   speed_max_retries: 1
+  # 读数→截图→复读的最大跨度；慢电脑可小幅调高，但必须低于资源监控约 0.78s 的最短刷新周期。
+  bracket_max_span_s: 0.6
   # For upload screenshots, keep at least this much remote data for the following read test.
   upload_min_seed_mb:
     "2800": 5120
@@ -88,6 +86,8 @@ transfer:
     "4800": 120
     "4800Plus": 180
   upload_finish_timeout_s: 30
+  # 下载必须完整结束并核对本地/远端字节数；可写单个秒数，也可像 upload_seed_timeout_s 按机型配置。
+  download_finish_timeout_s: 3600
   # After upload finishes, wait for NAS disk write activity to settle before read screenshots.
   post_upload_settle_timeout_s: 30
   post_upload_settle_interval_ms: 1000
@@ -104,18 +104,13 @@ transfer:
         default: 200
 
 validation:
-  # 所有机型通用：截图采集时若任一页 CPU 温度（℃）> cpu_temp_max_c 则测试判失败，
-  # 失败原因里会写明实测值与阈值。设为更高的数字可放宽，或留空走 DEFAULT_CPU_TEMP_MAX_C。
+  # 所有机型通用：三个风扇模式页中任一页 CPU 温度（℃）> cpu_temp_max_c 则测试判失败，
+  # 失败原因里会写明实测值与阈值。设为更高的数字可放宽；要走内置默认值就删掉本项，不要留空。
   cpu_temp_max_c: 70
   # 抓风扇模式页时，若 CPU 温度超标或风扇转速异常，最多在这么多秒内反复重读+重抓，
   # 等读数进入合格区间再定格截图；超时仍不合格才按失败记录（与传输速度重试同理）。
   # 每张风扇模式页各享一份预算；设为 0 则关闭重抓（抓一次定生死）。
   cpu_temp_recheck_seconds: 30
-
-retry:
-  network_max: 3
-  ui_max: 2
-  backoff_base: 2
 
 browser:
   headless: false
@@ -126,8 +121,8 @@ browser:
   channel: msedge    # msedge | chrome | chromium. msedge uses system Edge (no download needed on Win10+).
                      # chromium 需要先跑 install.ps1 -WithChromium 下载浏览器，否则启动即报 "Executable doesn't exist"
 
-# 打印专有数据（P/N + EAN-13 对照表）文件的相对路径。真实数据文件不进 git、只在内部完整包里带；
-# 公开包没有这个文件 → 查表返回 None，铭牌打印回退到 placeholder_pn / --pn。
+# 打印专有数据（P/N + EAN-13 对照表）文件的相对路径。真实数据文件不进 git，也不会被 A/B 打包脚本复制；
+# 在目标机单独安装。文件缺失时查表返回 None，铭牌 CLI 回退到 placeholder_pn / --pn，GUI 会警告并跳过。
 label_data_file: config/labels.yml
 
 # 截图、日志、报告的输出目录。默认相对 exe 所在目录 → 整包复制走即用、无需改配置。
@@ -144,14 +139,13 @@ paths:
 # 读写速度 / 转速 / 温度 / 存储池 这四类硬件检测（即「其他/未分类」问题）时，自动把该
 # SN 的全部日志（run.log + test_report.json + 图片/截图）打成 zip 传到 release_tag 对应的
 # Release 资产，并按指纹去重地创建/更新一个 GitHub Issue。
-# 默认开启（可在此关掉）。token 从环境变量 FAULT_REPORT_TOKEN 读取，不写进任何文件 / 不进 git。
-# 生效条件：enabled=true 且 owner/repo 填成你自己的仓库 且 环境里设了 FAULT_REPORT_TOKEN。
-# 三者任一缺失（尤其没设该环境变量）= 自动停用，不影响任何测试流程。
+# 公开模板默认关闭，避免机器上碰巧存在 FAULT_REPORT_TOKEN 时把数据发到错误仓库。
+# 要启用：改成 enabled=true、填自己的私有仓库 owner/repo，并在目标机设置 FAULT_REPORT_TOKEN。
+# token 只从环境变量读取，不写进配置文件 / 不进 git。
 fault_report:
-  enabled: true
-  # 默认指向本仓库（所有产线机的故障都汇到这里）；fork 自用请改成你自己的 owner/repo。
-  owner: lyp04
-  repo: ugreen-nas-factory-test
+  enabled: false
+  owner: ""
+  repo: ""
   # 从环境变量读，避免把 PAT 写进配置文件 / 提交进 git。
   token: "${FAULT_REPORT_TOKEN}"
   release_tag: "fault-reports"
@@ -160,11 +154,12 @@ fault_report:
 
 # SN 标签打印（模版二：42×25mm，Code 128，12mm 条码高度）。
 # name 留空 = 按 Zebra 名称/驱动自动识别（单打印机机器够用）；
-# 多打印机机器请填 Windows 打印队列的精确名字（跑 `run-cli print-label --list-printers` 看实际名字）。
+# 多打印机机器请填 Windows 打印队列的精确名字（跑 `.\run-cli.ps1 print-label --list-printers` 看实际名字）。
 label_printer:
   name: ""
   dpi: 203            # ZD220/ZD420/GK420t = 203；ZD420-300dpi = 300
   quantity: 2         # 规格 2PCS（彩盒 + 中箱各一张）
+  # 通过后的统一自动打印开关：依次尝试 SN、铭牌和 EAN-13；周转箱仍需手动打印。
   auto_print_on_pass: false
 
 # 铭牌标贴（模版一：83.7×36.7mm，QR + 条码 + P/N/SN 文字）。
@@ -172,7 +167,7 @@ nameplate_printer:
   name: ""            # 例：ZDesigner ZT610-600dpi ZPL；留空则自动识别
   dpi: 600
   quantity: 1
-  auto_print_on_pass: false
+  # 下列 dpi/坐标用于 2800 通用布局；4800/4800Plus 走固定 600dpi、100×37mm 反向布局，不读取这些坐标。
   qr_top_left_mm: [65.0, 5.0]
   strip_top_left_mm: [6.0, 25.0]
   # P/N 占位（CLI 未传 --pn 且无法按 SN/grade 查表时使用）。
@@ -180,16 +175,14 @@ nameplate_printer:
 
 # 69 码（EAN-13）彩盒/中箱标贴（模版五：50×30mm）。名字必须与 Windows 打印队列完全一致。
 ean13_printer:
-  name: ""            # 例：DeliDL-888T；留空则自动识别
+  name: ""            # 例：DeliDL-888T；Deli 队列不会被 Zebra 兜底规则识别，产线使用必须填写
   dpi: 203
   quantity: 2
-  auto_print_on_pass: false
 
 # 周转箱标贴（模版六：102×152mm）。二维码内容：SN*{PID}*{QTY}*{PO}*{DATE}*{流水号}。
 carton_printer:
   name: ""            # 留空则自动识别
   dpi: 203
   quantity: 2
-  auto_print_on_pass: false
   po_default: "XXXXXXXXXXX"   # PO 占位，接真实订单 PO 时改这里或由界面传入
   warehouse: "收料仓"          # 按订单/预约送货的收料仓填

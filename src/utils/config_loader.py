@@ -10,6 +10,26 @@ import yaml
 _ENV_PATTERN = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)\}")
 
 
+class ConfigLoadError(ValueError):
+    """Safe configuration error whose text never embeds source lines."""
+
+
+def _display_path(path: Path) -> str:
+    if path.parent.name:
+        return f"{path.parent.name}/{path.name}"
+    return path.name
+
+
+def _safe_yaml_error(path: Path, error: yaml.YAMLError) -> ConfigLoadError:
+    mark = getattr(error, "problem_mark", None) or getattr(error, "context_mark", None)
+    location = ""
+    if mark is not None:
+        line = int(getattr(mark, "line", 0)) + 1
+        column = int(getattr(mark, "column", 0)) + 1
+        location = f" at line {line}, column {column}"
+    return ConfigLoadError(f"Invalid YAML in {_display_path(path)}{location}")
+
+
 def _expand_env(value: Any) -> Any:
     if isinstance(value, str):
         def replace(match: re.Match[str]) -> str:
@@ -26,8 +46,15 @@ def _expand_env(value: Any) -> Any:
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+    except yaml.YAMLError as error:
+        # PyYAML's exception string includes the offending source line. A malformed
+        # ``password:`` line would otherwise be copied verbatim into stderr and the
+        # GUI startup error dialog. Suppress the original exception context too so
+        # logger.exception() cannot render that unsafe source excerpt as a cause.
+        raise _safe_yaml_error(path, error) from None
     return _expand_env(data) if data else {}
 
 

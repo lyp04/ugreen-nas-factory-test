@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 
@@ -112,6 +113,7 @@ def test_build_transfer_config_selects_model_source_file(tmp_path, monkeypatch) 
                 "4800Plus": str(source_20g),
             },
             "source_file_sizes_gib": {"2800": 5, "4800": 10, "4800Plus": 20},
+            "work_dir": str(tmp_path / "work"),
         },
     )
 
@@ -156,6 +158,9 @@ def test_upload_min_seed_uses_model_mapping() -> None:
 def test_default_transfer_work_dir_is_local_to_runtime_root(tmp_path, monkeypatch) -> None:
     runtime_root = tmp_path / "runtime"
     monkeypatch.setattr(capture, "_runtime_root", lambda: runtime_root)
+    # This test only checks path selection; use byte-sized units instead of
+    # generating the production default 5 GiB fixture in pytest's temp dir.
+    monkeypatch.setattr(capture, "GIB", 1)
 
     cfg = capture._build_transfer_config(
         "http://192.0.2.168:9999",
@@ -172,6 +177,7 @@ def test_cleanup_transfer_run_dir_keeps_source_file_outside_workdir(tmp_path) ->
     source = tmp_path / "测试10G.rar"
     source.write_bytes(b"fixture")
     run_dir = tmp_path / "transfer_work" / "SN123"
+    capture._mark_transfer_session_dir(run_dir)
     share_dir = run_dir / "hdd"
     share_dir.mkdir(parents=True)
     (share_dir / "download_测试10G.rar").write_bytes(b"download")
@@ -181,6 +187,58 @@ def test_cleanup_transfer_run_dir_keeps_source_file_outside_workdir(tmp_path) ->
 
     assert source.exists()
     assert not run_dir.exists()
+
+
+def test_cleanup_all_transfer_workdirs_preserves_unowned_content(tmp_path) -> None:
+    work_root = tmp_path / "configured-work-root"
+    unrelated = work_root / "unrelated"
+    unrelated.mkdir(parents=True)
+    keep = unrelated / "keep.txt"
+    keep.write_text("do not delete", encoding="utf-8")
+
+    capture._cleanup_all_transfer_workdirs(work_root)
+
+    assert keep.read_text(encoding="utf-8") == "do not delete"
+
+
+def test_cleanup_all_transfer_workdirs_removes_owned_stale_session(tmp_path, monkeypatch) -> None:
+    work_root = tmp_path / "configured-work-root"
+    run_dir = work_root / "SN123"
+    capture._mark_transfer_session_dir(run_dir)
+    payload = run_dir / "hdd" / "download.bin"
+    payload.parent.mkdir()
+    payload.write_bytes(b"fixture")
+    monkeypatch.setattr(capture, "_transfer_session_owner_is_alive", lambda _run_dir: False)
+
+    capture._cleanup_all_transfer_workdirs(work_root)
+
+    assert not run_dir.exists()
+
+
+def test_cleanup_all_transfer_workdirs_skips_owned_live_session(tmp_path, monkeypatch) -> None:
+    work_root = tmp_path / "configured-work-root"
+    run_dir = work_root / "SN123"
+    capture._mark_transfer_session_dir(run_dir)
+    payload = run_dir / "hdd" / "download.bin"
+    payload.parent.mkdir()
+    payload.write_bytes(b"fixture")
+    monkeypatch.setattr(capture, "_transfer_session_owner_is_alive", lambda _run_dir: True)
+
+    capture._cleanup_all_transfer_workdirs(work_root)
+
+    assert payload.exists()
+
+
+def test_mark_transfer_session_refuses_nonempty_unowned_directory(tmp_path) -> None:
+    run_dir = tmp_path / "SN123"
+    run_dir.mkdir()
+    keep = run_dir / "keep.txt"
+    keep.write_text("user data", encoding="utf-8")
+
+    with pytest.raises(capture.CaptureError, match="non-empty unowned"):
+        capture._mark_transfer_session_dir(run_dir)
+
+    assert keep.exists()
 
 
 def test_chunked_transfer_script_creates_progress_directory(tmp_path) -> None:
@@ -293,6 +351,7 @@ def test_upload_capture_passes_when_full_seed_completes_after_speed_sample(tmp_p
     monkeypatch.setattr(capture, "_frame_text", lambda _frame: text)
     monkeypatch.setattr(capture, "_process_finished", lambda _proc: next(process_checks))
     monkeypatch.setattr(capture, "_progress_size", lambda _path: next(progress_values))
+    monkeypatch.setattr(capture, "_remote_file_size", lambda _cfg: 10 * 1024 * 1024 * 1024)
     monkeypatch.setattr(capture, "dismiss_desktop_overlays", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(capture, "capture_page", lambda *_args, **_kwargs: shot)
 
@@ -351,6 +410,7 @@ def test_upload_capture_waits_for_seed_after_speed_sample_window(tmp_path, monke
     monkeypatch.setattr(capture, "_frame_text", lambda _frame: text)
     monkeypatch.setattr(capture, "_process_finished", fake_process_finished)
     monkeypatch.setattr(capture, "_progress_size", fake_progress_size)
+    monkeypatch.setattr(capture, "_remote_file_size", lambda _cfg: 10 * 1024 * 1024 * 1024)
     monkeypatch.setattr(capture, "dismiss_desktop_overlays", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(capture, "capture_page", lambda *_args, **_kwargs: shot)
 
@@ -382,6 +442,244 @@ def test_upload_capture_waits_for_seed_after_speed_sample_window(tmp_path, monke
     assert result.values["speed_status"] == "ok"
 
 
+def test_upload_capture_fails_when_remote_size_is_not_exact(tmp_path, monkeypatch) -> None:
+    shot = tmp_path / "speed.png"
+    shot.write_bytes(b"png")
+    text = f"{READ_MARKER} 0 B/s {WRITE_MARKER} 560 MB/s"
+    expected_size = 10 * 1024 * 1024 * 1024
+    cfg = SmbTransferConfig(unc_share=r"\\192.0.2.168\hdd", local_dir=tmp_path)
+
+    class FakePage:
+        def wait_for_timeout(self, _ms: int) -> None:
+            return None
+
+    monkeypatch.setattr(capture, "_frame_text", lambda _frame: text)
+    monkeypatch.setattr(capture, "_process_finished", lambda _proc: True)
+    monkeypatch.setattr(capture, "_progress_size", lambda _path: expected_size)
+    monkeypatch.setattr(capture, "_remote_file_size", lambda _cfg: expected_size - 1)
+    monkeypatch.setattr(capture, "dismiss_desktop_overlays", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(capture, "capture_page", lambda *_args, **_kwargs: shot)
+
+    result = capture._capture_transfer_attempt(
+        FakePage(),
+        object(),
+        object(),
+        cfg,
+        "SN123",
+        "hdd_write",
+        "hdd",
+        "upload",
+        tmp_path,
+        {
+            "speed_stable_samples": 1,
+            "speed_attempt_timeout_s": 5,
+            "upload_min_seed_mb": 10240,
+            "post_upload_settle_timeout_s": 0,
+        },
+        300,
+        1,
+    )
+
+    assert result.reached_threshold is False
+    assert result.values["speed_status"] == "remote_size_mismatch"
+    assert result.values["upload_expected_bytes"] == str(expected_size)
+    assert result.values["upload_remote_bytes"] == str(expected_size - 1)
+
+
+def test_wait_for_upload_process_exit_times_out_fail_closed(monkeypatch) -> None:
+    class FakePage:
+        waits = 0
+
+        def wait_for_timeout(self, _ms: int) -> None:
+            self.waits += 1
+
+    page = FakePage()
+    monkeypatch.setattr(capture, "_process_finished", lambda _proc: False)
+    monkeypatch.setattr(capture.time, "monotonic", lambda: 1.0)
+
+    assert capture._wait_for_transfer_process_exit(
+        page,
+        object(),
+        "hdd_write",
+        {"upload_finish_timeout_s": 0},
+    ) is False
+    assert page.waits == 0
+
+
+def test_download_capture_fails_if_process_never_finishes(tmp_path, monkeypatch) -> None:
+    shot = tmp_path / "speed.png"
+    shot.write_bytes(b"png")
+    clock = [0.0]
+    cfg = SmbTransferConfig(unc_share=r"\\192.0.2.168\hdd", local_dir=tmp_path)
+
+    class FakePage:
+        def wait_for_timeout(self, ms: int) -> None:
+            clock[0] += ms / 1000
+
+    monkeypatch.setattr(capture.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        capture,
+        "_frame_text",
+        lambda _frame: f"{READ_MARKER} 560 MB/s {WRITE_MARKER} 0 B/s",
+    )
+    monkeypatch.setattr(capture, "_process_finished", lambda _proc: False)
+    monkeypatch.setattr(capture, "dismiss_desktop_overlays", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(capture, "capture_page", lambda *_args, **_kwargs: shot)
+
+    result = capture._capture_transfer_attempt(
+        FakePage(),
+        object(),
+        object(),
+        cfg,
+        "SN123",
+        "hdd_read",
+        "hdd",
+        "download",
+        tmp_path,
+        {
+            "speed_stable_samples": 1,
+            "speed_attempt_timeout_s": 5,
+            "speed_sample_interval_ms": 100,
+            "download_finish_timeout_s": 0,
+        },
+        300,
+        1,
+    )
+
+    assert result.reached_threshold is False
+    assert result.values["speed_status"] == "process_timeout"
+    assert result.values["transfer_complete"] == "false"
+    assert not cfg.download_file.exists()
+
+
+def test_download_capture_requires_exact_local_size(tmp_path, monkeypatch) -> None:
+    shot = tmp_path / "speed.png"
+    shot.write_bytes(b"png")
+    expected_size = 10 * 1024 * 1024 * 1024
+    cfg = SmbTransferConfig(unc_share=r"\\192.0.2.168\hdd", local_dir=tmp_path)
+
+    class FakePage:
+        def wait_for_timeout(self, _ms: int) -> None:
+            return None
+
+    monkeypatch.setattr(
+        capture,
+        "_frame_text",
+        lambda _frame: f"{READ_MARKER} 560 MB/s {WRITE_MARKER} 0 B/s",
+    )
+    monkeypatch.setattr(capture, "_process_finished", lambda _proc: True)
+    monkeypatch.setattr(capture, "_remote_file_size", lambda _cfg: expected_size)
+    monkeypatch.setattr(capture, "_local_file_size", lambda _path: expected_size - 1)
+    monkeypatch.setattr(capture, "dismiss_desktop_overlays", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(capture, "capture_page", lambda *_args, **_kwargs: shot)
+
+    result = capture._capture_transfer_attempt(
+        FakePage(),
+        object(),
+        object(),
+        cfg,
+        "SN123",
+        "hdd_read",
+        "hdd",
+        "download",
+        tmp_path,
+        {"speed_stable_samples": 1, "speed_attempt_timeout_s": 5},
+        300,
+        1,
+    )
+
+    assert result.reached_threshold is False
+    assert result.values["speed_status"] == "download_size_mismatch"
+    assert result.values["transfer_complete"] == "false"
+    assert result.values["transfer_destination_bytes"] == str(expected_size - 1)
+
+
+def test_download_capture_rechecks_remote_source_size(tmp_path, monkeypatch) -> None:
+    shot = tmp_path / "speed.png"
+    shot.write_bytes(b"png")
+    expected_size = 10 * 1024 * 1024 * 1024
+    cfg = SmbTransferConfig(unc_share=r"\\192.0.2.168\hdd", local_dir=tmp_path)
+
+    class FakePage:
+        def wait_for_timeout(self, _ms: int) -> None:
+            return None
+
+    monkeypatch.setattr(
+        capture,
+        "_frame_text",
+        lambda _frame: f"{READ_MARKER} 560 MB/s {WRITE_MARKER} 0 B/s",
+    )
+    monkeypatch.setattr(capture, "_process_finished", lambda _proc: True)
+    monkeypatch.setattr(capture, "_remote_file_size", lambda _cfg: expected_size - 1)
+    monkeypatch.setattr(capture, "_local_file_size", lambda _path: expected_size)
+    monkeypatch.setattr(capture, "dismiss_desktop_overlays", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(capture, "capture_page", lambda *_args, **_kwargs: shot)
+
+    result = capture._capture_transfer_attempt(
+        FakePage(),
+        object(),
+        object(),
+        cfg,
+        "SN123",
+        "hdd_read",
+        "hdd",
+        "download",
+        tmp_path,
+        {"speed_stable_samples": 1, "speed_attempt_timeout_s": 5},
+        300,
+        1,
+    )
+
+    assert result.reached_threshold is False
+    assert result.values["speed_status"] == "remote_size_mismatch"
+    assert result.values["transfer_complete"] == "false"
+    assert result.values["transfer_source_bytes"] == str(expected_size - 1)
+
+
+def test_download_capture_rejects_nonzero_process_exit(tmp_path, monkeypatch) -> None:
+    shot = tmp_path / "speed.png"
+    shot.write_bytes(b"png")
+    cfg = SmbTransferConfig(unc_share=r"\\192.0.2.168\hdd", local_dir=tmp_path)
+    proc = type("FakeProcess", (), {"returncode": 1})()
+
+    class FakePage:
+        def wait_for_timeout(self, _ms: int) -> None:
+            return None
+
+    monkeypatch.setattr(
+        capture,
+        "_frame_text",
+        lambda _frame: f"{READ_MARKER} 560 MB/s {WRITE_MARKER} 0 B/s",
+    )
+    monkeypatch.setattr(capture, "_process_finished", lambda _proc: True)
+    monkeypatch.setattr(
+        capture,
+        "_remote_file_size",
+        lambda _cfg: pytest.fail("size is not proof after a failed process"),
+    )
+    monkeypatch.setattr(capture, "dismiss_desktop_overlays", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(capture, "capture_page", lambda *_args, **_kwargs: shot)
+
+    result = capture._capture_transfer_attempt(
+        FakePage(),
+        object(),
+        proc,
+        cfg,
+        "SN123",
+        "hdd_read",
+        "hdd",
+        "download",
+        tmp_path,
+        {"speed_stable_samples": 1, "speed_attempt_timeout_s": 5},
+        300,
+        1,
+    )
+
+    assert result.reached_threshold is False
+    assert result.values["speed_status"] == "process_failed"
+    assert result.values["transfer_complete"] == "false"
+
+
 def test_transfer_capture_records_bracketed_stable_rate(tmp_path, monkeypatch) -> None:
     # A capture is only accepted when a read immediately before AND immediately
     # after the screenshot are identical (the display held steady across the shot),
@@ -405,6 +703,8 @@ def test_transfer_capture_records_bracketed_stable_rate(tmp_path, monkeypatch) -
 
     monkeypatch.setattr(capture, "_frame_text", lambda _frame: next(texts))
     monkeypatch.setattr(capture, "_process_finished", lambda _proc: next(process_checks))
+    monkeypatch.setattr(capture, "_remote_file_size", lambda _cfg: 10 * 1024 * 1024 * 1024)
+    monkeypatch.setattr(capture, "_local_file_size", lambda _path: 10 * 1024 * 1024 * 1024)
     monkeypatch.setattr(capture, "dismiss_desktop_overlays", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(capture, "capture_page", lambda *_args, **_kwargs: shot)
 
@@ -426,6 +726,9 @@ def test_transfer_capture_records_bracketed_stable_rate(tmp_path, monkeypatch) -
     assert result.reached_threshold is True
     assert result.values["rate_mbps"] == "560"
     assert result.values["speed_status"] == "ok"
+    assert result.values["transfer_complete"] == "true"
+    assert result.values["source_bytes"] == result.values["destination_bytes"]
+    assert result.values["download_bytes"] == str(10 * 1024 * 1024 * 1024)
 
 
 def test_transfer_capture_rejects_unstable_screenshot(tmp_path, monkeypatch) -> None:
@@ -458,6 +761,8 @@ def test_transfer_capture_rejects_unstable_screenshot(tmp_path, monkeypatch) -> 
 
     monkeypatch.setattr(capture, "_frame_text", lambda _frame: next(texts))
     monkeypatch.setattr(capture, "_process_finished", lambda _proc: next(process_checks))
+    monkeypatch.setattr(capture, "_remote_file_size", lambda _cfg: 10 * 1024 * 1024 * 1024)
+    monkeypatch.setattr(capture, "_local_file_size", lambda _path: 10 * 1024 * 1024 * 1024)
     monkeypatch.setattr(capture, "dismiss_desktop_overlays", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(capture, "capture_page", lambda *_args, **_kwargs: next(shots))
 
@@ -507,6 +812,8 @@ def test_below_threshold_logs_bound_value_not_running_max(tmp_path, monkeypatch)
 
     monkeypatch.setattr(capture, "_frame_text", lambda _frame: next(texts))
     monkeypatch.setattr(capture, "_process_finished", lambda _proc: next(process_checks))
+    monkeypatch.setattr(capture, "_remote_file_size", lambda _cfg: 10 * 1024 * 1024 * 1024)
+    monkeypatch.setattr(capture, "_local_file_size", lambda _path: 10 * 1024 * 1024 * 1024)
     monkeypatch.setattr(capture, "dismiss_desktop_overlays", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(capture, "capture_page", lambda *_args, **_kwargs: final_shot)
 
@@ -560,6 +867,8 @@ def test_transfer_capture_replaces_lower_bound_with_higher(tmp_path, monkeypatch
 
     monkeypatch.setattr(capture, "_frame_text", lambda _frame: next(texts))
     monkeypatch.setattr(capture, "_process_finished", lambda _proc: next(process_checks))
+    monkeypatch.setattr(capture, "_remote_file_size", lambda _cfg: 10 * 1024 * 1024 * 1024)
+    monkeypatch.setattr(capture, "_local_file_size", lambda _path: 10 * 1024 * 1024 * 1024)
     monkeypatch.setattr(capture, "dismiss_desktop_overlays", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(capture, "capture_page", lambda *_args, **_kwargs: next(shots))
 
@@ -680,6 +989,8 @@ def test_transfer_capture_records_bracketed_gbps(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr(capture, "_frame_text", lambda _frame: text)
     monkeypatch.setattr(capture, "_process_finished", lambda _proc: next(process_checks))
+    monkeypatch.setattr(capture, "_remote_file_size", lambda _cfg: 10 * 1024 * 1024 * 1024)
+    monkeypatch.setattr(capture, "_local_file_size", lambda _path: 10 * 1024 * 1024 * 1024)
     monkeypatch.setattr(capture, "dismiss_desktop_overlays", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(capture, "capture_page", lambda *_args, **_kwargs: shot)
 
@@ -957,12 +1268,73 @@ def test_existing_transfer_capture_requires_reported_rate_above_threshold(tmp_pa
     assert capture._existing_capture_path(screenshots, "SN123", "ssd_write", 200) is None
 
     report.write_text(
-        '{"captured":{"ssd_write":"%s"},"captured_values":{"ssd_write":{"rate_mbps":"267.2"}}}'
+        '{"captured":{"ssd_write":"%s"},"captured_values":{"ssd_write":'
+        '{"rate_mbps":"267.2","speed_status":"ok","transfer_complete":"true",'
+        '"source_bytes":"10","destination_bytes":"10"}}}'
         % str(shot).replace("\\", "\\\\"),
         encoding="utf-8",
     )
 
     assert capture._existing_capture_path(screenshots, "SN123", "ssd_write", 200) == shot
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"rate_mbps": "560", "speed_status": "remote_size_mismatch", "transfer_complete": "false"},
+        {"rate_mbps": "560", "speed_status": "process_timeout", "transfer_complete": "false"},
+        {"rate_mbps": "560", "speed_status": "ok"},
+        {
+            "rate_mbps": "560",
+            "speed_status": "ok",
+            "transfer_complete": "true",
+            "source_bytes": "10",
+            "destination_bytes": "9",
+        },
+    ],
+)
+def test_existing_transfer_capture_rejects_incomplete_resume_proof(tmp_path, values) -> None:
+    screenshots = tmp_path / "shots"
+    screenshots.mkdir()
+    shot = screenshots / "SN123_hdd_write_20260724_120000.png"
+    shot.write_bytes(b"png")
+    (tmp_path / "test_report.json").write_text(
+        json.dumps(
+            {
+                "captured": {"hdd_write": str(shot)},
+                "captured_values": {"hdd_write": values},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert capture._existing_capture_path(screenshots, "SN123", "hdd_write", 300) is None
+
+
+def test_existing_transfer_capture_does_not_glob_fallback_for_proof_pair(tmp_path) -> None:
+    screenshots = tmp_path / "shots"
+    screenshots.mkdir()
+    unrelated = screenshots / "SN123_hdd_read_20260724_120000.png"
+    unrelated.write_bytes(b"png")
+    (tmp_path / "test_report.json").write_text(
+        json.dumps(
+            {
+                "captured": {},
+                "captured_values": {
+                    "hdd_read": {
+                        "rate_mbps": "560",
+                        "speed_status": "ok",
+                        "transfer_complete": "true",
+                        "source_bytes": "10",
+                        "destination_bytes": "10",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert capture._existing_capture_path(screenshots, "SN123", "hdd_read", 300) is None
 
 
 def test_transfer_capture_does_not_retry_when_first_attempt_passes(tmp_path, monkeypatch) -> None:
@@ -1002,6 +1374,74 @@ def test_transfer_capture_does_not_retry_when_first_attempt_passes(tmp_path, mon
     assert result == shot
     assert attempts == [1]
     assert captured["ssd_write"]["attempts"] == "1"
+
+
+def test_transfer_capture_cleans_up_when_outer_loop_holds_slot(tmp_path, monkeypatch) -> None:
+    shot = tmp_path / "pass.png"
+    shot.write_bytes(b"png")
+    attempts: list[int] = []
+    cleanup_calls: list[str] = []
+
+    _patch_transfer_page_dependencies(
+        monkeypatch,
+        attempts,
+        [
+            capture.TransferAttemptResult(
+                {"rate_mbps": "220", "rate": "220 MB/s", "speed_status": "ok", "attempt": "1"},
+                shot,
+                True,
+            )
+        ],
+    )
+    monkeypatch.setattr(capture, "_cleanup_transfer", lambda _cfg, direction: cleanup_calls.append(direction))
+
+    capture._capture_transfer_page(
+        object(),
+        "http://192.0.2.168:9999",
+        "SN123",
+        "ssd_write",
+        {"app": "taskmgr", "transfer": {"share": "ssd", "direction": "upload"}},
+        {},
+        {},
+        tmp_path,
+        {},
+        {"model": "2800", "speed_max_retries": 1},
+        None,
+        slot_already_acquired=True,
+    )
+
+    assert cleanup_calls == ["upload"]
+
+
+def test_transfer_capture_does_not_cleanup_after_slot_acquire_failure(tmp_path, monkeypatch) -> None:
+    attempts: list[int] = []
+    cleanup_calls: list[str] = []
+
+    _patch_transfer_page_dependencies(monkeypatch, attempts, [])
+
+    def fail_to_acquire(*_args, **_kwargs) -> None:
+        raise RuntimeError("slot unavailable")
+
+    monkeypatch.setattr(capture, "_acquire_transfer_slot", fail_to_acquire)
+    monkeypatch.setattr(capture, "_cleanup_transfer", lambda _cfg, direction: cleanup_calls.append(direction))
+
+    with pytest.raises(RuntimeError, match="slot unavailable"):
+        capture._capture_transfer_page(
+            object(),
+            "http://192.0.2.168:9999",
+            "SN123",
+            "ssd_write",
+            {"app": "taskmgr", "transfer": {"share": "ssd", "direction": "upload"}},
+            {},
+            {},
+            tmp_path,
+            {},
+            {"model": "2800", "speed_max_retries": 1},
+            None,
+            slot_already_acquired=False,
+        )
+
+    assert cleanup_calls == []
 
 
 def test_transfer_capture_retries_low_attempt_and_uses_passing_attempt(tmp_path, monkeypatch) -> None:
@@ -1148,12 +1588,217 @@ def _patch_transfer_page_dependencies(monkeypatch, attempts: list[int], results:
     monkeypatch.setattr(capture, "_wait_for_landmark", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(capture, "_build_transfer_config", lambda *_args, **_kwargs: cfg)
     monkeypatch.setattr(capture, "_prepare_share", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(capture, "_remote_file_exists", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(capture, "_ensure_remote_seed", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(capture, "start_powershell", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(capture, "_finish_transfer_process", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(capture, "_cleanup_transfer", lambda *_args, **_kwargs: None)
 
     def fake_attempt(*args, **_kwargs):
         attempts.append(args[11])
         return results.pop(0)
 
     monkeypatch.setattr(capture, "_capture_transfer_attempt", fake_attempt)
+
+
+def test_ensure_remote_seed_requires_exact_size(monkeypatch) -> None:
+    cfg = SmbTransferConfig(unc_share=r"\\192.0.2.168\hdd", local_dir=Path("."))
+    observed_sizes = iter([9, 10])
+    scripts: list[str] = []
+    monkeypatch.setattr(capture, "_transfer_total_bytes", lambda _cfg: 10)
+    monkeypatch.setattr(capture, "_remote_file_size", lambda _cfg: next(observed_sizes))
+    monkeypatch.setattr(
+        capture,
+        "run_powershell",
+        lambda script, timeout_s: scripts.append(script),
+    )
+
+    capture._ensure_remote_seed(cfg, "hdd")
+
+    assert scripts == [build_upload_script(cfg)]
+
+
+def test_ensure_remote_seed_fails_if_size_stays_wrong(monkeypatch) -> None:
+    cfg = SmbTransferConfig(unc_share=r"\\192.0.2.168\hdd", local_dir=Path("."))
+    monkeypatch.setattr(capture, "_transfer_total_bytes", lambda _cfg: 10)
+    monkeypatch.setattr(capture, "_remote_file_size", lambda _cfg: 9)
+    monkeypatch.setattr(capture, "run_powershell", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(capture.CaptureError, match="wrong size after seeding"):
+        capture._ensure_remote_seed(cfg, "hdd")
+
+
+def test_capture_event_propagates_cancellation_but_logs_other_callback_errors(monkeypatch) -> None:
+    class TaskCancelled(RuntimeError):
+        pass
+
+    with pytest.raises(TaskCancelled, match="cancelled by user"):
+        capture._emit_capture_event(
+            lambda _event: (_ for _ in ()).throw(TaskCancelled("Test cancelled by user")),
+            "transfer_poll",
+        )
+
+    warnings: list[str] = []
+    monkeypatch.setattr(capture.logger, "warning", warnings.append)
+    capture._emit_capture_event(
+        lambda _event: (_ for _ in ()).throw(RuntimeError("GUI callback broke")),
+        "transfer_poll",
+    )
+    assert warnings and "GUI callback broke" in warnings[0]
+
+
+def test_transfer_lock_wait_is_cancellable() -> None:
+    class TaskCancelled(RuntimeError):
+        pass
+
+    events: list[str] = []
+
+    def progress(event: dict) -> None:
+        events.append(str(event.get("type")))
+        if event.get("type") == "transfer_poll":
+            raise TaskCancelled("Test cancelled by user")
+
+    capture.TRANSFER_STAGE_LOCK.acquire()
+    try:
+        with pytest.raises(TaskCancelled, match="cancelled by user"):
+            capture._acquire_transfer_slot(progress, "hdd_read", "hdd", "download")
+        assert "transfer_waiting" in events
+        assert "transfer_poll" in events
+    finally:
+        capture.TRANSFER_STAGE_LOCK.release()
+
+
+def test_transfer_started_cancellation_does_not_leak_lock() -> None:
+    class TaskCancelled(RuntimeError):
+        pass
+
+    def progress(event: dict) -> None:
+        if event.get("type") == "transfer_started":
+            raise TaskCancelled("Test cancelled by user")
+
+    with pytest.raises(TaskCancelled, match="cancelled by user"):
+        capture._acquire_transfer_slot(progress, "hdd_read", "hdd", "download")
+
+    assert capture.TRANSFER_STAGE_LOCK.acquire(blocking=False) is True
+    capture.TRANSFER_STAGE_LOCK.release()
+
+
+def test_transfer_slot_holds_and_releases_cross_process_lease() -> None:
+    lease = capture._acquire_transfer_slot(None, "hdd_read", "hdd", "download")
+    contender = capture.InterProcessLock(capture.TRANSFER_PROCESS_LOCK_KEY)
+    try:
+        assert contender.try_acquire() is None
+    finally:
+        capture._release_transfer_slot(lease, None, "hdd_read", "hdd", "download")
+
+    token = contender.try_acquire()
+    assert token is not None
+    assert contender.release(token) is True
+    assert capture.TRANSFER_STAGE_LOCK.acquire(blocking=False) is True
+    capture.TRANSFER_STAGE_LOCK.release()
+
+
+def test_external_transfer_lease_wait_is_cancellable_without_leaking_thread_lock() -> None:
+    class TaskCancelled(RuntimeError):
+        pass
+
+    owner = capture.InterProcessLock(capture.TRANSFER_PROCESS_LOCK_KEY)
+    owner_token = owner.try_acquire()
+    assert owner_token is not None
+
+    def progress(event: dict) -> None:
+        if event.get("type") == "transfer_poll":
+            raise TaskCancelled("Test cancelled by user")
+
+    try:
+        with pytest.raises(TaskCancelled, match="cancelled by user"):
+            capture._acquire_transfer_slot(progress, "ssd_write", "ssd", "upload")
+        assert capture.TRANSFER_STAGE_LOCK.acquire(blocking=False) is True
+        capture.TRANSFER_STAGE_LOCK.release()
+    finally:
+        assert owner.release(owner_token) is True
+
+
+def test_idle_cleanup_skips_while_external_transfer_lease_is_held(tmp_path, monkeypatch) -> None:
+    owner = capture.InterProcessLock(capture.TRANSFER_PROCESS_LOCK_KEY)
+    owner_token = owner.try_acquire()
+    assert owner_token is not None
+    cleanup_calls: list[object] = []
+    monkeypatch.setattr(
+        capture,
+        "_cleanup_all_transfer_workdirs",
+        lambda root: cleanup_calls.append(root),
+    )
+    try:
+        capture._cleanup_all_transfer_workdirs_if_idle(tmp_path)
+    finally:
+        assert owner.release(owner_token) is True
+
+    assert cleanup_calls == []
+    assert capture.TRANSFER_STAGE_LOCK.acquire(blocking=False) is True
+    capture.TRANSFER_STAGE_LOCK.release()
+
+
+def test_transfer_sampling_is_cancellable_before_next_ui_read(tmp_path, monkeypatch) -> None:
+    class TaskCancelled(RuntimeError):
+        pass
+
+    class FakePage:
+        def wait_for_timeout(self, _ms: int) -> None:
+            return None
+
+    monkeypatch.setattr(
+        capture,
+        "_frame_text",
+        lambda _frame: pytest.fail("UI must not be sampled after cancellation"),
+    )
+    cfg = SmbTransferConfig(unc_share=r"\\192.0.2.168\hdd", local_dir=tmp_path)
+
+    with pytest.raises(TaskCancelled, match="cancelled by user"):
+        capture._capture_transfer_attempt(
+            FakePage(),
+            object(),
+            object(),
+            cfg,
+            "SN123",
+            "hdd_read",
+            "hdd",
+            "download",
+            tmp_path,
+            {"speed_attempt_timeout_s": 5},
+            300,
+            1,
+            progress_cb=lambda _event: (_ for _ in ()).throw(
+                TaskCancelled("Test cancelled by user")
+            ),
+        )
+
+
+def test_remote_seed_wait_cancellation_terminates_powershell(tmp_path, monkeypatch) -> None:
+    class TaskCancelled(RuntimeError):
+        pass
+
+    class FakePage:
+        def wait_for_timeout(self, _ms: int) -> None:
+            return None
+
+    proc = object()
+    terminated: list[object] = []
+    cfg = SmbTransferConfig(unc_share=r"\\192.0.2.168\hdd", local_dir=tmp_path)
+    monkeypatch.setattr(capture, "_transfer_total_bytes", lambda _cfg: 10)
+    monkeypatch.setattr(capture, "_remote_file_size", lambda _cfg: 0)
+    monkeypatch.setattr(capture, "start_powershell", lambda _script: proc)
+    monkeypatch.setattr(capture, "_process_finished", lambda _proc: False)
+    monkeypatch.setattr(capture, "terminate_powershell", terminated.append)
+
+    with pytest.raises(TaskCancelled, match="cancelled by user"):
+        capture._ensure_remote_seed(
+            cfg,
+            "hdd",
+            page=FakePage(),
+            page_key="hdd_read",
+            progress_cb=lambda _event: (_ for _ in ()).throw(
+                TaskCancelled("Test cancelled by user")
+            ),
+        )
+
+    assert terminated == [proc]

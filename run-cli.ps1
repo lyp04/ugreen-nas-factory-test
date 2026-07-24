@@ -11,3 +11,4 @@ if (-not (Test-Path ".venv\Scripts\python.exe")) {
 }
 
 & .\.venv\Scripts\python.exe -m src.cli @args
+exit $LASTEXITCODE

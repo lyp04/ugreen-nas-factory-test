@@ -54,6 +54,9 @@ def test_same_sn_identity_uses_tail() -> None:
     assert same_sn_identity("HB67EE52241DFFD", "DFFD")
     assert same_sn_identity("dffd", "HB67EE52241DFFD")
     assert not same_sn_identity("AEF1", "DFFD")
+    assert not same_sn_identity("HB67EE52241DFFD", "EC752VV42251DFFD")
+    assert same_sn_identity("EC752VV42251611A", "ec752vv42251611a")
+    assert not same_sn_identity("AUTOC0A800D6", "00D6")
 
 
 def test_normalize_sn_strips_scanner_noise() -> None:

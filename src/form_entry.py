@@ -6,9 +6,12 @@ import os
 import shutil
 import subprocess
 import sys
+import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
+
+from .report.redact import scrub_data, scrub_text
 
 
 DEFAULT_SELECTED_MATERIAL_GROUPS = {"补充包材", "补充配件"}
@@ -30,6 +33,21 @@ def _hidden_process_kwargs() -> dict:
 
 class FormEntryError(RuntimeError):
     pass
+
+
+def _factory_config_secrets(project_root: Path | None = None) -> tuple[str, ...]:
+    try:
+        from .utils.config_loader import load_yaml, resolve_config_path as resolve_factory_config
+
+        root = project_root or _project_root()
+        config = load_yaml(resolve_factory_config(root, "config.yml")) or {}
+    except Exception:
+        return ()
+    values = (
+        str((config.get("admin") or {}).get("password") or ""),
+        str((config.get("fault_report") or {}).get("token") or ""),
+    )
+    return tuple(dict.fromkeys(value for value in values if len(value) >= 4))
 
 
 def _project_root() -> Path:
@@ -212,17 +230,42 @@ def submit_report(
         "report": report,
         "form_data": form_data,
     }
-    return _run_autoupdate_bridge(payload)
+    return _run_autoupdate_bridge(
+        payload,
+        extra_secrets=_factory_config_secrets(project_root),
+    )
 
 
-def _run_autoupdate_bridge(payload: dict[str, Any]) -> dict[str, Any]:
+def _run_autoupdate_bridge(
+    payload: dict[str, Any],
+    *,
+    extra_secrets: Iterable[str] = (),
+) -> dict[str, Any]:
+    secrets = tuple(str(value or "") for value in extra_secrets)
+    safe_payload = scrub_data(
+        payload,
+        extra_secrets=secrets,
+        mask_identifiers=False,
+    )
     root = autoupdate_root()
     bridge_dir = root / "state" / "bridge_requests"
     bridge_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    sn = "".join(ch for ch in str(payload.get("form_data", {}).get("sn") or payload.get("sn") or "UNKNOWN") if ch.isalnum())
-    payload_path = bridge_dir / f"{stamp}_{sn or 'UNKNOWN'}.json"
-    payload_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    sn = "".join(
+        ch
+        for ch in str(
+            safe_payload.get("form_data", {}).get("sn")
+            or safe_payload.get("sn")
+            or "UNKNOWN"
+        )
+        if ch.isalnum()
+    )
+    payload_path = bridge_dir / f"{stamp}_{sn or 'UNKNOWN'}_{uuid.uuid4().hex[:8]}.json"
+    payload_path.write_text(
+        json.dumps(safe_payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    payload_identity = _file_identity(payload_path)
 
     python = os.environ.get("UGREEN_AUTOUPDATE_PYTHON") or sys.executable
     if getattr(sys, "frozen", False):
@@ -230,12 +273,51 @@ def _run_autoupdate_bridge(payload: dict[str, Any]) -> dict[str, Any]:
     cmd = [python, "-m", "automation.runner", "submit-report", "--payload", str(payload_path)]
     result = subprocess.run(cmd, cwd=root, text=True, capture_output=True, timeout=300, **_hidden_process_kwargs())
     if result.returncode != 0:
-        raise FormEntryError((result.stderr or result.stdout or "自动录表系统调用失败").strip())
-    text = (result.stdout or "").strip().splitlines()[-1]
+        detail = scrub_text(
+            (result.stderr or result.stdout or "自动录表系统调用失败").strip(),
+            extra_secrets=secrets,
+            max_len=4_000,
+            mask_identifiers=False,
+        )
+        raise FormEntryError(detail) from None
+    output_lines = (result.stdout or "").strip().splitlines()
+    text = output_lines[-1] if output_lines else ""
     try:
-        return json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise FormEntryError(f"自动录表系统返回不可解析: {text}") from exc
+        response = json.loads(text)
+        safe_response = scrub_data(
+            response,
+            extra_secrets=secrets,
+            mask_identifiers=False,
+        )
+        if str(safe_response.get("status") or "") in {"success", "already_submitted"}:
+            _unlink_if_same_file(payload_path, payload_identity)
+        return safe_response
+    except json.JSONDecodeError:
+        safe_text = scrub_text(
+            text,
+            extra_secrets=secrets,
+            max_len=2_000,
+            mask_identifiers=False,
+        )
+        raise FormEntryError(f"自动录表系统返回不可解析: {safe_text}") from None
+
+
+def _file_identity(path: Path) -> tuple[int, int, int, int] | None:
+    try:
+        stat = path.stat(follow_symlinks=False)
+    except (FileNotFoundError, OSError):
+        return None
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+
+def _unlink_if_same_file(path: Path, expected: tuple[int, int, int, int] | None) -> bool:
+    if expected is None or _file_identity(path) != expected:
+        return False
+    try:
+        path.unlink()
+    except (FileNotFoundError, OSError):
+        return False
+    return True
 
 
 def sync_autoupdate_repo(project_root: Path | None = None) -> dict[str, Any]:
@@ -339,6 +421,7 @@ def sync_autoupdate_repo(project_root: Path | None = None) -> dict[str, Any]:
 
 def refresh_form_materials(project_root: Path | None = None, account_name: str | None = None) -> dict[str, Any]:
     root = autoupdate_root()
+    secrets = _factory_config_secrets(project_root)
     python = os.environ.get("UGREEN_AUTOUPDATE_PYTHON") or sys.executable
     if getattr(sys, "frozen", False):
         python = os.environ.get("UGREEN_AUTOUPDATE_PYTHON") or "python"
@@ -347,12 +430,29 @@ def refresh_form_materials(project_root: Path | None = None, account_name: str |
         cmd.extend(["--account", account_name])
     result = subprocess.run(cmd, cwd=root, text=True, capture_output=True, timeout=180, **_hidden_process_kwargs())
     if result.returncode != 0:
-        raise FormEntryError((result.stderr or result.stdout or "自动录表物料刷新失败").strip())
-    text = (result.stdout or "").strip().splitlines()[-1]
+        detail = scrub_text(
+            (result.stderr or result.stdout or "自动录表物料刷新失败").strip(),
+            extra_secrets=secrets,
+            max_len=4_000,
+            mask_identifiers=False,
+        )
+        raise FormEntryError(detail) from None
+    output_lines = (result.stdout or "").strip().splitlines()
+    text = output_lines[-1] if output_lines else ""
     try:
-        return json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise FormEntryError(f"自动录表物料刷新返回不可解析: {text}") from exc
+        return scrub_data(
+            json.loads(text),
+            extra_secrets=secrets,
+            mask_identifiers=False,
+        )
+    except json.JSONDecodeError:
+        safe_text = scrub_text(
+            text,
+            extra_secrets=secrets,
+            max_len=2_000,
+            mask_identifiers=False,
+        )
+        raise FormEntryError(f"自动录表物料刷新返回不可解析: {safe_text}") from None
 
 
 def run_login_ui(project_root: Path | None = None) -> None:
@@ -360,6 +460,7 @@ def run_login_ui(project_root: Path | None = None) -> None:
     登录逻辑 / 凭据 / 验证码等全在模块的 login-ui 里，app 只负责把窗口叫出来、登录完刷新账号列表。
     模块接什么后端由模块自己决定，app 不关心。"""
     root = autoupdate_root()
+    secrets = _factory_config_secrets(project_root)
     python = os.environ.get("UGREEN_AUTOUPDATE_PYTHON") or sys.executable
     if getattr(sys, "frozen", False):
         python = os.environ.get("UGREEN_AUTOUPDATE_PYTHON") or "python"
@@ -368,7 +469,13 @@ def run_login_ui(project_root: Path | None = None) -> None:
         cwd=root, text=True, capture_output=True, timeout=1800, **_hidden_process_kwargs(),
     )
     if result.returncode != 0:
-        raise FormEntryError((result.stderr or result.stdout or "登录窗口启动失败").strip())
+        detail = scrub_text(
+            (result.stderr or result.stdout or "登录窗口启动失败").strip(),
+            extra_secrets=secrets,
+            max_len=4_000,
+            mask_identifiers=False,
+        )
+        raise FormEntryError(detail) from None
 
 
 def list_accounts(project_root: Path | None = None) -> list[dict[str, Any]]:

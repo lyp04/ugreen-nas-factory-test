@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import select
 import socket
@@ -20,6 +21,28 @@ class UgreenBroadcastHit:
     sn: str = ""
     mac: str = ""
     data: dict = field(default_factory=dict)
+
+
+def interface_macs(hit: UgreenBroadcastHit | object) -> dict[str, str]:
+    """Return every IPv4 interface advertised by one NAS broadcast response."""
+    interfaces: dict[str, str] = {}
+
+    def add(address: object, mac: object = "") -> None:
+        value = str(address or "").strip()
+        try:
+            if ipaddress.ip_address(value).version != 4:
+                return
+        except ValueError:
+            return
+        interfaces[value] = str(mac or "").strip()
+
+    add(getattr(hit, "address", ""), getattr(hit, "mac", ""))
+    data = getattr(hit, "data", {})
+    pair = data.get("pair") if isinstance(data, dict) else None
+    if isinstance(pair, dict):
+        for address, mac in pair.items():
+            add(address, mac)
+    return interfaces
 
 
 def discover(sn: str = "", mac: str = "", timeout: float = 1.5) -> list[UgreenBroadcastHit]:

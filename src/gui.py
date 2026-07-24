@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
+from typing import Any
 
 from loguru import logger
 
@@ -47,6 +48,9 @@ if __package__ in {None, ""}:
         failure_stage_for_error,
         fan_rpm_failing_pages,
         get_project_root,
+        is_device_identity_error,
+        is_factory_reset_retry_blocked_error,
+        is_factory_reset_unconfirmed_error,
         is_pool_creation_timeout_error,
         is_unflashed_password_error,
         run_test,
@@ -54,6 +58,7 @@ if __package__ in {None, ""}:
     from src.discovery import ugreen_broadcast
     from src.discovery.discover import find_nas_candidates
     from src.updater import UpdateInfo, UpdateManager, format_version
+    from src.report.redact import scrub_text
     from src.utils.browser_control import show_browser_windows, terminate_browser_process
     from src.utils.config_loader import load_configs
     from src.utils import label as label_util
@@ -76,6 +81,9 @@ else:
         failure_stage_for_error,
         fan_rpm_failing_pages,
         get_project_root,
+        is_device_identity_error,
+        is_factory_reset_retry_blocked_error,
+        is_factory_reset_unconfirmed_error,
         is_pool_creation_timeout_error,
         is_unflashed_password_error,
         run_test,
@@ -83,6 +91,7 @@ else:
     from .discovery import ugreen_broadcast
     from .discovery.discover import find_nas_candidates
     from .updater import UpdateInfo, UpdateManager, format_version
+    from .report.redact import scrub_text
     from .utils.browser_control import show_browser_windows, terminate_browser_process
     from .utils.config_loader import load_configs
     from .utils import label as label_util
@@ -761,10 +770,10 @@ class FactoryTestGUI:
 
         self.project_root = get_project_root()
         self.form_entry_enabled = _resolve_form_entry_enabled()
-        try:
-            self.config, _ = load_configs(self.project_root)
-        except Exception:
-            self.config = {"output_dir": "./screenshot"}
+        # A malformed/missing production config is not a recoverable GUI default:
+        # silently substituting a partial dict only postpones the failure until a
+        # worker has started and may already be interacting with a NAS.
+        self.config, _ = load_configs(self.project_root)
 
         self.ui_queue: queue.Queue[dict] = queue.Queue()
         self.devices: dict[str, DeviceTask] = {}
@@ -835,6 +844,8 @@ class FactoryTestGUI:
         self.update_manager = UpdateManager(self.project_root, self.ui_queue)
         self._pending_update: UpdateInfo | None = None
         self._update_install_active = False
+        self._closing = False
+        self._close_poll_after_id: str | None = None
 
         self._build_layout()
         self._restore_queue_state()
@@ -1875,7 +1886,26 @@ class FactoryTestGUI:
         task_id = record["extra"].get("task_id")
         if not task_id:
             return
-        self.ui_queue.put({"type": "log", "task_id": task_id, "message": str(message)})
+        self.ui_queue.put(
+            {
+                "type": "log",
+                "task_id": task_id,
+                "message": self._scrub_runtime_text(message),
+            }
+        )
+
+    def _scrub_runtime_text(self, value: object) -> str:
+        config = getattr(self, "config", {}) or {}
+        secrets = (
+            str((config.get("admin") or {}).get("password") or ""),
+            str((config.get("fault_report") or {}).get("token") or ""),
+        )
+        return scrub_text(
+            value,
+            extra_secrets=secrets,
+            max_len=4_000,
+            mask_identifiers=False,
+        )
 
     def _drain_ui_queue(self) -> None:
         try:
@@ -1930,6 +1960,15 @@ class FactoryTestGUI:
         if not isinstance(update, UpdateInfo):
             return
         if self._pending_update is not None or self._update_install_active:
+            return
+        if self._live_task_workers():
+            try:
+                messagebox.showwarning(
+                    "测试进行中",
+                    "当前仍有 NAS 测试任务运行。请等待任务完成或安全取消后再安装更新。",
+                )
+            except tk.TclError:
+                pass
             return
         self._pending_update = update
         current = format_version()
@@ -4477,9 +4516,9 @@ class FactoryTestGUI:
         )
 
     def _run_test_task(self, task: DeviceTask) -> None:
+        final_event_sent = False
+        current_sn = task.sn
         try:
-            final_event_sent = False
-            current_sn = task.sn
             for attempt in range(1, task.max_attempts + 1):
                 if task.cancel_event.is_set():
                     self._emit_task_cancelled(task, "Test cancelled by user")
@@ -4506,6 +4545,9 @@ class FactoryTestGUI:
                         and not task.cancel_event.is_set()
                         and not is_pool_creation_timeout_error(event.get("error") or "")
                         and not is_unflashed_password_error(event.get("error") or "")
+                        and not is_device_identity_error(event.get("error") or "")
+                        and not is_factory_reset_retry_blocked_error(event.get("error") or "")
+                        and not is_factory_reset_unconfirmed_error(event.get("error") or "")
                     ):
                         retry_event = dict(event)
                         retry_event["status"] = "retrying"
@@ -4541,9 +4583,10 @@ class FactoryTestGUI:
                     )
                     break
                 except Exception as exc:
+                    safe_error = self._scrub_runtime_text(exc)
                     if task.cancel_event.is_set() or self._is_user_abort_error(exc):
                         if not final_event_sent:
-                            self._emit_task_cancelled(task, str(exc))
+                            self._emit_task_cancelled(task, safe_error)
                         break
                     if is_pool_creation_timeout_error(exc):
                         if not final_event_sent:
@@ -4554,7 +4597,7 @@ class FactoryTestGUI:
                                     "sn": current_sn or task.sn,
                                     "status": "failed",
                                     "stage": failure_stage_for_error(exc),
-                                    "error": str(exc),
+                                    "error": safe_error,
                                 }
                             )
                         break
@@ -4567,7 +4610,46 @@ class FactoryTestGUI:
                                     "sn": current_sn or task.sn,
                                     "status": "failed",
                                     "stage": failure_stage_for_error(exc),
-                                    "error": str(exc),
+                                    "error": safe_error,
+                                }
+                            )
+                        break
+                    if is_device_identity_error(exc):
+                        if not final_event_sent:
+                            self.ui_queue.put(
+                                {
+                                    "type": "finished",
+                                    "task_id": task.task_id,
+                                    "sn": current_sn or task.sn,
+                                    "status": "failed",
+                                    "stage": failure_stage_for_error(exc),
+                                    "error": safe_error,
+                                }
+                            )
+                        break
+                    if is_factory_reset_unconfirmed_error(exc):
+                        if not final_event_sent:
+                            self.ui_queue.put(
+                                {
+                                    "type": "finished",
+                                    "task_id": task.task_id,
+                                    "sn": current_sn or task.sn,
+                                    "status": "failed",
+                                    "stage": failure_stage_for_error(exc),
+                                    "error": safe_error,
+                                }
+                            )
+                        break
+                    if is_factory_reset_retry_blocked_error(exc):
+                        if not final_event_sent:
+                            self.ui_queue.put(
+                                {
+                                    "type": "finished",
+                                    "task_id": task.task_id,
+                                    "sn": current_sn or task.sn,
+                                    "status": "failed",
+                                    "stage": failure_stage_for_error(exc),
+                                    "error": safe_error,
                                 }
                             )
                         break
@@ -4580,7 +4662,7 @@ class FactoryTestGUI:
                                     "sn": task.sn,
                                     "status": "failed",
                                     "stage": "缺少第一步",
-                                    "error": str(exc),
+                                    "error": safe_error,
                                 }
                             )
                         break
@@ -4593,7 +4675,7 @@ class FactoryTestGUI:
                                     "sn": current_sn or task.sn,
                                     "status": "failed",
                                     "stage": failure_stage_for_error(exc),
-                                    "error": str(exc),
+                                    "error": safe_error,
                                 }
                             )
                         break
@@ -4610,12 +4692,27 @@ class FactoryTestGUI:
                         {
                             "type": "local_log",
                             "task_id": task.task_id,
-                            "message": f"第 {attempt}/{task.max_attempts} 次测试失败：{exc}；3 秒后自动重试",
+                            "message": f"第 {attempt}/{task.max_attempts} 次测试失败：{safe_error}；3 秒后自动重试",
                         }
                     )
                     time.sleep(3)
-        except Exception:
-            pass
+        except Exception as exc:
+            safe_error = self._scrub_runtime_text(exc)
+            logger.error(f"Task worker failed outside run_test for {task.task_id}: {safe_error}")
+            if not final_event_sent:
+                if task.cancel_event.is_set():
+                    self._emit_task_cancelled(task, safe_error)
+                else:
+                    self.ui_queue.put(
+                        {
+                            "type": "finished",
+                            "task_id": task.task_id,
+                            "sn": current_sn or task.sn,
+                            "status": "failed",
+                            "stage": failure_stage_for_error(exc),
+                            "error": safe_error,
+                        }
+                    )
         finally:
             self.ui_queue.put({"type": "thread_done", "task_id": task.task_id})
 
@@ -4672,7 +4769,15 @@ class FactoryTestGUI:
                 "done": done,
             }
         )
-        done.wait()
+        # The GUI queue normally answers within the 100 ms drain interval.  Do
+        # not let a worker deadlock forever if the window is closing or the UI
+        # loop has stopped; the task's queued settings are a safe fallback.
+        if not done.wait(timeout=5.0):
+            logger.warning(
+                f"Timed out refreshing live settings for task {task.task_id}; "
+                "using the queued values"
+            )
+            return
         if "auto_form_entry" in reply:
             task.auto_form_entry = bool(reply["auto_form_entry"])
         if reply.get("form_grade"):
@@ -4873,6 +4978,9 @@ class FactoryTestGUI:
             self.cancel_btn.configure(state=tk.NORMAL if cancel_enabled else tk.DISABLED)
 
     def _on_close(self) -> None:
+        if getattr(self, "_closing", False):
+            return
+        self._closing = True
         if self.materials_refresh_after_id is not None:
             try:
                 self.root.after_cancel(self.materials_refresh_after_id)
@@ -4895,6 +5003,36 @@ class FactoryTestGUI:
             task.finished_monotonic = time.monotonic()
             task.interrupted_on_exit = True
         self._save_queue_state()
+        if self._live_task_workers():
+            try:
+                self.status_var.set("正在安全停止测试并清理浏览器/SMB 进程…")
+            except Exception:
+                pass
+            self._poll_workers_before_close()
+            return
+        self._destroy_root_after_cleanup()
+
+    def _live_task_workers(self) -> list[threading.Thread]:
+        live: list[threading.Thread] = []
+        for worker in self.workers.values():
+            try:
+                if worker.is_alive():
+                    live.append(worker)
+            except Exception:
+                continue
+        return live
+
+    def _poll_workers_before_close(self) -> None:
+        if self._live_task_workers():
+            try:
+                self._close_poll_after_id = self.root.after(100, self._poll_workers_before_close)
+            except tk.TclError:
+                pass
+            return
+        self._close_poll_after_id = None
+        self._destroy_root_after_cleanup()
+
+    def _destroy_root_after_cleanup(self) -> None:
         try:
             self.root.destroy()
         except Exception:
@@ -4944,7 +5082,20 @@ class FactoryTestGUI:
 
 def main() -> None:
     root = tk.Tk()
-    FactoryTestGUI(root)
+    try:
+        FactoryTestGUI(root)
+    except Exception as exc:
+        safe_error = scrub_text(exc, max_len=4_000, mask_identifiers=False)
+        logger.error(f"GUI startup failed: {safe_error}")
+        try:
+            messagebox.showerror(
+                "配置加载失败",
+                f"无法启动测试工具，请检查 config/config.yml：\n\n{safe_error}",
+                parent=root,
+            )
+        finally:
+            root.destroy()
+        raise SystemExit(2) from None
     root.mainloop()
 
 

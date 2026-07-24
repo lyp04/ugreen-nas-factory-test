@@ -102,6 +102,12 @@ def extract_full_sn(text: str, expected_tail: str = "") -> str | None:
 
 
 def same_sn_identity(left: str, right: str) -> bool:
+    normalized_left = normalize_sn(left)
+    normalized_right = normalize_sn(right)
+    if is_auto_sn_placeholder(normalized_left) or is_auto_sn_placeholder(normalized_right):
+        return False
+    if is_full_sn_candidate(normalized_left) and is_full_sn_candidate(normalized_right):
+        return normalized_left == normalized_right
     left_tail = sn_tail(left)
     right_tail = sn_tail(right)
     return bool(left_tail and right_tail and left_tail == right_tail)

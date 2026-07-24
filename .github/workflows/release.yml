@@ -7,11 +7,17 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to publish (e.g. v0.2.0). Created on the current ref if missing."
+        description: "New tag to publish (e.g. v0.2.0), bound to the selected ref. Existing tags/releases are refused."
         required: true
 
 permissions:
   contents: write
+
+concurrency:
+  # Serialize every attempt for the same release tag. A queued duplicate reaches
+  # the immutable-release preflight only after the first attempt has published.
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -22,14 +28,21 @@ jobs:
       - name: Resolve tag
         id: tag
         shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_TAG: ${{ github.event.inputs.tag }}
+          PUSH_TAG: ${{ github.ref_name }}
         run: |
-          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
-            $tag = "${{ github.event.inputs.tag }}"
+          if ($env:EVENT_NAME -eq "workflow_dispatch") {
+            $tag = $env:DISPATCH_TAG
           } else {
-            $tag = "${{ github.ref_name }}"
+            $tag = $env:PUSH_TAG
           }
           if (-not $tag.StartsWith("v")) {
             throw "Tag must start with 'v' (got '$tag')"
+          }
+          if ($tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$') {
+            throw "Release tag must be semantic version form vMAJOR.MINOR.PATCH (got '$tag')"
           }
           $name = $tag.Substring(1)
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
@@ -39,6 +52,71 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Validate immutable release source
+        id: source
+        shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = $env:RELEASE_TAG
+          git check-ref-format "refs/tags/$tag"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Invalid release tag: '$tag'"
+          }
+
+          $headCommit = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or -not $headCommit) {
+            throw "Could not resolve the checked-out release commit"
+          }
+
+          if ($env:EVENT_NAME -eq "workflow_dispatch") {
+            # Manual releases are create-only. Reusing a tag could otherwise build
+            # the selected workflow ref and silently replace an unrelated tag's assets.
+            $null = git ls-remote --exit-code --tags origin "refs/tags/$tag"
+            $tagLookupExit = $LASTEXITCODE
+            if ($tagLookupExit -eq 0) {
+              throw "workflow_dispatch refuses to reuse existing tag '$tag'"
+            }
+            if ($tagLookupExit -ne 2) {
+              throw "Could not verify whether tag '$tag' already exists (git exit $tagLookupExit)"
+            }
+          } else {
+            # A tag-push build must run from the commit the pushed tag actually names.
+            $tagCommit = (git rev-list -n 1 "refs/tags/$tag").Trim()
+            if ($LASTEXITCODE -ne 0 -or -not $tagCommit) {
+              throw "Pushed tag '$tag' is not available after checkout"
+            }
+            if ($tagCommit -ne $headCommit) {
+              throw "Checked-out commit $headCommit does not match tag '$tag' commit $tagCommit"
+            }
+          }
+
+          $escapedTag = [Uri]::EscapeDataString($tag)
+          $releaseUrl = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$escapedTag"
+          $headers = @{
+            Authorization = "Bearer $env:GITHUB_TOKEN"
+            Accept = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+          }
+          $releaseExists = $false
+          try {
+            $null = Invoke-RestMethod -Uri $releaseUrl -Headers $headers -Method Get
+            $releaseExists = $true
+          } catch {
+            $response = $_.Exception.Response
+            $statusCode = if ($null -ne $response) { [int]$response.StatusCode } else { 0 }
+            if ($statusCode -ne 404) {
+              throw "Could not verify release immutability for '$tag': $($_.Exception.Message)"
+            }
+          }
+          if ($releaseExists) {
+            throw "Release '$tag' already exists; refusing to overwrite its metadata or assets"
+          }
+
+          "target_sha=$headCommit" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Compute version code
         id: code
@@ -50,13 +128,16 @@ jobs:
 
       - name: Stamp src/version.py
         shell: pwsh
+        env:
+          VERSION_NAME: ${{ steps.tag.outputs.name }}
+          VERSION_CODE: ${{ steps.code.outputs.code }}
         run: |
           $content = @"
           from __future__ import annotations
 
           PACKAGE_NAME = "ugreen-nas-factory-test"
-          VERSION_NAME = "${{ steps.tag.outputs.name }}"
-          VERSION_CODE = ${{ steps.code.outputs.code }}
+          VERSION_NAME = "$env:VERSION_NAME"
+          VERSION_CODE = $env:VERSION_CODE
 
           __all__ = ["PACKAGE_NAME", "VERSION_NAME", "VERSION_CODE"]
           "@
@@ -79,19 +160,7 @@ jobs:
       - name: Run unit tests
         shell: pwsh
         run: |
-          # Only test files we know are dep-light and on the current branch.
-          # test_print_labels lives only on feature/auto-print-label.
-          $tests = @(
-              "tests/test_updater.py",
-              "tests/test_sn_utils.py",
-              "tests/test_ugreen_broadcast.py",
-              "tests/test_screenshot_utils.py",
-              "tests/test_form_entry_materials.py",
-              "tests/test_fault_report.py",
-              "tests/test_reachability.py",
-              "tests/test_print_labels.py"
-          ) | Where-Object { Test-Path $_ }
-          python -m pytest @tests -v
+          python -m pytest tests -q
 
       - name: Build exe
         shell: pwsh
@@ -107,7 +176,20 @@ jobs:
             --windowed `
             --collect-all playwright `
             --collect-all zeroconf `
+            --collect-all barcode `
+            --hidden-import "PIL" `
+            --hidden-import "PIL.Image" `
+            --hidden-import "PIL.ImageDraw" `
+            --hidden-import "PIL.ImageFont" `
+            --hidden-import "PIL.ImageChops" `
+            --hidden-import "win32print" `
             --hidden-import "src.cli" `
+            --hidden-import "src.report" `
+            --hidden-import "src.report.reporter" `
+            --hidden-import "src.report.github_issues" `
+            --hidden-import "src.report.collector" `
+            --hidden-import "src.report.fingerprint" `
+            --hidden-import "src.report.redact" `
             --hidden-import "src.gui" `
             --hidden-import "src.updater" `
             --hidden-import "src.version" `
@@ -122,6 +204,7 @@ jobs:
             --hidden-import "src.discovery.mdns_scanner" `
             --hidden-import "src.discovery.port_scanner" `
             --hidden-import "src.discovery.ugreen_broadcast" `
+            --hidden-import "src.utils.label" `
             .\src\gui.py
           if (-not (Test-Path dist\UGREEN-NAS-Test.exe)) {
             throw "PyInstaller did not produce dist\UGREEN-NAS-Test.exe"
@@ -132,7 +215,23 @@ jobs:
         run: |
           if (Test-Path dist\config) { Remove-Item -Recurse -Force dist\config }
           New-Item -ItemType Directory -Force dist\config | Out-Null
-          Copy-Item -Recurse -Force config\* dist\config\
+          # Release config is create-from-empty and exact-allowlist only. Never
+          # copy the source config directory: it may contain gitignored config.yml,
+          # label data, credentials, logs, or nested runtime files on a build host.
+          $publicConfigSources = [ordered]@{
+            "config.example.yml" = "config\config.example.yml"
+            "selectors.yml"      = "config\selectors.yml"
+          }
+          foreach ($entry in $publicConfigSources.GetEnumerator()) {
+            if (-not (Test-Path -LiteralPath $entry.Value -PathType Leaf)) {
+              throw "Missing public config source: $($entry.Value)"
+            }
+            $sourceItem = Get-Item -LiteralPath $entry.Value
+            if (($sourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+              throw "Public config source must not be a symlink or junction: $($entry.Value)"
+            }
+            Copy-Item -Force -LiteralPath $entry.Value -Destination (Join-Path "dist\config" $entry.Key)
+          }
           # Public repo: release assets download without auth, so the client needs
           # no token. Ship an empty token — never embed a PAT in a build here.
           $cfg = [ordered]@{
@@ -144,11 +243,37 @@ jobs:
             releaseTag    = ""
           }
           ($cfg | ConvertTo-Json -Depth 4) | Set-Content -Path dist\config\update-config.json -Encoding utf8
-          Remove-Item -Force dist\config\update-config.example.json -ErrorAction SilentlyContinue
+
+          $configRoot = (Resolve-Path -LiteralPath "dist\config").Path.TrimEnd('\', '/')
+          $allowedConfigFiles = @("config.example.yml", "selectors.yml", "update-config.json")
+          foreach ($item in Get-ChildItem -LiteralPath $configRoot -Recurse -Force) {
+            $relative = $item.FullName.Substring($configRoot.Length).TrimStart([char[]]"\/").Replace('\', '/')
+            if ($item.PSIsContainer) {
+              throw "Release config contains a non-allowlisted directory: $relative"
+            }
+            if ($allowedConfigFiles -notcontains $relative) {
+              throw "Release config contains a non-allowlisted file: $relative"
+            }
+            if ($item.Name -ieq "config.yml" -or $item.Name -match '(?i)^\.env(?:\..+)?$') {
+              throw "Release config contains a private config or environment file: $relative"
+            }
+            $text = [System.IO.File]::ReadAllText($item.FullName)
+            if ($text -match '-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----') {
+              throw "Release config contains private-key material: $relative"
+            }
+          }
+          $stagedConfigFiles = @(Get-ChildItem -LiteralPath $configRoot -Recurse -File -Force)
+          if ($stagedConfigFiles.Count -ne $allowedConfigFiles.Count) {
+            throw "Release config must contain exactly the three public files"
+          }
 
       - name: Build update.json manifest
         id: manifest
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+          VERSION_NAME: ${{ steps.tag.outputs.name }}
+          VERSION_CODE: ${{ steps.code.outputs.code }}
         run: |
           $exe = "dist\UGREEN-NAS-Test.exe"
           $sha = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLower()
@@ -156,7 +281,7 @@ jobs:
           try {
             # Annotated tag body if any; falls back to commit subject. Force the
             # git output to a single string so ConvertTo-Json doesn't emit an array.
-            $rawTag = git tag -l --format='%(contents)' "${{ steps.tag.outputs.tag }}" | Out-String
+            $rawTag = git tag -l --format='%(contents)' $env:RELEASE_TAG | Out-String
             $notes = $rawTag.Trim()
             if ([string]::IsNullOrWhiteSpace($notes)) {
               $rawCommit = git log -1 --pretty=%B | Out-String
@@ -165,8 +290,8 @@ jobs:
           } catch {}
           $manifest = [ordered]@{
             packageName = "ugreen-nas-factory-test"
-            versionCode = [int]"${{ steps.code.outputs.code }}"
-            versionName = "${{ steps.tag.outputs.name }}"
+            versionCode = [int]$env:VERSION_CODE
+            versionName = $env:VERSION_NAME
             exeAsset    = "UGREEN-NAS-Test.exe"
             sha256      = $sha
             notes       = $notes
@@ -174,12 +299,70 @@ jobs:
           ($manifest | ConvertTo-Json -Depth 4) | Set-Content -Path dist\update.json -Encoding utf8
           Get-Content dist\update.json
 
-      - name: Package dist as zip for convenience
+      - name: Package and verify public zip
         shell: pwsh
+        env:
+          VERSION_NAME: ${{ steps.tag.outputs.name }}
         run: |
-          $zipName = "UGREEN-NAS-Test-${{ steps.tag.outputs.name }}.zip"
+          $zipName = "UGREEN-NAS-Test-$($env:VERSION_NAME).zip"
           Compress-Archive -Path dist\UGREEN-NAS-Test.exe, dist\config -DestinationPath "dist\$zipName" -Force
-          "zip=dist\$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          $checkDir = Join-Path $env:RUNNER_TEMP "ugreen-release-check"
+          if (Test-Path $checkDir) { Remove-Item -Recurse -Force $checkDir }
+          Expand-Archive -Path "dist\$zipName" -DestinationPath $checkDir
+          $allowedFiles = @(
+            "UGREEN-NAS-Test.exe",
+            "config\config.example.yml",
+            "config\selectors.yml",
+            "config\update-config.json"
+          )
+          $forbiddenSegments = @(
+            ".git", ".venv", "venv", "state", "log", "logs", "tmp", "temp",
+            "build", "dist", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"
+          )
+          $forbiddenExtensions = @(
+            ".key", ".pem", ".pfx", ".p12", ".ppk", ".kdbx", ".log", ".tmp",
+            ".bak", ".backup", ".old", ".orig", ".save", ".swp", ".swo"
+          )
+          $privateKeyNames = @("id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "authorized_keys")
+          $checkRoot = (Resolve-Path -LiteralPath $checkDir).Path.TrimEnd('\', '/')
+          foreach ($item in Get-ChildItem -LiteralPath $checkRoot -Recurse -Force) {
+            $relative = $item.FullName.Substring($checkRoot.Length).TrimStart([char[]]"\/")
+            $normalized = $relative.Replace('\', '/')
+            foreach ($segment in @($normalized -split '/')) {
+              if ($forbiddenSegments -contains $segment -or $segment.StartsWith(".") -or
+                  $segment -match '(?i)\.local\.' -or
+                  $segment -match '(?i)(?:^|\.)(?:bak|backup|old|orig|save|swp|swo)(?:\.|$)' -or
+                  $segment -match '~$' -or $segment -match '^#.*#$') {
+                throw "Release zip contains a forbidden path: $normalized"
+              }
+            }
+            if ($item.PSIsContainer) {
+              if ($normalized -ne "config") {
+                throw "Release zip contains a non-allowlisted directory: $normalized"
+              }
+              continue
+            }
+            if ($allowedFiles -notcontains $relative) {
+              throw "Release zip contains a non-allowlisted file: $normalized"
+            }
+            if ($item.Name -ieq "config.yml" -or $item.Name -match '(?i)^\.env(?:\..+)?$') {
+              throw "Release zip contains a private config or environment file: $normalized"
+            }
+            if ($privateKeyNames -contains $item.Name -or $forbiddenExtensions -contains $item.Extension) {
+              throw "Release zip contains a key, log, or temporary file: $normalized"
+            }
+            if ($item.Extension -in @(".json", ".yml", ".yaml", ".txt")) {
+              $text = [System.IO.File]::ReadAllText($item.FullName)
+              if ($text -match '-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----') {
+                throw "Release zip contains private-key material: $normalized"
+              }
+            }
+          }
+          foreach ($relative in $allowedFiles) {
+            if (-not (Test-Path -LiteralPath (Join-Path $checkRoot $relative) -PathType Leaf)) {
+              throw "Release zip is missing $relative"
+            }
+          }
 
       - name: Upload build artifacts (for inspection on failures)
         if: always()
@@ -189,16 +372,36 @@ jobs:
           path: |
             dist/UGREEN-NAS-Test.exe
             dist/update.json
+            dist/UGREEN-NAS-Test-*.zip
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Create or update GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          name: ${{ steps.tag.outputs.tag }}
-          generate_release_notes: true
-          fail_on_unmatched_files: true
-          files: |
-            dist/UGREEN-NAS-Test.exe
-            dist/update.json
+      - name: Create immutable GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+          TARGET_SHA: ${{ steps.source.outputs.target_sha }}
+        run: |
+          # `gh release create` is create-only: if a release appeared after the
+          # preflight (for example via a manual race), it fails instead of updating
+          # that release or replacing any asset. --target binds a new dispatch tag
+          # to the exact commit that this job built.
+          $zipAssets = @(Get-ChildItem -Path "dist\UGREEN-NAS-Test-*.zip" -File)
+          if ($zipAssets.Count -ne 1) {
+            throw "Expected exactly one release zip, found $($zipAssets.Count)"
+          }
+          $releaseArgs = @(
+            "release", "create", $env:RELEASE_TAG,
+            "--repo", $env:GITHUB_REPOSITORY,
+            "--target", $env:TARGET_SHA,
+            "--title", $env:RELEASE_TAG,
+            "--generate-notes",
+            "dist\UGREEN-NAS-Test.exe",
+            "dist\update.json",
+            $zipAssets[0].FullName
+          )
+          & gh @releaseArgs
+          if ($LASTEXITCODE -ne 0) {
+            throw "GitHub release creation failed; no existing release or asset was overwritten"
+          }

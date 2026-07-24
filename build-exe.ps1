@@ -1,6 +1,6 @@
 ﻿#Requires -Version 5.1
 # Build a standalone .exe of the GUI using PyInstaller.
-# Output: dist\UGREEN-NAS-Test.exe (config/ folder must ship alongside the exe)
+# Output: dist\UGREEN-NAS-Test.exe plus public configuration templates.
 # Usage:  powershell -ExecutionPolicy Bypass -File .\build-exe.ps1
 
 $ErrorActionPreference = 'Stop'
@@ -12,6 +12,78 @@ if (-not (Test-Path ".venv\Scripts\python.exe")) {
 
 $python = ".\.venv\Scripts\python.exe"
 $pyinstaller = ".\.venv\Scripts\pyinstaller.exe"
+
+$publicConfigFiles = @(
+    "config.example.yml",
+    "selectors.yml",
+    "update-config.example.json"
+)
+foreach ($name in $publicConfigFiles) {
+    $source = Join-Path ".\config" $name
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+        throw "缺少公开配置文件：$source"
+    }
+    $sourceItem = Get-Item -LiteralPath $source
+    if (($sourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "公开配置文件不能是符号链接或 junction：$source"
+    }
+}
+
+function Assert-PublicDistributionSafe {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    $rootPath = (Resolve-Path -LiteralPath $Root).Path.TrimEnd('\', '/')
+    $allowedFiles = @(
+        "UGREEN-NAS-Test.exe",
+        "config/config.example.yml",
+        "config/selectors.yml",
+        "config/update-config.example.json"
+    ) + $testPackages
+    $forbiddenSegments = @(
+        ".git", ".venv", "venv", "state", "log", "logs", "tmp", "temp",
+        "build", "dist", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"
+    )
+    $forbiddenExtensions = @(
+        ".key", ".pem", ".pfx", ".p12", ".ppk", ".kdbx", ".log", ".tmp",
+        ".bak", ".backup", ".old", ".orig", ".save", ".swp", ".swo"
+    )
+
+    foreach ($item in Get-ChildItem -LiteralPath $rootPath -Recurse -Force) {
+        $relative = $item.FullName.Substring($rootPath.Length).TrimStart([char[]]"\/").Replace('\', '/')
+        $segments = @($relative -split '/')
+        foreach ($segment in $segments) {
+            if ($forbiddenSegments -contains $segment -or $segment.StartsWith(".") -or
+                $segment -match '(?i)\.local\.' -or
+                $segment -match '(?i)(?:^|\.)(?:bak|backup|old|orig|save|swp|swo)(?:\.|$)' -or
+                $segment -match '~$' -or $segment -match '^#.*#$') {
+                throw "分发目录含禁用路径：$relative"
+            }
+        }
+
+        if ($item.PSIsContainer) {
+            if ($relative -ne "config") {
+                throw "分发目录含非白名单目录：$relative"
+            }
+            continue
+        }
+
+        if ($allowedFiles -notcontains $relative) {
+            throw "分发目录含非白名单文件：$relative"
+        }
+        if ($item.Name -ieq "config.yml" -or $item.Name -match '(?i)^\.env(?:\..+)?$') {
+            throw "分发目录含真实配置或环境文件：$relative"
+        }
+        if ($forbiddenExtensions -contains $item.Extension) {
+            throw "分发目录含密钥、日志或临时文件：$relative"
+        }
+        if ($item.Extension -in @(".yml", ".yaml", ".json", ".txt", ".ps1")) {
+            $text = [System.IO.File]::ReadAllText($item.FullName)
+            if ($text -match '-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----') {
+                throw "分发目录含私钥内容：$relative"
+            }
+        }
+    }
+}
 
 if (-not (Test-Path $pyinstaller)) {
     Write-Host "PyInstaller 未安装，正在安装..." -ForegroundColor Yellow
@@ -70,18 +142,26 @@ Write-Host "== 构建 EXE ==" -ForegroundColor Cyan
 if (-not $?) { Write-Error "PyInstaller 构建失败" }
 
 Write-Host ""
-Write-Host "== 拷贝 config 目录到 dist ==" -ForegroundColor Cyan
+Write-Host "== 拷贝公开配置白名单到 dist ==" -ForegroundColor Cyan
 if (Test-Path ".\dist\config") { Remove-Item -Recurse -Force ".\dist\config" }
 New-Item -ItemType Directory -Force ".\dist\config" | Out-Null
-Copy-Item -Recurse -Force .\config\* .\dist\config\
-foreach ($package in @("测试5G.rar", "测试10G.rar", "测试20G.rar")) {
+$testPackages = @("测试5G.rar", "测试10G.rar", "测试20G.rar")
+foreach ($name in $publicConfigFiles) {
+    Copy-Item -Force -LiteralPath (Join-Path ".\config" $name) -Destination (Join-Path ".\dist\config" $name)
+}
+foreach ($package in $testPackages) {
     $packagePath = Join-Path "." $package
     if (Test-Path $packagePath) {
+        $packageItem = Get-Item -LiteralPath $packagePath
+        if (($packageItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "测速源文件不能是符号链接或 junction：$packagePath"
+        }
         Copy-Item -Force -LiteralPath $packagePath -Destination (Join-Path ".\dist" $package)
     }
 }
+Assert-PublicDistributionSafe ".\dist"
 
 Write-Host ""
 Write-Host "== 完成 ==" -ForegroundColor Green
-Write-Host "产物：dist\UGREEN-NAS-Test.exe（同目录下需保留 dist\config\ ）"
-Write-Host "打包给工厂：整个 dist 目录拷走即可。operator 双击 exe 启动。"
+Write-Host "产物：dist\UGREEN-NAS-Test.exe + 3 个公开配置模板（不含真实 config.yml）。"
+Write-Host "首次运行前，把 config.example.yml 复制为 config.yml 并在目标机本地填写；不要把填写后的文件回传或重新打包。"

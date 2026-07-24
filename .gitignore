@@ -9,11 +9,14 @@ build/
 build_*/
 dist/
 dist_*/
+/dist-public/
+/dist-full/
 *.spec
 *.exe
 *.pkg
 
 output/
+/screenshot/
 state/
 transfer_work/
 logs/
@@ -34,3 +37,4 @@ config/update-config.json
 config/config.yml
 # 打印专有数据（P/N/EAN 表），不进 git
 config/labels.yml
+/config/labels/

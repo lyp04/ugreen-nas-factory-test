@@ -3,6 +3,8 @@ import queue
 import threading
 from types import SimpleNamespace
 
+import pytest
+
 from src import gui as gui_module
 from src.gui import FactoryTestGUI
 from src.gui import DeviceTask
@@ -14,6 +16,40 @@ def _gui_for_output(tmp_path):
     gui.project_root = tmp_path
     gui.devices = {}
     return gui
+
+
+def test_main_fails_closed_when_gui_config_loading_fails(monkeypatch) -> None:
+    class FakeRoot:
+        destroyed = False
+        mainloop_called = False
+
+        def destroy(self):
+            self.destroyed = True
+
+        def mainloop(self):
+            self.mainloop_called = True
+
+    root = FakeRoot()
+    shown: list[tuple[str, str, object]] = []
+    monkeypatch.setattr(gui_module.tk, "Tk", lambda: root)
+    monkeypatch.setattr(
+        gui_module,
+        "FactoryTestGUI",
+        lambda _root: (_ for _ in ()).throw(ValueError("invalid YAML")),
+    )
+    monkeypatch.setattr(
+        gui_module.messagebox,
+        "showerror",
+        lambda title, message, parent=None: shown.append((title, message, parent)),
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        gui_module.main()
+
+    assert raised.value.code == 2
+    assert root.destroyed is True
+    assert root.mainloop_called is False
+    assert shown == [("配置加载失败", "无法启动测试工具，请检查 config/config.yml：\n\ninvalid YAML", root)]
 
 
 class _Var:
@@ -63,6 +99,7 @@ class _Root:
     def __init__(self):
         self.after_calls = []
         self.cancelled = []
+        self.destroyed = False
 
     def after(self, delay_ms, callback):
         after_id = f"after-{len(self.after_calls) + 1}"
@@ -71,6 +108,9 @@ class _Root:
 
     def after_cancel(self, after_id):
         self.cancelled.append(after_id)
+
+    def destroy(self):
+        self.destroyed = True
 
 
 def _gui_with_daily_stats(tmp_path):
@@ -118,6 +158,28 @@ def _gui_with_action_state(tmp_path):
     gui.queue_summary_var = _Var()
     gui.status_var = _Var()
     return gui
+
+
+def test_close_waits_for_worker_cleanup_before_destroying_root(tmp_path) -> None:
+    gui = _gui_with_action_state(tmp_path)
+    gui.materials_refresh_after_id = None
+    gui.daily_rollover_after_id = None
+    gui._closing = False
+    gui._close_poll_after_id = None
+    gui._save_queue_state = lambda: None
+
+    worker = SimpleNamespace(alive=True, is_alive=lambda: worker.alive)
+    gui.workers = {"task": worker}
+
+    gui._on_close()
+
+    assert gui.root.destroyed is False
+    assert gui.status_var.get().startswith("正在安全停止")
+    assert len(gui.root.after_calls) == 1
+
+    worker.alive = False
+    gui.root.after_calls[-1][2]()
+    assert gui.root.destroyed is True
 
 
 def test_existing_image_directory_does_not_block_auto_scan_by_sn(tmp_path) -> None:
@@ -886,6 +948,7 @@ def test_pool_creation_timeout_fails_without_auto_retry(monkeypatch, tmp_path) -
         raise RuntimeError(error)
 
     monkeypatch.setattr(gui_module, "run_test", fake_run_test)
+    monkeypatch.setattr(gui, "_sync_task_with_live_settings", lambda _task: None)
 
     gui._run_test_task(task)
 
@@ -907,6 +970,35 @@ def test_pool_creation_timeout_fails_without_auto_retry(monkeypatch, tmp_path) -
         }
     ]
     assert not any(event.get("status") == "retrying" for event in events)
+
+
+def test_worker_outer_exception_emits_terminal_failure(monkeypatch, tmp_path) -> None:
+    gui = _gui_for_output(tmp_path)
+    gui.ui_queue = queue.Queue()
+    task = DeviceTask(
+        task_id="task-outer",
+        sn="EC752JJ21251E4D3",
+        requested_ip="192.0.2.232",
+        mode="setup",
+        cleanup_before_finish=True,
+        factory_reset_before_finish=True,
+    )
+    monkeypatch.setattr(
+        gui,
+        "_sync_task_with_live_settings",
+        lambda _task: (_ for _ in ()).throw(RuntimeError("settings sync failed")),
+    )
+
+    gui._run_test_task(task)
+
+    events = []
+    while not gui.ui_queue.empty():
+        events.append(gui.ui_queue.get())
+    finished = [event for event in events if event.get("type") == "finished"]
+    assert len(finished) == 1
+    assert finished[0]["status"] == "failed"
+    assert finished[0]["error"] == "settings sync failed"
+    assert events[-1] == {"type": "thread_done", "task_id": "task-outer"}
 
 
 def test_unflashed_password_error_fails_without_auto_retry(monkeypatch, tmp_path) -> None:
@@ -938,6 +1030,7 @@ def test_unflashed_password_error_fails_without_auto_retry(monkeypatch, tmp_path
         raise RuntimeError(error)
 
     monkeypatch.setattr(gui_module, "run_test", fake_run_test)
+    monkeypatch.setattr(gui, "_sync_task_with_live_settings", lambda _task: None)
 
     gui._run_test_task(task)
 
@@ -952,6 +1045,76 @@ def test_unflashed_password_error_fails_without_auto_retry(monkeypatch, tmp_path
             "type": "finished",
             "status": "failed",
             "stage": gui_module.UNFLASHED_TITLE,
+            "error": error,
+            "task_id": "task-1",
+            "sn": "EC752JJ21251E4D3",
+            "attempt": 1,
+        }
+    ]
+    assert not any(event.get("status") == "retrying" for event in events)
+
+
+@pytest.mark.parametrize(
+    ("error", "stage"),
+    [
+        (
+            "Factory reset was initiated but completion was not confirmed before timeout",
+            "恢复出厂设置待确认",
+        ),
+        (
+            "A factory reset from a previous run must not be repeated: already confirmed",
+            "恢复出厂设置已确认，禁止重复执行",
+        ),
+        ("设备身份校验失败: wrong SN", "设备身份校验失败"),
+    ],
+)
+def test_safety_failure_fails_without_auto_retry(
+    monkeypatch,
+    tmp_path,
+    error: str,
+    stage: str,
+) -> None:
+    gui = _gui_for_output(tmp_path)
+    gui.ui_queue = queue.Queue()
+    task = DeviceTask(
+        task_id="task-1",
+        sn="EC752JJ21251E4D3",
+        requested_ip="192.0.2.232",
+        mode="login",
+        cleanup_before_finish=True,
+        factory_reset_before_finish=True,
+        max_attempts=2,
+    )
+    calls = 0
+    def fake_run_test(*_args, **kwargs):
+        nonlocal calls
+        calls += 1
+        kwargs["progress_cb"](
+            {
+                "type": "finished",
+                "status": "failed",
+                "stage": stage,
+                "error": error,
+            }
+        )
+        raise RuntimeError(error)
+
+    monkeypatch.setattr(gui_module, "run_test", fake_run_test)
+    monkeypatch.setattr(gui, "_sync_task_with_live_settings", lambda _task: None)
+
+    gui._run_test_task(task)
+
+    events = []
+    while not gui.ui_queue.empty():
+        events.append(gui.ui_queue.get())
+
+    finished = [event for event in events if event.get("type") == "finished"]
+    assert calls == 1
+    assert finished == [
+        {
+            "type": "finished",
+            "status": "failed",
+            "stage": stage,
             "error": error,
             "task_id": "task-1",
             "sn": "EC752JJ21251E4D3",
@@ -984,7 +1147,7 @@ def test_auto_scan_sn_uses_only_valid_broadcast_sn(tmp_path) -> None:
     gui = _gui_for_output(tmp_path)
 
     assert gui._auto_scan_sn("192.0.2.244", "HB670EE00000001A", "") == "HB670EE00000001A"
-    assert gui._auto_scan_sn("192.0.2.244", "ECLGGEDQ8TB", "") == "AUTOC0A800F4"
+    assert gui._auto_scan_sn("192.0.2.244", "ECLGGEDQ8TB", "") == "AUTOC00002F4"
 
 
 def test_auto_scan_groups_consecutive_auto_placeholder_ports(tmp_path) -> None:

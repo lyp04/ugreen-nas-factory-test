@@ -10,3 +10,4 @@ if (-not (Test-Path ".venv\Scripts\python.exe")) {
 }
 
 & .\.venv\Scripts\python.exe -m src.gui
+exit $LASTEXITCODE

@@ -24,7 +24,7 @@ from pathlib import Path
 from ..version import VERSION_CODE, VERSION_NAME
 from . import collector, fingerprint
 from .github_issues import GitHubError, GitHubIssuesClient
-from .redact import scrub_text
+from .redact import scrub_data, scrub_text
 
 _META_COUNT_PREFIX = "<!-- meta:count="
 _META_COUNT_SUFFIX = " -->"
@@ -47,7 +47,8 @@ class FaultReporter:
         self.release_tag = str(self.cfg.get("release_tag") or "fault-reports")
         self.tail_lines = int(self.cfg.get("run_log_tail_lines", 200))
         self.dedup_window_s = float(self.cfg.get("dedup_window_minutes", 5)) * 60.0
-        self.secrets = [s for s in (secrets or []) if s]
+        configured_secrets = [*(secrets or []), self.cfg.get("token")]
+        self.secrets = list(dict.fromkeys(str(item) for item in configured_secrets if item))
         self.queue_dir = self.output_root / "_fault_reports"
         self.queue_file = self.queue_dir / "queue.jsonl"
         self.issue_map_file = self.queue_dir / "issue_map.json"
@@ -73,7 +74,8 @@ class FaultReporter:
         if not self.available():
             return
         try:
-            signature = fingerprint.normalize_signature(message)
+            clean_message = self._scrub(message)
+            signature = fingerprint.normalize_signature(clean_message)
             fp = fingerprint.compute(category or "other", model or "", signature)
             now = time.time()
             last = self._last_seen.get(fp)
@@ -87,7 +89,7 @@ class FaultReporter:
                 "model": model or "",
                 "category": category or "other",
                 "stage": stage or "测试失败",
-                "message": message or "",
+                "message": clean_message,
                 "ts": _now_str(),
             }
             self._enqueue(event)
@@ -101,7 +103,55 @@ class FaultReporter:
 
     # ---------------- queue (JSONL) ----------------
 
+    def _scrub(self, value: object, *, max_len: int = 0) -> str:
+        return scrub_text(value, extra_secrets=self.secrets, max_len=max_len)
+
+    def _queue_relative_sn_dir(self, raw: object) -> str | None:
+        if raw is None or not str(raw).strip():
+            return None
+        root = self.output_root.resolve()
+        path = Path(str(raw))
+        candidate = path if path.is_absolute() else root / path
+        try:
+            return candidate.resolve().relative_to(root).as_posix()
+        except (OSError, ValueError):
+            return None
+
+    def _sanitize_event(self, event: dict, *, queue_safe_path: bool) -> dict:
+        raw_sn_dir = event.get("sn_dir")
+        cleaned = scrub_data(dict(event), extra_secrets=self.secrets)
+        if not isinstance(cleaned, dict):
+            return {}
+        if raw_sn_dir is not None:
+            if queue_safe_path:
+                relative = self._queue_relative_sn_dir(raw_sn_dir)
+                if relative:
+                    # Even the relative directory is persisted in queue.jsonl, so
+                    # apply the same exact/generic redaction as every other field.
+                    cleaned["sn_dir"] = self._scrub(relative)
+                else:
+                    cleaned.pop("sn_dir", None)
+            else:
+                # Keep the functional path out of text redaction. It is validated
+                # against output_root by _resolve_sn_dir before any file is read.
+                cleaned["sn_dir"] = str(raw_sn_dir)
+        return cleaned
+
+    def _resolve_sn_dir(self, event: dict) -> Path:
+        root = self.output_root.resolve()
+        raw = event.get("sn_dir") or event.get("sn") or ""
+        path = Path(str(raw))
+        candidate = path if path.is_absolute() else root / path
+        try:
+            resolved = candidate.resolve()
+            resolved.relative_to(root)
+            return resolved
+        except (OSError, ValueError):
+            fallback_name = re.sub(r"[^A-Za-z0-9._-]", "_", str(event.get("sn") or ""))
+            return root / (fallback_name or "unknown")
+
     def _enqueue(self, event: dict) -> None:
+        event = self._sanitize_event(event, queue_safe_path=True)
         self.queue_dir.mkdir(parents=True, exist_ok=True)
         with self._io_lock, open(self.queue_file, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, ensure_ascii=False) + "\n")
@@ -111,14 +161,29 @@ class FaultReporter:
             return []
         events: list[dict] = []
         with self._io_lock:
-            for line in self.queue_file.read_text(encoding="utf-8").splitlines():
+            lines = [line for line in self.queue_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+            needs_rewrite = False
+            for line in lines:
                 line = line.strip()
-                if not line:
-                    continue
                 try:
-                    events.append(json.loads(line))
+                    raw_event = json.loads(line)
                 except Exception:
+                    needs_rewrite = True
                     continue
+                if not isinstance(raw_event, dict):
+                    needs_rewrite = True
+                    continue
+                event = self._sanitize_event(raw_event, queue_safe_path=True)
+                events.append(event)
+                if event != raw_event:
+                    needs_rewrite = True
+            # Upgrade old queues in place so a secret written by an older version
+            # is not left recoverable on disk after the secured version starts.
+            if needs_rewrite:
+                payload = "".join(json.dumps(event, ensure_ascii=False) + "\n" for event in events)
+                tmp_path = self.queue_file.with_name(f"{self.queue_file.name}.tmp")
+                tmp_path.write_text(payload, encoding="utf-8")
+                tmp_path.replace(self.queue_file)
         return events
 
     def _drop_first(self, count: int) -> None:
@@ -156,8 +221,9 @@ class FaultReporter:
     def _upload_one(self, event: dict) -> bool:
         """返回 True = 该事件已处理完（可出队），False = 传输失败应重试。"""
         try:
+            event = self._sanitize_event(event, queue_safe_path=False)
             fp = event["fingerprint"]
-            sn_dir = Path(event.get("sn_dir") or (self.output_root / event.get("sn", "")))
+            sn_dir = self._resolve_sn_dir(event)
             event["asset_url"] = self._upload_asset(event, sn_dir, fp)
             number = self._cached_issue(fp)
             if number is None:
@@ -180,7 +246,7 @@ class FaultReporter:
 
     def _upload_asset(self, event: dict, sn_dir: Path, fp: str) -> str | None:
         try:
-            data, _included = collector.zip_sn_dir(sn_dir)
+            data, _included = collector.zip_sn_dir(sn_dir, extra_secrets=self.secrets)
             if not data:
                 return None
             release = self.client.ensure_release(self.release_tag)
@@ -200,13 +266,14 @@ class FaultReporter:
 
     def _title(self, event: dict) -> str:
         fp = event["fingerprint"]
-        model = event.get("model") or "?"
-        stage = event.get("stage") or "测试失败"
-        short = fingerprint.normalize_signature(event.get("message", ""), max_len=80)
+        model = self._scrub(event.get("model") or "?")
+        stage = self._scrub(event.get("stage") or "测试失败")
+        message = self._scrub(event.get("message", ""))
+        short = fingerprint.normalize_signature(message, max_len=80)
         title = f"[{fp}] [其他/未分类·{model}] {stage}"
         if short:
             title += f" — {short}"
-        return title[:240]
+        return self._scrub(title)[:240]
 
     def _labels(self, event: dict) -> list[str]:
         labels = ["auto:failure", "category:other"]
@@ -217,7 +284,7 @@ class FaultReporter:
 
     def _recent_bullet(self, event: dict) -> str:
         url = event.get("asset_url")
-        link = f"[日志 zip]({url})" if url else "(无打包)"
+        link = f"[日志 zip]({self._scrub(url)})" if url else "(无打包)"
         return f"- {event.get('ts', _now_str())} — {link}"
 
     def _env_lines(self) -> list[str]:
@@ -231,10 +298,9 @@ class FaultReporter:
             "platform": platform.platform(),
             "python": platform.python_version(),
         }
-        return [f"- `{key}` = `{value}`" for key, value in info.items()]
+        return [f"- `{key}` = `{self._scrub(value)}`" for key, value in info.items()]
 
     def _body(self, event: dict, count: int, sn_dir: Path) -> str:
-        secrets = self.secrets
         ts = event.get("ts", _now_str())
         lines: list[str] = []
         lines.append(
@@ -244,14 +310,14 @@ class FaultReporter:
         lines.append(f"**累计次数**：{count}")
         lines.append(f"**首次**：{ts}")
         lines.append(f"**最近**：{ts}")
-        lines.append(f"**机型**：{event.get('model') or '?'}")
-        lines.append(f"**SN**：`{scrub_text(event.get('sn', ''), extra_secrets=secrets)}`")
-        lines.append(f"**判定阶段**：{event.get('stage') or '测试失败'}")
+        lines.append(f"**机型**：{self._scrub(event.get('model') or '?')}")
+        lines.append(f"**SN**：`{self._scrub(event.get('sn', ''))}`")
+        lines.append(f"**判定阶段**：{self._scrub(event.get('stage') or '测试失败')}")
         lines.append(f"**指纹**：`{event['fingerprint']}`")
         lines.append("")
         lines.append(f"{_META_COUNT_PREFIX}{count}{_META_COUNT_SUFFIX}")
 
-        message = scrub_text(event.get("message", ""), extra_secrets=secrets, max_len=1500)
+        message = self._scrub(event.get("message", ""), max_len=1500)
         if message:
             lines.append("\n### 错误信息\n```\n" + message + "\n```")
 
@@ -269,9 +335,8 @@ class FaultReporter:
 
         report = collector.read_test_report(sn_dir)
         if report:
-            dumped = scrub_text(
-                json.dumps(report, ensure_ascii=False, indent=2), extra_secrets=secrets, max_len=12_000
-            )
+            clean_report = scrub_data(report, extra_secrets=self.secrets)
+            dumped = self._scrub(json.dumps(clean_report, ensure_ascii=False, indent=2), max_len=12_000)
             lines.append(
                 "\n### test_report.json\n<details><summary>展开</summary>\n\n```json\n"
                 + dumped
@@ -280,17 +345,17 @@ class FaultReporter:
 
         tail = collector.read_run_log_tail(sn_dir, self.tail_lines)
         if tail:
-            scrubbed = scrub_text(tail, extra_secrets=secrets, max_len=30_000)
+            scrubbed = self._scrub(tail, max_len=30_000)
             lines.append(
                 "\n### run.log 末尾\n<details><summary>展开</summary>\n\n```\n"
                 + scrubbed
                 + "\n```\n</details>"
             )
-        return "\n".join(lines) + "\n"
+        return self._scrub("\n".join(lines) + "\n")
 
     def _bump_body(self, existing: str, event: dict) -> str:
         """重复出现：累加计数器、更新「最近」、把新记录插到「最近记录」顶部并保留 N 条。"""
-        existing = existing or ""
+        existing = self._scrub(existing or "")
         count = self._parse_count(existing) + 1
         ts = event.get("ts", _now_str())
         existing = self._replace_line(existing, "**累计次数**：", f"**累计次数**：{count}")
@@ -396,6 +461,15 @@ def get_reporter(cfg: dict, output_root: object, *, secrets: list[str] | None = 
             # 首次创建时顺手把上次进程残留的队列冲一遍
             if instance.available():
                 instance.flush_in_background()
+        else:
+            # 调用方可能在首次取单例后才拿到管理员密码等运行时秘密。缓存实例也要
+            # 持续吸收这些值，否则后续错误文本里的新秘密不会进入精确替换列表。
+            refreshed = [*(secrets or []), cfg.get("token")]
+            instance.secrets = list(
+                dict.fromkeys(
+                    [*instance.secrets, *(str(item) for item in refreshed if item)]
+                )
+            )
         return instance
 
 

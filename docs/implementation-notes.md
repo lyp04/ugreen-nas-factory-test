@@ -33,6 +33,10 @@
 
 **SMB 拷贝用 `WriteThrough` 禁止写缓存。** 输出流的 `FileOptions` 带 `WriteThrough`，否则 OS 写缓存会虚高写入速率。
 
+**达到截图速度不等于上传完成。** 写测速只有在复制进程已经正常退出、且 NAS 端文件字节数与本地源文件完全一致时才通过。进程超时或远端大小不符都会让本轮测速失败并重试，避免后续读测速建立在被强制终止的半成品文件上。
+
+**中止测速要杀整棵 Windows 进程树。** 只对外层 `Popen` 调 `kill()` 可能留下孤儿 PowerShell，继续持有已经删除的 20GiB 文件，表现为目录消失但 C 盘空间不回收。Windows 上统一用 `taskkill /PID <pid> /T /F`，随后 `communicate()` 回收父进程；失败时再退回单进程 `kill()`。
+
 ### 3. UGOS 页面自动化：选择器地狱
 
 UGOS 的前端跨固件版本变化很大，同一个功能在不同版本用不同的 HTML 结构、CSS 框架（ivu/arco）和 iframe 命名方式。代码里充满了多级 fallback：
@@ -112,7 +116,7 @@ PyInstaller `--windowed` 打包的 exe 没有控制台，但 `subprocess.run()` 
 
 **双网口机型自动选快口。** 4800Plus 这类双网口机器同一 SN 会在两个 IP 上可见，测速必须走 10G 口。`_identity_port_score()`（`src/cli.py`）按 identity 文本里的 10G/10000 关键词和 `interface=eth0` 加权，自动选分高的 IP——无需配置，也不受 `network.subnet` 影响。
 
-**SN 尾号匹配防止测错机。** 同一网段上可能有多台 NAS，用 SN 末四位匹配确保测到对的那台。浏览器存储里可能残留上一台设备的 SN，所以只在有扫码枪输入的预期 SN 尾号时才做存储抽取验证。
+**SN 尾号用于发现，完整 SN 用于破坏性操作。** 同一网段上可能有多台 NAS，扫描阶段可用 SN 末四位筛选；设备上线后必须由所选 IP 的广播响应解析出完整 SN，并与任务精确绑定，之后才允许初始化、建池、清池或恢复出厂。浏览器存储里可能残留上一台设备的 SN，因此不能把缓存值当成这道最终身份门禁。
 
 **并发测试的 IP 隔离。** GUI 并发跑多台 NAS 时，`exclude` 参数防止同一台 NAS 被两个任务同时认领。`DEVICE_LOCKS` 字典按 IP 加锁，锁获取用 `timeout=1.0` 以便在等待间隙检查取消事件，防止死锁。
 
@@ -146,10 +150,12 @@ Playwright traces 目录在每次会话开始时清空，否则会在工厂机�
 
 ### 14. 部署 / 换包：exe 旁边的 `config/` 是运行时真身
 
-冻结 exe 读的是 `<exe>/config/` 下的**磁盘文件**，不是 PyInstaller 打进包里的副本。所以手工替换 exe（不走 `build-packages.ps1` 整包重打）时，两件事必须跟着做，否则新代码带的修复不生效：
+冻结 exe 读的是 `<exe>/config/` 下的**磁盘文件**，不是 PyInstaller 打进包里的副本。分发包只带公开模板，不带真实 `config.yml`：完整包启动器首次运行时在目标机复制模板、打开记事本并退出，填写保存后才可再次启动。手工替换 exe 时，两件事必须跟着做，否则新代码带的修复不生效：
 
 - **`config/selectors.yml` 要一起换。** 2026-07 UGOS Arco 迁移时实踩：exe 换成了带新选择器的版本，但磁盘上的旧 `selectors.yml` 覆盖了它，页面照样点不到。
-- **`config/labels.yml` 要在。** 缺失时 `lookup_pn` 查不到，`print-nameplate` CLI 会**静默**用 `placeholder_pn`（默认 `000000`）出牌不报错；GUI 的自动打印路径会警告并跳过，但手工 CLI 补打没有这层保护。
+- **专有 `config/labels.yml` 要在目标机本地安装。** 它不会进入任何自动构建的包；缺失时 `lookup_pn` 查不到，`print-nameplate` CLI 会**静默**用 `placeholder_pn`（默认 `000000`）出牌不报错；GUI 的自动打印路径会警告并跳过，但手工 CLI 补打没有这层保护。
+
+**打包边界必须是白名单，不是“复制后删除”。** `build-exe.ps1` 和 release CI 的 `config/` 只允许公开模板、selectors 和无 token 的更新配置。`build-packages.ps1` 的录表模块只允许 `automation/**/*.py`、`config/forms.json`、`config/materials.json` 及两个可选依赖声明；产物生成后递归拒绝真实配置、`.env`、密钥、日志、临时/状态目录、`.git`、虚拟环境和非白名单文件。这样嵌套目录或以后新增的敏感文件不会因为漏加顶层删除规则而进入产物。
 
 ---
 
@@ -200,4 +206,4 @@ CI 会自动把 tag 名当 `versionName`、`git rev-list --count HEAD` 当 `vers
 .\.venv\Scripts\python.exe -m src.cli --help
 ```
 
-完整测试套件依赖 pywin32（打印 / 窗口控制等），只在 Windows 上能跑全；macOS/Linux 上部分用例会自动跳过或收集失败。
+窗口管理和打印路径在非 Windows 平台会安全降级，因此平台无关的完整单元测试可在 macOS/Linux 上运行；涉及真实 Win32、打印机、Edge 和冻结 exe 的验证仍必须放在 Windows 上完成。

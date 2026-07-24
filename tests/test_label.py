@@ -22,6 +22,12 @@ from src.utils.label import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _ignore_local_proprietary_label_data(monkeypatch) -> None:
+    """Keep unit tests independent of a developer's gitignored labels.yml."""
+    monkeypatch.setattr(label_util, "_CONFIG_LABEL_TABLES", {"pn": {}, "ean13": {}})
+
+
 # ---------------------------------------------------------------------------
 # build_zpl
 # ---------------------------------------------------------------------------

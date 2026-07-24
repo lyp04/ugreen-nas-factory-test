@@ -1,8 +1,8 @@
 {
   "enabled": false,
-  "owner": "lyp04",
-  "repo": "ugreen-nas-factory-test",
-  "token": "github_pat_xxx",
+  "owner": "",
+  "repo": "",
+  "token": "",
   "manifestAsset": "update.json",
   "releaseTag": ""
 }

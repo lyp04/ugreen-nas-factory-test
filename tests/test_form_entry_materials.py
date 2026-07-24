@@ -178,6 +178,144 @@ def test_toggle_material_deduction_rejects_blank_code(monkeypatch, tmp_path: Pat
     assert form_entry.toggle_material_deduction(project_root=tmp_path, model="2800", code="   ") is False
 
 
+def test_bridge_redacts_payload_and_subprocess_error_before_persistence(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    secret = "factory-admin-secret"
+    monkeypatch.setattr(form_entry, "autoupdate_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        form_entry.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [],
+            1,
+            "",
+            f'bridge failed: {{"password": "{secret}"}} Authorization: Basic abc123',
+        ),
+    )
+
+    with pytest.raises(form_entry.FormEntryError) as captured:
+        form_entry._run_autoupdate_bridge(
+            {
+                "form_data": {"sn": "SN123"},
+                "report": {"error": f"external tool echoed {secret}", "password": secret},
+            },
+            extra_secrets=(secret,),
+        )
+
+    request_files = list((tmp_path / "state" / "bridge_requests").glob("*.json"))
+    assert len(request_files) == 1
+    persisted = request_files[0].read_text(encoding="utf-8")
+    assert secret not in persisted
+    assert secret not in str(captured.value)
+    assert "abc123" not in str(captured.value)
+
+
+def test_bridge_redacts_structured_success_response(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(form_entry, "autoupdate_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        form_entry.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [],
+            0,
+            '{"status": "ok", "token": "returned-secret"}\n',
+            "",
+        ),
+    )
+
+    response = form_entry._run_autoupdate_bridge({"form_data": {"sn": "SN123"}})
+
+    assert response == {"status": "ok", "token": "<redacted>"}
+
+
+def test_bridge_success_removes_its_unchanged_request_file(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(form_entry, "autoupdate_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        form_entry.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [],
+            0,
+            '{"status": "success"}\n',
+            "",
+        ),
+    )
+
+    response = form_entry._run_autoupdate_bridge({"form_data": {"sn": "SN123"}})
+
+    assert response == {"status": "success"}
+    assert list((tmp_path / "state" / "bridge_requests").glob("*.json")) == []
+
+
+def test_bridge_success_preserves_request_replaced_by_module(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(form_entry, "autoupdate_root", lambda: tmp_path)
+
+    def replace_request(cmd, **_kwargs):
+        payload = Path(cmd[-1])
+        payload.write_text('{"replacement": true}\n', encoding="utf-8")
+        return subprocess.CompletedProcess([], 0, '{"status": "success"}\n', "")
+
+    monkeypatch.setattr(form_entry.subprocess, "run", replace_request)
+
+    response = form_entry._run_autoupdate_bridge({"form_data": {"sn": "SN123"}})
+
+    request_files = list((tmp_path / "state" / "bridge_requests").glob("*.json"))
+    assert response == {"status": "success"}
+    assert len(request_files) == 1
+    assert request_files[0].read_text(encoding="utf-8") == '{"replacement": true}\n'
+
+
+def test_refresh_redacts_structured_response(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(form_entry, "autoupdate_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        form_entry.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [],
+            0,
+            '{"status": "success", "token": "returned-secret"}\n',
+            "",
+        ),
+    )
+
+    response = form_entry.refresh_form_materials(tmp_path)
+
+    assert response == {"status": "success", "token": "<redacted>"}
+
+
+def test_login_ui_redacts_subprocess_error(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(form_entry, "autoupdate_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        form_entry.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [],
+            1,
+            "",
+            "Authorization: Bearer returned-secret",
+        ),
+    )
+
+    with pytest.raises(form_entry.FormEntryError) as captured:
+        form_entry.run_login_ui(tmp_path)
+
+    assert "returned-secret" not in str(captured.value)
+
+
+def test_refresh_empty_stdout_is_contract_error(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(form_entry, "autoupdate_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        form_entry.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, "", ""),
+    )
+
+    with pytest.raises(form_entry.FormEntryError, match="不可解析"):
+        form_entry.refresh_form_materials(tmp_path)
+
+
 # ---------------------------------------------------------------------------
 # sync_autoupdate_repo: never raise, no-op gracefully when preconditions fail.
 # ---------------------------------------------------------------------------

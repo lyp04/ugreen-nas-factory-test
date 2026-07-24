@@ -1,14 +1,75 @@
 from __future__ import annotations
 
+import base64
+import ctypes
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from ctypes import wintypes
+
 from .logger import logger
 
 
 TEN_GIB = 10 * 1024 * 1024 * 1024
+JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
+
+
+class _JobObjectBasicLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_longlong),
+        ("PerJobUserTimeLimit", ctypes.c_longlong),
+        ("LimitFlags", wintypes.DWORD),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", wintypes.DWORD),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", wintypes.DWORD),
+        ("SchedulingClass", wintypes.DWORD),
+    ]
+
+
+class _IoCounters(ctypes.Structure):
+    _fields_ = [
+        ("ReadOperationCount", ctypes.c_ulonglong),
+        ("WriteOperationCount", ctypes.c_ulonglong),
+        ("OtherOperationCount", ctypes.c_ulonglong),
+        ("ReadTransferCount", ctypes.c_ulonglong),
+        ("WriteTransferCount", ctypes.c_ulonglong),
+        ("OtherTransferCount", ctypes.c_ulonglong),
+    ]
+
+
+class _JobObjectExtendedLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", _JobObjectBasicLimitInformation),
+        ("IoInfo", _IoCounters),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+if sys.platform.startswith("win"):
+    _KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _KERNEL32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    _KERNEL32.CreateJobObjectW.restype = wintypes.HANDLE
+    _KERNEL32.SetInformationJobObject.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    _KERNEL32.SetInformationJobObject.restype = wintypes.BOOL
+    _KERNEL32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    _KERNEL32.AssignProcessToJobObject.restype = wintypes.BOOL
+    _KERNEL32.CloseHandle.argtypes = [wintypes.HANDLE]
+    _KERNEL32.CloseHandle.restype = wintypes.BOOL
+else:
+    _KERNEL32 = None
 
 
 class SmbTransferError(RuntimeError):
@@ -68,17 +129,19 @@ def build_prepare_sparse_file_script(cfg: SmbTransferConfig) -> str:
 
 
 def build_mount_script(cfg: SmbTransferConfig) -> str:
+    drive = _ps_literal(f"{cfg.drive_letter}:")
+    share = _ps_literal(cfg.unc_share)
     if cfg.username:
-        password = _cmd_quote(cfg.password or "")
+        password = _ps_literal(cfg.password or "")
+        user = _ps_literal(f"/user:{cfg.username}")
         return (
-            f"net use {cfg.drive_letter}: {_cmd_quote(cfg.unc_share)} "
-            f"{password} /user:{_cmd_quote(cfg.username)} /persistent:no"
+            f"& net.exe use {drive} {share} {password} {user} '/persistent:no'"
         )
-    return f"net use {cfg.drive_letter}: {_cmd_quote(cfg.unc_share)} /persistent:no"
+    return f"& net.exe use {drive} {share} '/persistent:no'"
 
 
 def build_unmount_script(cfg: SmbTransferConfig) -> str:
-    return f"net use {cfg.drive_letter}: /delete /y"
+    return f"& net.exe use {_ps_literal(f'{cfg.drive_letter}:')} '/delete' '/y'"
 
 
 def build_upload_script(cfg: SmbTransferConfig) -> str:
@@ -114,12 +177,13 @@ def build_remote_cleanup_script(cfg: SmbTransferConfig) -> str:
 
 
 def run_powershell(script: str, timeout_s: int = 3600) -> subprocess.CompletedProcess[str]:
-    logger.info(f"Running PowerShell script: {script}")
+    logger.info(f"Running PowerShell step ({len(script)} characters)")
     try:
         return subprocess.run(
-            _powershell_command(script),
+            _powershell_command(),
             check=True,
             capture_output=True,
+            input=_encoded_script(script),
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -134,9 +198,10 @@ def run_powershell(script: str, timeout_s: int = 3600) -> subprocess.CompletedPr
 
 
 def start_powershell(script: str) -> subprocess.Popen[str]:
-    logger.info(f"Starting PowerShell script: {script}")
-    return subprocess.Popen(
-        _powershell_command(script),
+    logger.info(f"Starting PowerShell step ({len(script)} characters)")
+    proc = subprocess.Popen(
+        _powershell_command(),
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -144,20 +209,126 @@ def start_powershell(script: str) -> subprocess.Popen[str]:
         errors="replace",
         **_hidden_process_kwargs(),
     )
+    try:
+        _attach_kill_on_close_job(proc)
+        if proc.stdin is None:
+            raise OSError("PowerShell stdin pipe was not created")
+        proc.stdin.write(_encoded_script(script))
+        proc.stdin.close()
+        # communicate() otherwise tries to flush the already-closed stream.
+        proc.stdin = None
+    except (BrokenPipeError, OSError) as exc:
+        terminate_powershell(proc)
+        raise SmbTransferError(f"Could not send script to PowerShell: {exc}") from exc
+    return proc
 
 
 def wait_powershell(proc: subprocess.Popen[str], timeout_s: int = 3600) -> subprocess.CompletedProcess[str]:
     try:
         stdout, stderr = proc.communicate(timeout=timeout_s)
     except subprocess.TimeoutExpired as exc:
-        proc.kill()
-        proc.communicate()
+        terminate_powershell(proc)
         raise SmbTransferError(f"PowerShell timed out after {timeout_s}s") from exc
 
+    _close_kill_on_close_job(proc)
     if proc.returncode != 0:
         raise SmbTransferError((stderr or "").strip() or f"PowerShell failed with exit code {proc.returncode}")
 
     return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
+
+
+def terminate_powershell(proc: subprocess.Popen[str], timeout_s: int = 10) -> None:
+    """Terminate the whole Windows transfer process tree and reap the parent.
+
+    A killed launcher can otherwise leave an orphan PowerShell copy process holding
+    a multi-gigabyte deleted file open. The attached Job Object is preferred;
+    ``taskkill /T`` is the compatibility fallback scoped to the exact child PID.
+    """
+    # Closing a KILL_ON_JOB_CLOSE job is the only reliable way to cover both
+    # normal cancellation and abrupt termination of the Python/GUI parent. The
+    # taskkill fallback keeps compatibility with test doubles and older hosts
+    # where the process was launched before job attachment was available.
+    tree_kill_attempted = _close_kill_on_close_job(proc)
+    pid = getattr(proc, "pid", None)
+    if not tree_kill_attempted and sys.platform.startswith("win") and isinstance(pid, int) and pid > 0:
+        try:
+            result = subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=max(1, int(timeout_s)),
+                **_hidden_process_kwargs(),
+            )
+            tree_kill_attempted = result.returncode == 0
+        except Exception:
+            tree_kill_attempted = False
+
+    if not tree_kill_attempted:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    try:
+        proc.communicate(timeout=max(1, int(timeout_s)))
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        try:
+            proc.communicate(timeout=1)
+        except Exception:
+            pass
+
+
+def _attach_kill_on_close_job(proc: subprocess.Popen[str]) -> None:
+    """Put a transfer PowerShell in a Windows job owned by this process.
+
+    The script is sent only after this succeeds, so a failed assignment cannot
+    leave an uncontained copy operation running. Windows closes our job handle
+    on a hard crash and terminates PowerShell plus all of its descendants.
+    """
+    if not sys.platform.startswith("win"):
+        return
+    if _KERNEL32 is None:
+        raise OSError("Windows Job Object API is unavailable")
+
+    process_handle = getattr(proc, "_handle", None)
+    if process_handle is None:
+        raise OSError("PowerShell process handle is unavailable")
+
+    job = _KERNEL32.CreateJobObjectW(None, None)
+    if not job:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        limits = _JobObjectExtendedLimitInformation()
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not _KERNEL32.SetInformationJobObject(
+            job,
+            JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+            ctypes.byref(limits),
+            ctypes.sizeof(limits),
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if not _KERNEL32.AssignProcessToJobObject(job, wintypes.HANDLE(process_handle)):
+            raise ctypes.WinError(ctypes.get_last_error())
+    except Exception:
+        _KERNEL32.CloseHandle(job)
+        raise
+
+    setattr(proc, "_ugreen_kill_job", job)
+
+
+def _close_kill_on_close_job(proc: subprocess.Popen[str]) -> bool:
+    job = getattr(proc, "_ugreen_kill_job", None)
+    if not job or _KERNEL32 is None:
+        return False
+    setattr(proc, "_ugreen_kill_job", None)
+    try:
+        return bool(_KERNEL32.CloseHandle(job))
+    except Exception:
+        return False
 
 
 def _build_chunked_copy_script(src: str, dst: str, progress_file: Path) -> str:
@@ -197,12 +368,19 @@ def _ps_quote(value: str) -> str:
     return value.replace("'", "''")
 
 
-def _cmd_quote(value: str) -> str:
-    escaped = value.replace('"', '""')
-    return f'"{escaped}"'
+def _ps_literal(value: str) -> str:
+    return f"'{_ps_quote(value)}'"
 
 
-def _powershell_command(script: str) -> list[str]:
+def _encoded_script(script: str) -> str:
+    # stdin contains only ASCII, so Windows PowerShell 5.1 does not depend on the
+    # console code page when paths contain Chinese characters. Keeping the script
+    # off the command line also prevents SMB credentials from appearing in process
+    # listings and diagnostic logs.
+    return base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+
+
+def _powershell_command() -> list[str]:
     return [
         "powershell",
         "-NoProfile",
@@ -212,7 +390,13 @@ def _powershell_command(script: str) -> list[str]:
         "-WindowStyle",
         "Hidden",
         "-Command",
-        script,
+        (
+            "$ErrorActionPreference = 'Stop'; "
+            "$encoded = [Console]::In.ReadToEnd(); "
+            "$script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded)); "
+            "& ([ScriptBlock]::Create($script)); "
+            "if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }"
+        ),
     ]
 
 

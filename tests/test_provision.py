@@ -1,6 +1,33 @@
 from src.flows import provision
 
 
+def test_existing_pool_log_does_not_emit_raw_dom_summary_or_password(monkeypatch) -> None:
+    secret = "factory-password-must-not-be-logged"
+    messages: list[str] = []
+    monkeypatch.setattr(provision, "_open_app", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(provision, "_navigate", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        provision,
+        "_find_matching_pool_summary_text",
+        lambda *_args, **_kwargs: f"存储池1 RAID 0 password {secret}",
+    )
+    monkeypatch.setattr(provision.logger, "info", messages.append)
+
+    provision._ensure_pool(
+        object(),
+        {},
+        {},
+        {},
+        {"pool_name": "存储池1", "disks": ["硬盘1"], "raid": "RAID 0"},
+        {"password": secret},
+        None,
+        "4800Plus",
+    )
+
+    assert messages == ["Provisioning: storage pool already present for 存储池1"]
+    assert all(secret not in message for message in messages)
+
+
 def test_filemgr_frame_candidates_include_proapp_names_and_src() -> None:
     candidates = provision._frame_selector_candidates('iframe[name="filemgr0"]', "filemgr")
 

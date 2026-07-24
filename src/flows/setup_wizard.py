@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from playwright.sync_api import TimeoutError as PWTimeoutError
 from playwright.sync_api import expect
 
+from . import login as login_flow
 from ..utils.desktop import dismiss_desktop_overlays, find_visible_locator
 from ..utils.logger import logger
 from ..utils.sn import extract_full_sn, is_auto_sn_placeholder, sn_tail
@@ -137,7 +138,7 @@ def run(page: "Page", nas_url: str, admin: dict, selectors: dict, sn: str = "") 
     if state == "login":
         raise SetupAlreadyRegistered("Device is already initialized")
     if state == "loading":
-        _wait_for_desktop(page, nas_url, selectors)
+        _wait_for_desktop(page, nas_url, admin, selectors)
         _dismiss_post_setup_overlays_best_effort(page, post)
         logger.info("Setup wizard complete; desktop reached")
         return discovered_sn or _extract_full_sn_from_page(page, sn)
@@ -151,7 +152,7 @@ def run(page: "Page", nas_url: str, admin: dict, selectors: dict, sn: str = "") 
         _page2_admin_account(page, sw, admin)
     _page3_skip_phone(page, sw)
     _page4_update_mode_and_init(page, sw)
-    _wait_for_desktop(page, nas_url, selectors)
+    _wait_for_desktop(page, nas_url, admin, selectors)
     _dismiss_post_setup_overlays_best_effort(page, post)
     logger.info("Setup wizard complete; desktop reached")
     return discovered_sn or _extract_full_sn_from_page(page, sn)
@@ -419,14 +420,23 @@ def _page4_update_mode_and_init(page: "Page", sw: dict) -> None:
     logger.info("  system init started; waiting for reboot + desktop...")
 
 
-def _wait_for_desktop(page: "Page", nas_url: str, selectors: dict) -> None:
+def _wait_for_desktop(page: "Page", nas_url: str, admin: dict, selectors: dict) -> None:
     logger.info(f"  waiting up to {INIT_MAX_WAIT_MS // 1000}s for desktop")
     deadline = time.monotonic() + (INIT_MAX_WAIT_MS / 1000)
     next_reload = time.monotonic() + 15
+    login_password_selector = (selectors.get("login", {}) or {}).get("password_input")
 
     while time.monotonic() < deadline:
         if _is_desktop_visible(page, selectors):
             logger.info("  desktop ready")
+            return
+        if login_password_selector and _is_visible(page, login_password_selector):
+            # UGOS 1.17 invalidates the setup-wizard browser session after the
+            # initialization reboot and returns to the login page. Waiting only
+            # for a desktop launcher would otherwise stall for the full 15 min.
+            logger.info("  login page shown after initialization; logging in with the new admin account")
+            login_flow.run(page, nas_url, admin, selectors)
+            logger.info("  desktop ready after post-initialization login")
             return
         if time.monotonic() >= next_reload and not _is_loading_page(page):
             try:

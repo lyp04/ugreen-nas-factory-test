@@ -10,6 +10,7 @@ import pytest
 
 from src.updater import (
     DEFAULT_MANIFEST_ASSET,
+    _SWAP_SCRIPT,
     UpdateInfo,
     UpdateManager,
     _Config,
@@ -18,6 +19,9 @@ from src.updater import (
     format_version,
 )
 from src.version import PACKAGE_NAME, VERSION_CODE, VERSION_NAME
+
+
+VALID_SHA = "0" * 64
 
 
 def _make_manager(tmp_path: Path) -> UpdateManager:
@@ -112,7 +116,7 @@ def test_validate_download_rejects_mismatched_sha(tmp_path: Path) -> None:
         notes="",
         exe_asset="exe.bin",
         exe_url="https://example.invalid/exe.bin",
-        sha256="deadbeef",
+        sha256=VALID_SHA,
     )
     with pytest.raises(RuntimeError, match="SHA-256"):
         mgr._validate_download(info, target)
@@ -133,6 +137,31 @@ def test_validate_download_rejects_empty_file(tmp_path: Path) -> None:
     )
     with pytest.raises(RuntimeError, match="空"):
         mgr._validate_download(info, target)
+
+
+def test_validate_download_requires_full_sha256(tmp_path: Path) -> None:
+    mgr = _make_manager(tmp_path)
+    target = tmp_path / "exe.bin"
+    target.write_bytes(b"payload")
+    info = UpdateInfo(
+        config=_Config(True, "o", "r", "t", DEFAULT_MANIFEST_ASSET, ""),
+        version_code=VERSION_CODE + 1,
+        version_name="x",
+        notes="",
+        exe_asset="exe.bin",
+        exe_url="https://example.invalid/exe.bin",
+        sha256="",
+    )
+
+    with pytest.raises(RuntimeError, match="SHA-256"):
+        mgr._validate_download(info, target)
+
+
+def test_swap_script_restores_original_when_new_move_fails() -> None:
+    assert '$backupPath = $OldPath + ".update-backup"' in _SWAP_SCRIPT
+    assert "[System.IO.File]::Move($OldPath, $backupPath)" in _SWAP_SCRIPT
+    assert "[System.IO.File]::Move($backupPath, $OldPath)" in _SWAP_SCRIPT
+    assert _SWAP_SCRIPT.index("Move($OldPath, $backupPath)") < _SWAP_SCRIPT.index("Move($NewPath, $OldPath)")
 
 
 def test_state_round_trip(tmp_path: Path) -> None:
@@ -177,7 +206,7 @@ def test_find_update_treats_same_code_higher_name_as_newer(tmp_path: Path, monke
         "versionCode": 33,
         "versionName": "0.1.13",
         "exeAsset": "UGREEN-NAS-Test.exe",
-        "sha256": "deadbeef",
+        "sha256": VALID_SHA,
     }
     release = {"assets": [
         {"name": "update.json", "url": "https://api.github.com/manifest"},
@@ -194,6 +223,35 @@ def test_find_update_treats_same_code_higher_name_as_newer(tmp_path: Path, monke
     assert info.version_code == 33
 
 
+@pytest.mark.parametrize("sha256", ["", "deadbeef", "g" * 64])
+def test_find_update_rejects_missing_or_invalid_sha256(tmp_path: Path, monkeypatch, sha256: str) -> None:
+    mgr = _make_manager(tmp_path)
+    manifest = {
+        "packageName": PACKAGE_NAME,
+        "versionCode": VERSION_CODE + 1,
+        "versionName": "999.0.0",
+        "exeAsset": "UGREEN-NAS-Test.exe",
+        "sha256": sha256,
+    }
+    release = {
+        "assets": [
+            {"name": "update.json", "url": "https://api.github.com/manifest"},
+            {"name": "UGREEN-NAS-Test.exe", "url": "https://api.github.com/exe"},
+        ]
+    }
+    _install_fake_opener(
+        mgr,
+        monkeypatch,
+        [
+            {"body": json.dumps(release).encode("utf-8")},
+            {"body": json.dumps(manifest).encode("utf-8")},
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="SHA-256"):
+        mgr._find_update(_Config(True, "o", "r", "t", DEFAULT_MANIFEST_ASSET, ""))
+
+
 def test_find_update_skips_when_remote_name_not_newer(tmp_path: Path, monkeypatch) -> None:
     mgr = _make_manager(tmp_path)
     monkeypatch.setattr("src.updater.VERSION_CODE", 33)
@@ -203,7 +261,7 @@ def test_find_update_skips_when_remote_name_not_newer(tmp_path: Path, monkeypatc
         "versionCode": 33,
         "versionName": "0.1.13",
         "exeAsset": "UGREEN-NAS-Test.exe",
-        "sha256": "deadbeef",
+        "sha256": VALID_SHA,
     }
     release = {"assets": [
         {"name": "update.json", "url": "https://api.github.com/manifest"},
